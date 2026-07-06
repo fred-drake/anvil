@@ -1,41 +1,370 @@
-/**
- * pi-anvil - starter pi coding agent extension.
- *
- * Load during development with:
- *   pi -e ./src/index.ts
- *
- * Or let pi discover it from this repository's .pi/extensions/ wrapper.
- */
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { Type } from "@earendil-works/pi-ai";
-import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { defineTool, type ExtensionAPI, type ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import { resolveSubagentConfig } from "./config.ts";
+import { discoverWorkflows, type DiscoveredWorkflow } from "./discovery.ts";
+import { type EngineHost, runWorkflow } from "./engine.ts";
+import { VerdictBus } from "./gates.ts";
+import { renderSummaryMarkdown } from "./ui.ts";
 
-const anvilEchoTool = defineTool({
-  name: "anvil_echo",
-  label: "Anvil Echo",
-  description: "Echo a message back from the pi-anvil extension scaffold.",
-  parameters: Type.Object({
-    message: Type.String({ description: "Message to echo back." }),
-  }),
+const baseDir = dirname(fileURLToPath(import.meta.url));
+const builderSkillPath = join(baseDir, "..", "skills", "anvil-workflow-builder", "SKILL.md");
 
-  async execute(_toolCallId, params) {
-    return {
-      content: [{ type: "text", text: `pi-anvil says: ${params.message}` }],
-      details: { message: params.message },
-    };
-  },
+type ActiveRun = {
+	controller: AbortController;
+	runId: string;
+};
+
+type TurnWaiter = {
+	started: boolean;
+	resolve: () => void;
+	reject: (error: Error) => void;
+	timer: NodeJS.Timeout;
+	signal?: AbortSignal;
+	onAbort?: () => void;
+};
+
+const verdictBus = new VerdictBus();
+const turnWaiters = new Set<TurnWaiter>();
+
+const anvilVerdictTool = defineTool({
+	name: "anvil_verdict",
+	label: "Anvil Verdict",
+	description: "Report the pass/fail verdict for an active pi-anvil agent check.",
+	parameters: Type.Object({
+		check_id: Type.String({ description: "The exact check_id provided by Anvil." }),
+		pass: Type.Boolean({ description: "Whether the check passed." }),
+		reason: Type.String({ description: "Concise reason for the verdict." }),
+	}),
+
+	async execute(_toolCallId, params) {
+		const matched = verdictBus.reportVerdict(params.check_id, params.pass, params.reason);
+		return {
+			content: [
+				{
+					type: "text" as const,
+					text: matched
+						? `Anvil verdict recorded for ${params.check_id}.`
+						: `No active Anvil check is waiting for ${params.check_id}; the verdict was ignored.`,
+				},
+			],
+			details: { matched, check_id: params.check_id, pass: params.pass, reason: params.reason },
+		};
+	},
 });
 
 export default function piAnvil(pi: ExtensionAPI) {
-  pi.registerTool(anvilEchoTool);
+	let activeRun: ActiveRun | undefined;
 
-  pi.registerCommand("anvil", {
-    description: "Show that the pi-anvil extension is loaded.",
-    handler: async (_args, ctx) => {
-      ctx.ui.notify("pi-anvil extension is loaded", "info");
-    },
-  });
+	pi.registerTool(anvilVerdictTool);
 
-  pi.on("session_start", async (_event, ctx) => {
-    ctx.ui.notify("pi-anvil extension loaded", "info");
-  });
+	pi.registerMessageRenderer("anvil-summary", () => undefined);
+
+	pi.on("resources_discover", () => ({ skillPaths: [builderSkillPath] }));
+
+	pi.on("agent_start", () => {
+		for (const waiter of turnWaiters) waiter.started = true;
+	});
+
+	pi.on("agent_end", () => {
+		for (const waiter of [...turnWaiters]) resolveTurnWaiter(waiter);
+	});
+
+	pi.on("session_shutdown", (_event, ctx) => {
+		activeRun?.controller.abort();
+		activeRun = undefined;
+		verdictBus.clear();
+		ctx.ui.setStatus("anvil", undefined);
+		ctx.ui.setWidget("anvil-steps", undefined);
+	});
+
+	pi.registerCommand("anvil", {
+		description: "Run and manage declarative Anvil workflows.",
+		getArgumentCompletions: async (argumentPrefix) => getAnvilCompletions(argumentPrefix, process.cwd()),
+		handler: async (args, ctx) => {
+			const { subcommand, rest } = parseAnvilArgs(args);
+			try {
+				switch (subcommand) {
+					case "list":
+						await handleList(pi, ctx);
+						return;
+					case "validate":
+						await handleValidate(pi, ctx, rest);
+						return;
+					case "config":
+						await resolveSubagentConfig({ pi, ctx, cwd: ctx.cwd, forcePicker: true });
+						return;
+					case "abort":
+						if (!activeRun) {
+							ctx.ui.notify("No Anvil workflow is running.", "info");
+							return;
+						}
+						activeRun.controller.abort();
+						if (!ctx.isIdle()) ctx.abort();
+						ctx.ui.notify(`Aborting Anvil run ${activeRun.runId}.`, "warning");
+						return;
+					case "run":
+						await handleRun(pi, ctx, rest, () => activeRun, (run) => {
+							activeRun = run;
+						});
+						return;
+					default:
+						ctx.ui.notify("Usage: /anvil <run|list|validate|abort|config> ...", "warning");
+				}
+			} catch (error) {
+				ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
+			}
+		},
+	});
+
+	async function handleRun(
+		piApi: ExtensionAPI,
+		ctx: ExtensionCommandContext,
+		rest: string,
+		getActiveRun: () => ActiveRun | undefined,
+		setActiveRun: (run: ActiveRun | undefined) => void,
+	): Promise<void> {
+		if (getActiveRun()) {
+			ctx.ui.notify("An Anvil workflow is already running in this session.", "error");
+			return;
+		}
+
+		const { name, input } = parseRunArgs(rest);
+		if (!name) {
+			ctx.ui.notify("Usage: /anvil run <workflow-name> <task input>", "warning");
+			return;
+		}
+
+		const workflow = await findWorkflow(ctx.cwd, name);
+		if (!workflow) {
+			ctx.ui.notify(`Workflow "${name}" was not found.`, "error");
+			return;
+		}
+		if (workflow.errors?.length || !workflow.workflow) {
+			postCommandMessage(piApi, "anvil-validate", formatWorkflowErrors(workflow));
+			return;
+		}
+
+		if (!ctx.isIdle()) await ctx.waitForIdle();
+
+		const subagent = await resolveSubagentConfig({ pi: piApi, ctx, cwd: ctx.cwd });
+		if (subagent.kind === "none") {
+			ctx.ui.notify("Anvil will run workflow steps in the main agent for this run.", "warning");
+		}
+
+		const controller = new AbortController();
+		const runId = newRunId();
+		const host = createEngineHost(piApi, ctx, controller);
+		setActiveRun({ controller, runId });
+		ctx.ui.notify(`Started Anvil workflow "${workflow.workflow.name}" (${runId}).`, "info");
+
+		void runWorkflow({
+			workflow: workflow.workflow,
+			input,
+			cwd: ctx.cwd,
+			host,
+			runId,
+			signal: controller.signal,
+			subagent: subagent.kind === "tool" ? subagent.config : undefined,
+		})
+			.catch((error) => {
+				ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
+			})
+			.finally(() => {
+				if (getActiveRun()?.runId === runId) setActiveRun(undefined);
+			});
+	}
+}
+
+function createEngineHost(pi: ExtensionAPI, ctx: ExtensionCommandContext, controller: AbortController): EngineHost {
+	let pendingTurn: Promise<void> | undefined;
+	return {
+		sendInstruction(instruction) {
+			pendingTurn = waitForTurnCompletion(ctx, controller.signal);
+			pi.sendUserMessage(instruction);
+		},
+		async waitForTurnComplete(signal) {
+			const wait = pendingTurn ?? waitForTurnCompletion(ctx, signal);
+			pendingTurn = undefined;
+			await wait;
+		},
+		exec(command, args, options) {
+			return pi.exec(command, args, {
+				cwd: options?.cwd,
+				timeout: options?.timeout,
+				signal: options?.signal,
+			});
+		},
+		awaitVerdict(checkId, timeoutMs, signal) {
+			return verdictBus.awaitVerdict(checkId, timeoutMs, signal);
+		},
+		checkpoint(entry) {
+			pi.appendEntry("anvil-run", entry);
+		},
+		notify(message, type) {
+			ctx.ui.notify(message, type);
+		},
+		setStatus(text) {
+			ctx.ui.setStatus("anvil", text);
+		},
+		setWidget(lines) {
+			ctx.ui.setWidget("anvil-steps", lines);
+		},
+		postSummary(summary) {
+			pi.sendMessage(
+				{
+					customType: "anvil-summary",
+					content: renderSummaryMarkdown(summary),
+					display: true,
+					details: summary,
+				},
+				{ triggerTurn: false },
+			);
+		},
+	};
+}
+
+async function handleList(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise<void> {
+	const workflows = await discoverWorkflows({ cwd: ctx.cwd });
+	if (workflows.length === 0) {
+		ctx.ui.notify("No Anvil workflows found in ~/.pi/agent/anvil/workflows or .pi/anvil/workflows.", "info");
+		return;
+	}
+	postCommandMessage(pi, "anvil-list", formatWorkflowList(workflows));
+}
+
+async function handleValidate(pi: ExtensionAPI, ctx: ExtensionCommandContext, rest: string): Promise<void> {
+	const name = rest.trim();
+	if (!name) {
+		ctx.ui.notify("Usage: /anvil validate <workflow-name>", "warning");
+		return;
+	}
+	const workflow = await findWorkflow(ctx.cwd, name);
+	if (!workflow) {
+		ctx.ui.notify(`Workflow "${name}" was not found.`, "error");
+		return;
+	}
+	postCommandMessage(
+		pi,
+		"anvil-validate",
+		workflow.errors?.length ? formatWorkflowErrors(workflow) : `✅ Workflow \`${workflow.name}\` is valid.\n\n${workflow.file}`,
+	);
+}
+
+async function findWorkflow(cwd: string, name: string): Promise<DiscoveredWorkflow | undefined> {
+	const workflows = await discoverWorkflows({ cwd });
+	return workflows.find((workflow) => workflow.name === name);
+}
+
+function postCommandMessage(pi: ExtensionAPI, customType: string, content: string): void {
+	pi.sendMessage({ customType, content, display: true }, { triggerTurn: false });
+}
+
+async function getAnvilCompletions(argumentPrefix: string, cwd: string) {
+	const subcommands = ["run", "list", "validate", "abort", "config"];
+	const trimmedStart = argumentPrefix.trimStart();
+	const parts = trimmedStart.split(/\s+/);
+	if (parts.length <= 1 && !trimmedStart.endsWith(" ")) {
+		return subcommands
+			.filter((cmd) => cmd.startsWith(parts[0] ?? ""))
+			.map((label) => ({ value: label, label }));
+	}
+
+	const subcommand = parts[0];
+	if ((subcommand === "run" || subcommand === "validate") && parts.length <= 2) {
+		const prefix = parts[1] ?? "";
+		const workflows = await discoverWorkflows({ cwd });
+		return workflows
+			.filter((workflow) => workflow.name.startsWith(prefix))
+			.map((workflow) => ({
+				value: workflow.name,
+				label: workflow.name,
+				description: workflow.errors?.length ? "invalid" : workflow.source,
+			}));
+	}
+	return null;
+}
+
+function parseAnvilArgs(args: string): { subcommand: string; rest: string } {
+	const trimmed = args.trim();
+	if (!trimmed) return { subcommand: "list", rest: "" };
+	const match = /^(\S+)(?:\s+([\s\S]*))?$/.exec(trimmed);
+	return { subcommand: match?.[1] ?? "list", rest: match?.[2] ?? "" };
+}
+
+function parseRunArgs(rest: string): { name: string; input: string } {
+	const match = /^(\S+)(?:\s+([\s\S]*))?$/.exec(rest.trim());
+	return { name: match?.[1] ?? "", input: match?.[2] ?? "" };
+}
+
+function formatWorkflowList(workflows: DiscoveredWorkflow[]): string {
+	const lines = ["# Anvil workflows", ""];
+	for (const workflow of workflows) {
+		const icon = workflow.errors?.length ? "❌" : "✅";
+		const description = workflow.workflow?.description ? ` — ${workflow.workflow.description}` : "";
+		lines.push(`${icon} \`${workflow.name}\` (${workflow.source})${description}`);
+		if (workflow.errors?.length) {
+			for (const error of workflow.errors) lines.push(`   - ${error}`);
+		}
+	}
+	return lines.join("\n");
+}
+
+function formatWorkflowErrors(workflow: DiscoveredWorkflow): string {
+	return [
+		`❌ Workflow \`${workflow.name}\` is invalid.`,
+		"",
+		workflow.file,
+		"",
+		...(workflow.errors ?? ["unknown error"]).map((error) => `- ${error}`),
+	].join("\n");
+}
+
+function waitForTurnCompletion(ctx: ExtensionCommandContext, signal?: AbortSignal): Promise<void> {
+	return waitForOneTurnOrIdle(ctx, signal).then(async () => {
+		await ctx.waitForIdle();
+		while (ctx.hasPendingMessages()) {
+			await waitForOneTurnOrIdle(ctx, signal);
+			await ctx.waitForIdle();
+		}
+	});
+}
+
+function waitForOneTurnOrIdle(ctx: ExtensionCommandContext, signal?: AbortSignal): Promise<void> {
+	if (signal?.aborted) return Promise.reject(new Error("Anvil run aborted"));
+	return new Promise<void>((resolve, reject) => {
+		const waiter: TurnWaiter = {
+			started: false,
+			resolve: () => resolve(),
+			reject,
+			timer: setTimeout(() => {
+				if (!waiter.started && ctx.isIdle()) resolveTurnWaiter(waiter);
+			}, 2_000),
+			signal,
+		};
+		waiter.onAbort = () => rejectTurnWaiter(waiter, new Error("Anvil run aborted"));
+		if (signal) signal.addEventListener("abort", waiter.onAbort, { once: true });
+		turnWaiters.add(waiter);
+	});
+}
+
+function resolveTurnWaiter(waiter: TurnWaiter): void {
+	cleanupTurnWaiter(waiter);
+	waiter.resolve();
+}
+
+function rejectTurnWaiter(waiter: TurnWaiter, error: Error): void {
+	cleanupTurnWaiter(waiter);
+	waiter.reject(error);
+}
+
+function cleanupTurnWaiter(waiter: TurnWaiter): void {
+	clearTimeout(waiter.timer);
+	if (waiter.signal && waiter.onAbort) waiter.signal.removeEventListener("abort", waiter.onAbort);
+	turnWaiters.delete(waiter);
+}
+
+function newRunId(): string {
+	return `anvil-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
