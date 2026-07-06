@@ -7,17 +7,27 @@ description: Use when the user wants to create or edit an automated multi-step w
 
 Help the user author a declarative pi-anvil workflow. Interview them first, then write a workflow file and validate it.
 
+## Storage policy
+
+Anvil workflows must be stored only in Anvil's workflow directories:
+
+- User scope: `~/.pi/agent/anvil/workflows/<name>.ts`
+- Project scope: `.pi/anvil/workflows/<name>.ts`
+
+Do not write Anvil workflows to Pi's generic workflow locations such as `.pi/workflows/saved/` or `~/.pi/workflows/saved/`; those belong to other workflow implementations and may conflict.
+
 ## Interview flow
 
 1. Choose a workflow name (`[a-z0-9-]+`) and a one-sentence goal.
-2. Ask whether the workflow should live at user scope (`~/.pi/agent/anvil/workflows/`) or project scope (`.pi/anvil/workflows/`).
+2. Ask whether the workflow should live at user scope (`~/.pi/agent/anvil/workflows/<name>.ts`) or project scope (`.pi/anvil/workflows/<name>.ts`).
 3. For each step, capture:
    - `id` (stable kebab-case identifier)
    - purpose / prompt
    - subagent name (`agent`) or `runInMain: true`
-4. For each step, ask whether it needs checks:
-   - deterministic checks: bash command, optional timeout/cwd
-   - agent checks: natural-language criteria and optional evaluation subagent
+4. For each step, ask whether it needs at least one gating check. Gating checks are recommended but not required; if a step has no check, explicitly ask the user to confirm or clarify.
+   - Explain that checks may be deterministic or non-deterministic.
+   - Deterministic checks: a repeatable command or script, optional timeout/cwd. If the user wants a deterministic check but no command exists, offer to write a script they can run.
+   - Non-deterministic checks: natural-language criteria judged by an agent, optional evaluation subagent.
 5. For failures, choose `stop`, `continue`, or `{ goto, maxLoops, onExhausted, feedback }`.
 6. Confirm a concise summary before writing the file.
 
@@ -66,7 +76,7 @@ export default {
 
 ## Finish
 
-Write the file to the chosen workflows directory, run `/anvil validate <name>`, fix any errors, and tell the user the invocation:
+Write the file to the chosen Anvil workflow path (`~/.pi/agent/anvil/workflows/<name>.ts` or `.pi/anvil/workflows/<name>.ts`), run `/anvil validate <name>`, fix any errors, and tell the user the invocation:
 
 ```text
 /anvil run <name> <task input>
