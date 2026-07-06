@@ -1,0 +1,78 @@
+export interface WorkflowContext {
+	/** Free-form text from `/anvil run <name> ...`. */
+	input: string;
+	step: { id: string; index: number };
+	/** "<checkId>-><stepId>" -> count. */
+	loopCounts: Record<string, number>;
+	cwd: string;
+}
+
+export type Templatable = string | ((ctx: WorkflowContext) => string | Promise<string>);
+
+export type OnFailPolicy =
+	| "stop"
+	| "continue"
+	| {
+			goto: string;
+			/** Defaults to workflow.defaults.maxLoops ?? 3. */
+			maxLoops?: number;
+			/** Defaults to "stop". */
+			onExhausted?: "stop" | "continue";
+			/** Defaults to true. */
+			feedback?: boolean;
+	  };
+
+export interface DeterministicCheck {
+	type: "deterministic";
+	id?: string;
+	name?: string;
+	/** Executed with `bash -c`; exit code 0 means pass. */
+	command: Templatable;
+	cwd?: string;
+	/** Defaults to 300_000. */
+	timeoutMs?: number;
+	onFail?: OnFailPolicy;
+}
+
+export interface AgentCheck {
+	type: "agent";
+	id?: string;
+	name?: string;
+	/** Evaluation criteria; anvil wraps this with verdict instructions. */
+	prompt: Templatable;
+	/** Subagent to delegate evaluation to; omit for main-agent evaluation. */
+	agent?: string;
+	onFail?: OnFailPolicy;
+}
+
+export type Check = DeterministicCheck | AgentCheck;
+
+export interface WorkflowStep {
+	id: string;
+	title?: string;
+	prompt: Templatable;
+	/** Defaults to workflow.defaults.agent. */
+	agent?: string;
+	/** Main agent does the work itself. */
+	runInMain?: boolean;
+	skipIf?: (ctx: WorkflowContext) => boolean | Promise<boolean>;
+	checks?: Check[];
+	/** Default for this step's checks. */
+	onFail?: OnFailPolicy;
+}
+
+export interface WorkflowDefinition {
+	/** Must match /^[a-z0-9-]+$/. */
+	name: string;
+	description?: string;
+	defaults?: {
+		agent?: string;
+		onFail?: OnFailPolicy;
+		maxLoops?: number;
+	};
+	steps: WorkflowStep[];
+}
+
+export function defineWorkflow(def: WorkflowDefinition): WorkflowDefinition {
+	return def;
+}
