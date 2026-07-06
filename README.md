@@ -1,35 +1,57 @@
 # pi-anvil
 
-A starter TypeScript extension for the pi coding agent.
+A Pi extension that runs declarative TypeScript workflows with deterministic and agent-judged gates.
 
-## Prerequisites
+Workflows live in:
 
-- Nix with flakes enabled
-- direnv (recommended) with the shell hook installed
+- User: `~/.pi/agent/anvil/workflows/*.ts` (also `.js`/`.mjs`)
+- Project: `.pi/anvil/workflows/*.ts` (project workflows win on name collisions)
 
 ## Develop
 
 ```bash
 cd pi-anvil
-direnv allow      # automatically enters the Nix dev shell
-npm install       # installs pi packages and TypeScript
+npm install
 npm run typecheck
-npm run dev       # equivalent to: pi -e ./src/index.ts
+npm test
+npm run dev       # pi -e ./src/index.ts
 ```
 
-The Nix shell provides Node.js, npm, git, and direnv. It also adds `node_modules/.bin` to `PATH` so the local `pi` and `tsc` binaries are available after `npm install`.
+## Commands
 
-## Extension entrypoints
+```text
+/anvil list
+/anvil validate <name>
+/anvil config
+/anvil run <name> <free-form task input>
+/anvil abort
+```
 
-- Main source: [`src/index.ts`](src/index.ts)
-- Package metadata entrypoint: `package.json` → `pi.extensions`
-- Project-local auto-discovery wrapper: [`.pi/extensions/pi-anvil.ts`](.pi/extensions/pi-anvil.ts)
+`/anvil run` delegates steps through the configured subagent tool when available. If no subagent tool is configured, Anvil auto-detects a tool named `subagent`, asks you to pick one, or can run all steps in the main agent.
 
-When running `pi` from this repository, pi can discover the wrapper under `.pi/extensions/`. After editing the extension, use `/reload` in pi.
+## Workflow example
 
-## What is included
+```ts
+import { defineWorkflow } from "pi-anvil";
 
-- `anvil_echo` custom tool
-- `/anvil` custom command
-- `session_start` notification hook
-- `flake.nix`, `shell.nix`, and `.envrc` for Nix + direnv development
+export default defineWorkflow({
+	name: "demo",
+	defaults: { agent: "implementer", maxLoops: 2 },
+	steps: [
+		{
+			id: "implement",
+			prompt: "Implement this request: {input}",
+			checks: [
+				{
+					type: "deterministic",
+					id: "tests",
+					command: "npm test",
+					onFail: { goto: "implement", maxLoops: 2 },
+				},
+			],
+		},
+	],
+});
+```
+
+See `examples/workflows/demo.ts` and the `anvil-workflow-builder` skill for authoring guidance.
