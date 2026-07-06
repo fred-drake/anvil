@@ -1,0 +1,17 @@
+# Dependencies
+node_modules/
+
+# Nix/direnv
+.direnv/
+result
+result-*
+
+# Build outputs
+coverage/
+dist/
+*.tsbuildinfo
+
+# Local secrets/config
+.env
+.env.*
+!.envrc
