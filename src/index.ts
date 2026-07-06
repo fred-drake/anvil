@@ -91,9 +91,6 @@ export default function piAnvil(pi: ExtensionAPI) {
 					case "validate":
 						await handleValidate(pi, ctx, rest);
 						return;
-					case "config":
-						handleConfig(pi);
-						return;
 					case "abort":
 						if (!activeRun) {
 							ctx.ui.notify("No Anvil workflow is running.", "info");
@@ -109,7 +106,7 @@ export default function piAnvil(pi: ExtensionAPI) {
 						});
 						return;
 					default:
-						ctx.ui.notify("Usage: /anvil <run|list|validate|abort|config> ...", "warning");
+						ctx.ui.notify("Usage: /anvil <run|list|validate|abort> ...", "warning");
 				}
 			} catch (error) {
 				ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
@@ -245,26 +242,6 @@ async function handleValidate(pi: ExtensionAPI, ctx: ExtensionCommandContext, re
 	);
 }
 
-function handleConfig(pi: ExtensionAPI): void {
-	postCommandMessage(
-		pi,
-		"anvil-config",
-		[
-			"# Anvil delegation configuration",
-			"",
-			"Anvil no longer chooses a global Pi tool for subagent delegation. Configure delegation in each workflow instead:",
-			"",
-			"```ts",
-			"defaults: { delegation: { skill: \"implementer\" } } // prefer a specific skill",
-			"defaults: { delegation: \"auto\" }                 // let the agent choose",
-			"defaults: { delegation: \"none\" }                 // never delegate",
-			"```",
-			"",
-			"A step can override the workflow default with its own `delegation`, and `runInMain: true` is still supported as a per-step no-delegation override.",
-		].join("\n"),
-	);
-}
-
 async function findWorkflow(cwd: string, name: string): Promise<DiscoveredWorkflow | undefined> {
 	const workflows = await discoverWorkflows({ cwd });
 	return workflows.find((workflow) => workflow.name === name);
@@ -275,7 +252,7 @@ function postCommandMessage(pi: ExtensionAPI, customType: string, content: strin
 }
 
 async function getAnvilCompletions(argumentPrefix: string, cwd: string) {
-	const subcommands = ["run", "list", "validate", "abort", "config"];
+	const subcommands = ["run", "list", "validate", "abort"];
 	const trimmedStart = argumentPrefix.trimStart();
 	const parts = trimmedStart.split(/\s+/);
 	if (parts.length <= 1 && !trimmedStart.endsWith(" ")) {

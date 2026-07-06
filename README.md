@@ -22,7 +22,6 @@ npm run dev       # pi -e ./src/index.ts
 ```text
 /anvil list
 /anvil validate <name>
-/anvil config
 /anvil run <name> <free-form task input>
 /anvil abort
 ```
