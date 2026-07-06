@@ -22,6 +22,14 @@ export type OnFailPolicy =
 			feedback?: boolean;
 	  };
 
+export type WorkflowDelegation =
+	| "auto"
+	| "none"
+	| {
+			/** Pi skill name to prefer when delegating this workflow/step. */
+			skill: string;
+	  };
+
 export interface DeterministicCheck {
 	type: "deterministic";
 	id?: string;
@@ -51,7 +59,9 @@ export interface WorkflowStep {
 	id: string;
 	title?: string;
 	prompt: Templatable;
-	/** Defaults to workflow.defaults.agent. */
+	/** Preferred per-step delegation mode; overrides workflow.defaults.delegation. */
+	delegation?: WorkflowDelegation;
+	/** Legacy delegation hint. Prefer delegation: { skill: "..." } or delegation: "auto". */
 	agent?: string;
 	/** Main agent does the work itself. */
 	runInMain?: boolean;
@@ -66,6 +76,9 @@ export interface WorkflowDefinition {
 	name: string;
 	description?: string;
 	defaults?: {
+		/** Preferred workflow-wide delegation mode; defaults to no delegation. */
+		delegation?: WorkflowDelegation;
+		/** Legacy delegation hint. Prefer delegation: { skill: "..." } or delegation: "auto". */
 		agent?: string;
 		onFail?: OnFailPolicy;
 		maxLoops?: number;

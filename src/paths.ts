@@ -1,6 +1,5 @@
-import { mkdir } from "node:fs/promises";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { join, resolve } from "node:path";
 
 export interface AnvilPathOptions {
 	cwd?: string;
@@ -8,11 +7,6 @@ export interface AnvilPathOptions {
 }
 
 export interface WorkflowDirs {
-	user: string;
-	project: string;
-}
-
-export interface ConfigPaths {
 	user: string;
 	project: string;
 }
@@ -38,15 +32,4 @@ export function getWorkflowDirs(options: AnvilPathOptions = {}): WorkflowDirs {
 		user: join(getUserAnvilDir(options), "workflows"),
 		project: join(getProjectAnvilDir(options), "workflows"),
 	};
-}
-
-export function getConfigPaths(options: AnvilPathOptions = {}): ConfigPaths {
-	return {
-		user: join(getUserAnvilDir(options), "config.json"),
-		project: join(getProjectAnvilDir(options), "config.json"),
-	};
-}
-
-export async function ensureParentDir(file: string): Promise<void> {
-	await mkdir(dirname(file), { recursive: true });
 }

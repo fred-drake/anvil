@@ -20,16 +20,17 @@ Do not write Anvil workflows to Pi's generic workflow locations such as `.pi/wor
 
 1. Choose a workflow name (`[a-z0-9-]+`) and a one-sentence goal.
 2. Ask whether the workflow should live at user scope (`~/.pi/agent/anvil/workflows/<name>.ts`) or project scope (`.pi/anvil/workflows/<name>.ts`).
-3. For each step, capture:
+3. Decide workflow delegation defaults: `delegation: { skill: "<skill-name>" }` to prefer a specific skill, `delegation: "auto"` to let the agent choose, or `delegation: "none"` to avoid subagents.
+4. For each step, capture:
    - `id` (stable kebab-case identifier)
    - purpose / prompt
-   - subagent name (`agent`) or `runInMain: true`
-4. For each step, ask whether it needs at least one gating check. Gating checks are recommended but not required; if a step has no check, explicitly ask the user to confirm or clarify.
+   - optional per-step `delegation` override or `runInMain: true`
+5. For each step, ask whether it needs at least one gating check. Gating checks are recommended but not required; if a step has no check, explicitly ask the user to confirm or clarify.
    - Explain that checks may be deterministic or non-deterministic.
    - Deterministic checks: a repeatable command or script, optional timeout/cwd. If the user wants a deterministic check but no command exists, offer to write a script they can run.
    - Non-deterministic checks: natural-language criteria judged by an agent, optional evaluation subagent.
-5. For failures, choose `stop`, `continue`, or `{ goto, maxLoops, onExhausted, feedback }`.
-6. Confirm a concise summary before writing the file.
+6. For failures, choose `stop`, `continue`, or `{ goto, maxLoops, onExhausted, feedback }`.
+7. Confirm a concise summary before writing the file.
 
 ## Template
 
@@ -42,7 +43,7 @@ export default defineWorkflow({
 	name: "example-workflow",
 	description: "Short description.",
 	defaults: {
-		agent: "implementer",
+		delegation: { skill: "implementer" },
 		onFail: "stop",
 		maxLoops: 3,
 	},

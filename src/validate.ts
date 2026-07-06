@@ -64,6 +64,9 @@ function validateDefaults(defaults: unknown, errors: string[]): void {
 		errors.push("workflow.defaults must be an object when provided");
 		return;
 	}
+	if (defaults.delegation !== undefined) {
+		validateDelegation(defaults.delegation, "workflow.defaults.delegation", errors);
+	}
 	if (defaults.agent !== undefined && typeof defaults.agent !== "string") {
 		errors.push("workflow.defaults.agent must be a string when provided");
 	}
@@ -90,6 +93,9 @@ function validateStep(step: unknown, index: number, stepIds: Set<string>, errors
 	}
 	if (!isTemplatable(step.prompt)) {
 		errors.push(`${path}.prompt must be a string or function`);
+	}
+	if (step.delegation !== undefined) {
+		validateDelegation(step.delegation, `${path}.delegation`, errors);
 	}
 	if (step.agent !== undefined && typeof step.agent !== "string") {
 		errors.push(`${path}.agent must be a string when provided`);
@@ -162,6 +168,17 @@ function validateAgentCheck(check: Record<string, unknown>, path: string, errors
 	}
 	if (check.agent !== undefined && typeof check.agent !== "string") {
 		errors.push(`${path}.agent must be a string when provided`);
+	}
+}
+
+function validateDelegation(delegation: unknown, path: string, errors: string[]): void {
+	if (delegation === "auto" || delegation === "none") return;
+	if (!isRecord(delegation)) {
+		errors.push(`${path} must be "auto", "none", or an object with a skill string`);
+		return;
+	}
+	if (typeof delegation.skill !== "string" || delegation.skill.length === 0) {
+		errors.push(`${path}.skill must be a non-empty string`);
 	}
 }
 

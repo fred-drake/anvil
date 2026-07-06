@@ -27,7 +27,15 @@ npm run dev       # pi -e ./src/index.ts
 /anvil abort
 ```
 
-`/anvil run` delegates steps through the configured subagent tool when available. If no subagent tool is configured, Anvil auto-detects a tool named `subagent`, asks you to pick one, or can run all steps in the main agent.
+`/anvil run` uses each workflow's delegation settings. Anvil does not configure a global subagent tool; use `delegation` in the workflow to prefer a skill, let the agent decide, or disable delegation.
+
+```ts
+defaults: { delegation: { skill: "implementer" } } // prefer a specific skill
+defaults: { delegation: "auto" }                 // let the agent decide
+defaults: { delegation: "none" }                 // never delegate
+```
+
+Steps can override the workflow default with their own `delegation`, and `runInMain: true` still forces a step to run in the main agent.
 
 ## Workflow example
 
@@ -36,7 +44,7 @@ import { defineWorkflow } from "pi-anvil";
 
 export default defineWorkflow({
 	name: "demo",
-	defaults: { agent: "implementer", maxLoops: 2 },
+	defaults: { delegation: { skill: "implementer" }, maxLoops: 2 },
 	steps: [
 		{
 			id: "implement",

@@ -175,6 +175,51 @@ describe("runWorkflow", () => {
 		expect(host.instructions).toHaveLength(1);
 	});
 
+	it("uses workflow-level skill delegation without naming a delegation tool", async () => {
+		const host = new FakeHost();
+		const summary = await runWorkflow({
+			workflow: { ...workflow([{ id: "one", prompt: "Do {input}" }]), defaults: { delegation: { skill: "implementer" } } },
+			input: "task",
+			cwd: "/tmp",
+			host,
+			runId: "run",
+		});
+
+		expect(summary.state).toBe("succeeded");
+		expect(host.instructions[0]).toContain('using skill "implementer"');
+		expect(host.instructions[0]).not.toContain("anvil_verdict");
+		expect(host.instructions[0]).not.toContain("subagent tool");
+	});
+
+	it("allows steps to opt out of workflow-level delegation", async () => {
+		const host = new FakeHost();
+		await runWorkflow({
+			workflow: {
+				...workflow([{ id: "one", prompt: "Do {input}", delegation: "none" }]),
+				defaults: { delegation: { skill: "implementer" } },
+			},
+			input: "task",
+			cwd: "/tmp",
+			host,
+			runId: "run",
+		});
+
+		expect(host.instructions[0]).toContain("Do not delegate to a subagent");
+	});
+
+	it("uses legacy agent fields as auto-delegation hints", async () => {
+		const host = new FakeHost();
+		await runWorkflow({
+			workflow: { ...workflow([{ id: "one", prompt: "Do {input}" }]), defaults: { agent: "implementer" } },
+			input: "task",
+			cwd: "/tmp",
+			host,
+			runId: "run",
+		});
+
+		expect(host.instructions[0]).toContain('Prefer agent/skill "implementer"');
+	});
+
 	it("returns an aborted summary when aborted mid-step", async () => {
 		const host = new FakeHost();
 		const controller = new AbortController();

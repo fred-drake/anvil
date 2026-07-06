@@ -1,5 +1,4 @@
-import type { SubagentToolConfig } from "./config.ts";
-import type { AgentCheck, WorkflowContext, WorkflowDefinition, WorkflowStep, Templatable } from "./types.ts";
+import type { AgentCheck, WorkflowContext, WorkflowDefinition, WorkflowStep, Templatable, WorkflowDelegation } from "./types.ts";
 
 export interface StepInstructionOptions {
 	workflow: WorkflowDefinition;
@@ -8,7 +7,6 @@ export interface StepInstructionOptions {
 	stepIndex: number;
 	stepCount: number;
 	feedback?: string;
-	subagent?: SubagentToolConfig;
 }
 
 export async function renderTemplatable(template: Templatable, ctx: WorkflowContext): Promise<string> {
@@ -26,17 +24,26 @@ export async function buildStepInstruction(options: StepInstructionOptions): Pro
 	const title = options.step.title ?? options.step.id;
 	const header = `[anvil] Workflow "${options.workflow.name}" — step ${options.stepIndex + 1}/${options.stepCount}: ${title}`;
 
-	if (options.subagent) {
-		const agent = options.step.agent ?? options.workflow.defaults?.agent ?? "default";
-		const delegated = renderInstructionTemplate(options.subagent.instructionTemplate, {
-			tool: options.subagent.toolName,
-			agent,
-			task,
-		});
-		return `${header}\n\n${delegated}\n\nDo not do the work yourself; delegate through the configured tool.`;
+	const delegation = resolveStepDelegation(options.workflow, options.step);
+	if (delegation.mode === "skill") {
+		return (
+			`${header}\n\n` +
+			`Delegate this workflow step to a subagent using skill "${delegation.skill}" if a delegation capability is available. ` +
+			`If no delegation capability is available, do the work directly in the main agent using that skill.\n\n` +
+			`Task:\n${task}`
+		);
+	}
+	if (delegation.mode === "auto") {
+		const hint = delegation.hint ? ` Prefer agent/skill "${delegation.hint}" if appropriate.` : "";
+		return (
+			`${header}\n\n` +
+			`Choose whether to use a subagent for this workflow step.${hint} ` +
+			`If a suitable delegation capability is available, delegate to the best agent or skill; otherwise do the work directly in the main agent.\n\n` +
+			`Task:\n${task}`
+		);
 	}
 
-	return `${header}\n\nDo this workflow step directly in the main agent.\n\n${task}`;
+	return `${header}\n\nDo this workflow step directly in the main agent. Do not delegate to a subagent.\n\n${task}`;
 }
 
 export async function buildAgentCheckInstruction(args: {
@@ -69,14 +76,27 @@ export function appendFeedback(prompt: string, feedback?: string): string {
 	return `${prompt}\n\n## Feedback from failed check\n${feedback.trim()}`;
 }
 
-export function renderInstructionTemplate(
-	template: string,
-	values: { tool: string; agent: string; task: string },
-): string {
-	return template
-		.replaceAll("{tool}", values.tool)
-		.replaceAll("{agent}", values.agent)
-		.replaceAll("{task}", values.task);
+export type ResolvedStepDelegation =
+	| { mode: "none" }
+	| { mode: "auto"; hint?: string }
+	| { mode: "skill"; skill: string };
+
+export function resolveStepDelegation(workflow: WorkflowDefinition, step: WorkflowStep): ResolvedStepDelegation {
+	if (step.runInMain) return { mode: "none" };
+
+	const configured = step.delegation ?? workflow.defaults?.delegation;
+	const resolved = resolveConfiguredDelegation(configured);
+	if (resolved) return resolved;
+
+	const legacyHint = step.agent ?? workflow.defaults?.agent;
+	return legacyHint ? { mode: "auto", hint: legacyHint } : { mode: "none" };
+}
+
+function resolveConfiguredDelegation(delegation: WorkflowDelegation | undefined): ResolvedStepDelegation | undefined {
+	if (!delegation) return undefined;
+	if (delegation === "auto") return { mode: "auto" };
+	if (delegation === "none") return { mode: "none" };
+	return { mode: "skill", skill: delegation.skill };
 }
 
 export function getCurrentLoopCount(ctx: WorkflowContext): number {

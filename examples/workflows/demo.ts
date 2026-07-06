@@ -4,7 +4,7 @@ export default defineWorkflow({
 	name: "demo",
 	description: "Create or update a file, then verify its contents with a retry loop.",
 	defaults: {
-		agent: "implementer",
+		delegation: { skill: "implementer" },
 		maxLoops: 2,
 	},
 	steps: [

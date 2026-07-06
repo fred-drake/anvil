@@ -1,4 +1,3 @@
-import type { SubagentToolConfig } from "./config.ts";
 import { executeAgentCheck, executeDeterministicCheck, type GateResult, type Verdict } from "./gates.ts";
 import { buildStepInstruction } from "./prompts.ts";
 import type { Check, OnFailPolicy, WorkflowContext, WorkflowDefinition, WorkflowStep } from "./types.ts";
@@ -34,7 +33,6 @@ export interface RunWorkflowOptions {
 	input: string;
 	cwd: string;
 	host: EngineHost;
-	subagent?: SubagentToolConfig;
 	runId?: string;
 	signal?: AbortSignal;
 }
@@ -166,7 +164,6 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<RunSumma
 				stepIndex,
 				stepCount: options.workflow.steps.length,
 				feedback: feedbackByStep.get(step.id),
-				subagent: step.runInMain ? undefined : options.subagent,
 			});
 			feedbackByStep.delete(step.id);
 

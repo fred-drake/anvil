@@ -2,7 +2,6 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Type } from "@earendil-works/pi-ai";
 import { defineTool, type ExtensionAPI, type ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
-import { resolveSubagentConfig } from "./config.ts";
 import { discoverWorkflows, type DiscoveredWorkflow } from "./discovery.ts";
 import { type EngineHost, runWorkflow } from "./engine.ts";
 import { VerdictBus } from "./gates.ts";
@@ -93,7 +92,7 @@ export default function piAnvil(pi: ExtensionAPI) {
 						await handleValidate(pi, ctx, rest);
 						return;
 					case "config":
-						await resolveSubagentConfig({ pi, ctx, cwd: ctx.cwd, forcePicker: true });
+						handleConfig(pi);
 						return;
 					case "abort":
 						if (!activeRun) {
@@ -148,11 +147,6 @@ export default function piAnvil(pi: ExtensionAPI) {
 
 		if (!ctx.isIdle()) await ctx.waitForIdle();
 
-		const subagent = await resolveSubagentConfig({ pi: piApi, ctx, cwd: ctx.cwd });
-		if (subagent.kind === "none") {
-			ctx.ui.notify("Anvil will run workflow steps in the main agent for this run.", "warning");
-		}
-
 		const controller = new AbortController();
 		const runId = newRunId();
 		const host = createEngineHost(piApi, ctx, controller);
@@ -166,7 +160,6 @@ export default function piAnvil(pi: ExtensionAPI) {
 			host,
 			runId,
 			signal: controller.signal,
-			subagent: subagent.kind === "tool" ? subagent.config : undefined,
 		})
 			.catch((error) => {
 				ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
@@ -249,6 +242,26 @@ async function handleValidate(pi: ExtensionAPI, ctx: ExtensionCommandContext, re
 		pi,
 		"anvil-validate",
 		workflow.errors?.length ? formatWorkflowErrors(workflow) : `✅ Workflow \`${workflow.name}\` is valid.\n\n${workflow.file}`,
+	);
+}
+
+function handleConfig(pi: ExtensionAPI): void {
+	postCommandMessage(
+		pi,
+		"anvil-config",
+		[
+			"# Anvil delegation configuration",
+			"",
+			"Anvil no longer chooses a global Pi tool for subagent delegation. Configure delegation in each workflow instead:",
+			"",
+			"```ts",
+			"defaults: { delegation: { skill: \"implementer\" } } // prefer a specific skill",
+			"defaults: { delegation: \"auto\" }                 // let the agent choose",
+			"defaults: { delegation: \"none\" }                 // never delegate",
+			"```",
+			"",
+			"A step can override the workflow default with its own `delegation`, and `runInMain: true` is still supported as a per-step no-delegation override.",
+		].join("\n"),
 	);
 }
 

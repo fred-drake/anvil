@@ -52,4 +52,26 @@ describe("validateWorkflow", () => {
 		expect(result.ok).toBe(false);
 		if (!result.ok) expect(result.errors).toContain("workflow.name must match /^[a-z0-9-]+$/");
 	});
+
+	it("accepts workflow and step delegation settings", () => {
+		const workflow = {
+			name: "delegation",
+			defaults: { delegation: { skill: "implementer" } },
+			steps: [{ id: "one", prompt: "a", delegation: "auto" }],
+		};
+		expect(validateWorkflow(workflow)).toEqual({ ok: true, workflow });
+	});
+
+	it("rejects malformed delegation settings", () => {
+		const result = validateWorkflow({
+			name: "bad-delegation",
+			defaults: { delegation: "subagent" },
+			steps: [{ id: "one", prompt: "a", delegation: { skill: "" } }],
+		});
+		expect(result.ok).toBe(false);
+		if (!result.ok) {
+			expect(result.errors).toContain('workflow.defaults.delegation must be "auto", "none", or an object with a skill string');
+			expect(result.errors).toContain("workflow.steps[0].delegation.skill must be a non-empty string");
+		}
+	});
 });
