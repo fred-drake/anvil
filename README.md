@@ -1,21 +1,31 @@
-# pi-anvil
+# Anvil
+
+<p align="center">
+  <img src="assets/pi-anvil-logo.png" alt="pi-anvil logo" width="160">
+</p>
 
 A Pi extension that runs declarative TypeScript workflows with deterministic and agent-judged gates.
+
+Anvil is for those Pi tasks where you keep thinking, “I want the agent to do this the same way every time, but I also want it to use judgment when a script cannot tell the whole story.” You can chain steps together, gate each step with hard pass/fail checks or agent-reviewed thumbs-up/thumbs-down checks, and keep the process moving without babysitting every turn.
+
+## Features at a glance
+
+- Build the workflow in your own words and Anvil will worry about how to properly build it.
+- For each workflow step, set any number of gating checks that must pass. Checks can be deterministic, like a script or executable that returns exit code `0`, or non-deterministic, where a subagent evaluates the result and gives a 👍 or 👎 based on what it thinks should happen.
+- Define subagent behavior based on how you have configured Pi. cmux compatibility comes out of the box, you can choose a custom skill that you wrote for handling subagent processing, or no subagent at all if you wish.
+- Optionally define the number of times a step has to be retried before bailing.
+- Optionally define a different model and thinking level for each step.
+
+## Build workflows by talking to Pi
+
+The intended way to create a workflow is to describe what you want in plain language and let the agent shape it into something Anvil can run. This extension includes an `anvil-workflow-builder` skill that guides that conversation, asks for missing details when it needs them, and handles the workflow structure for you.
+
+Although it follows a typescript schema under the hood, the intention is to say what the workflow should do in your own words. If Anvil needs exact commands, gating behavior, model choices, or delegation preferences, it will ask.
 
 Workflows live in:
 
 - User: `~/.pi/agent/anvil/workflows/*.ts` (also `.js`/`.mjs`)
 - Project: `.pi/anvil/workflows/*.ts` (project workflows win on name collisions)
-
-## Develop
-
-```bash
-cd pi-anvil
-npm install
-npm run typecheck
-npm test
-npm run dev       # pi -e ./src/index.ts
-```
 
 ## Commands
 
@@ -26,83 +36,33 @@ npm run dev       # pi -e ./src/index.ts
 /anvil abort
 ```
 
-`/anvil run` uses each workflow's delegation settings. Anvil does not configure a global subagent tool; use `delegation` in the workflow to spawn a real subagent, prefer a skill, let the agent decide, or disable delegation.
-
-```ts
-defaults: { delegation: { subagent: "cmux" } }   // Anvil spawns each step in a cmux subagent
-defaults: { delegation: { skill: "implementer" } } // prefer a specific skill (prompt hint)
-defaults: { delegation: "auto" }                 // let the agent decide (prompt hint)
-defaults: { delegation: "none" }                 // never delegate
-```
-
-Steps can override the workflow default with their own `delegation`, and `runInMain: true` still forces a step to run in the main agent.
+Use `/anvil list` to see available workflows, `/anvil validate` to check that one is ready, and `/anvil run` to start a workflow with whatever task input you want to give it.
 
 ## Declarative cmux subagents
 
-`delegation: { skill }` and `delegation: "auto"` are advisory: they inject prose into the step prompt and the main agent decides whether to delegate. `delegation: { subagent: "cmux" }` is declarative: the Anvil engine itself spawns the step in a dedicated pi session inside a [cmux](https://github.com/manaflow-ai/cmux) surface, waits for it to finish, and reports its final message back into the main session as the step's outcome. The main agent never chooses.
+Each workflow step can decide how much help it wants from another agent:
 
-Requirements and behavior:
+- Run as a declarative cmux subagent.
+- Prefer a specific skill for the subagent to use.
+- Let the agent decide at runtime whether delegation makes sense.
+- Do no delegation and keep the step in the main session.
 
-- Start pi inside cmux (`cmux pi`). `/anvil run` refuses to start a workflow that declares `{ subagent: "cmux" }` when cmux is unavailable.
-- The subagent runs in the project cwd with a fresh session; the first subagent opens a right split, later ones stack as tabs in the same pane. Session, task, and launch files live under an owner-only `<tmpdir>/pi-anvil/<runId>/` directory for debugging.
-- Subagent execution times out after 1,800,000ms by default. Set `subagentTimeoutMs` on a step or workflow defaults to override it.
-- Per-step `model` / `thinkingLevel` are passed to the child session (`pi --model ... --thinking ...`) instead of switching the main session's model.
-- The subagent's final assistant message is injected into the main session's context (no extra turn), so agent checks and later steps can build on it. Check loops still work: `onFail: { goto }` feedback is appended to the next subagent's task.
-- A subagent that exits with an error (or a nonzero exit code) fails the run with that reason.
-- Checks always run from the main session: deterministic checks via bash, agent checks via the main agent and `anvil_verdict`.
+For non-trivial work, sending the step into a subagent is strongly encouraged. It keeps the main session cleaner and gives that step room to focus. But it is your workflow, your rules: use cmux when you want a visibly delegated Pi session that works out of the box, use a skill when you have a custom way of doing the work, use auto when you trust the agent to choose, or turn delegation off entirely.
 
-```ts
-export default defineWorkflow({
-	name: "forge",
-	defaults: { delegation: { subagent: "cmux" } },
-	steps: [
-		{ id: "implement", model: "openai-codex/gpt-5.5:high", prompt: "Implement: {input}" },
-		{ id: "summarize", runInMain: true, prompt: "Summarize what was changed." },
-	],
-});
-```
+If a workflow uses cmux subagents, start Pi inside cmux with `cmux pi so Anvil has somewhere to launch them.
 
-## Per-step model selection
-
-A step may declare a model and/or thinking level. Omitted values are reset to the model and thinking level that were active when the workflow started, so a previous step's model selection does not leak into later defaulted steps or after the run ends.
-
-Pi's model shorthand uses a colon suffix for thinking levels: `provider/model:thinking` (for example, `openai-codex/gpt-5.5:high`). The slash form `provider/model/thinking` is not Pi's thinking-level syntax.
-
-```ts
-steps: [
-	{ id: "quick-plan", model: "openai-codex/gpt-5.5:low", prompt: "Plan: {input}" },
-	{ id: "deep-implement", model: "openai-codex/gpt-5.5", thinkingLevel: "high", prompt: "Implement: {input}" },
-	{ id: "summarize", prompt: "Summarize the result" }, // uses workflow-start defaults
-]
-```
-
-Supported thinking levels are `off`, `minimal`, `low`, `medium`, `high`, and `xhigh`.
-
-## Workflow example
-
-```ts
-import { defineWorkflow } from "pi-anvil";
-
-export default defineWorkflow({
-	name: "demo",
-	defaults: { delegation: { skill: "implementer" }, maxLoops: 2 },
-	steps: [
-		{
-			id: "implement",
-			prompt: "Implement this request: {input}",
-			checks: [
-				{
-					type: "deterministic",
-					id: "tests",
-					command: "npm test",
-					onFail: { goto: "implement", maxLoops: 2 },
-				},
-			],
-		},
-	],
-});
-```
-
-For string deterministic commands, `{input}` and `{loop}` placeholders are rendered as quoted shell-variable expansions before Anvil runs `bash -c`, so they remain safe even inside existing single or double quotes. Function commands are treated as fully-rendered command strings and must quote any context values they interpolate.
+Checks still guard the workflow either way: deterministic checks run commands, while agent-judged checks ask for a clear pass/fail verdict before the workflow moves on.
 
 See `examples/workflows/demo.ts` and the `anvil-workflow-builder` skill for authoring guidance.
+
+## Develop
+
+If you use nix, a nix dev environment is included with everything you need for development.
+
+```bash
+cd pi-anvil
+npm install
+npm run typecheck
+npm test
+npm run dev       # pi -e ./src/index.ts
+```
