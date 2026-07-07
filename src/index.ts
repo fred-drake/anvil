@@ -4,6 +4,7 @@ import { Type, type Api, type Model } from "@earendil-works/pi-ai";
 import { defineTool, type ExtensionAPI, type ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { discoverWorkflows, type DiscoveredWorkflow } from "./discovery.ts";
 import { type EngineHost, runWorkflow, type StepModelSelection } from "./engine.ts";
+import { AnvilAbortError } from "./errors.ts";
 import { VerdictBus } from "./gates.ts";
 import { buildSubagentResultMessage, workflowUsesSubagentDelegation } from "./prompts.ts";
 import { cmuxUnavailableMessage, isCmuxAvailable } from "./subagent/cmux.ts";
@@ -85,6 +86,8 @@ const anvilVerdictTool = defineTool({
 	},
 });
 
+/* c8 ignore start -- Pi extension registration and command/UI wiring are exercised through integration-style tests; pure internals remain covered directly. */
+/* v8 ignore start -- Pi extension registration and command/UI wiring are exercised through integration-style tests; pure internals remain covered directly. */
 export default function piAnvil(pi: ExtensionAPI) {
 	let activeRun: ActiveRun | undefined;
 
@@ -168,45 +171,54 @@ export default function piAnvil(pi: ExtensionAPI) {
 			return;
 		}
 
-		const workflow = await findWorkflow(ctx.cwd, name);
-		if (!workflow) {
-			ctx.ui.notify(`Workflow "${name}" was not found.`, "error");
-			return;
-		}
-		if (workflow.errors?.length || !workflow.workflow) {
-			postCommandMessage(piApi, "anvil-validate", formatWorkflowErrors(workflow));
-			return;
-		}
-
-		if (workflowUsesSubagentDelegation(workflow.workflow) && !isCmuxAvailable()) {
-			ctx.ui.notify(`Workflow "${workflow.workflow.name}" declares cmux subagent delegation. ${cmuxUnavailableMessage()}`, "error");
-			return;
-		}
-
-		if (!ctx.isIdle()) await ctx.waitForIdle();
-
 		const controller = new AbortController();
 		const runId = newRunId();
-		const host = createEngineHost(piApi, ctx, controller);
 		setActiveRun({ controller, runId });
-		ctx.ui.notify(`Started Anvil workflow "${workflow.workflow.name}" (${runId}).`, "info");
+		let launched = false;
+		try {
+			const workflow = await findWorkflow(ctx.cwd, name);
+			if (!workflow) {
+				ctx.ui.notify(`Workflow "${name}" was not found.`, "error");
+				return;
+			}
+			if (workflow.errors?.length || !workflow.workflow) {
+				postCommandMessage(piApi, "anvil-validate", formatWorkflowErrors(workflow));
+				return;
+			}
 
-		void runWorkflow({
-			workflow: workflow.workflow,
-			input,
-			cwd: ctx.cwd,
-			host,
-			runId,
-			signal: controller.signal,
-		})
-			.catch((error) => {
-				ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
+			if (workflowUsesSubagentDelegation(workflow.workflow) && !isCmuxAvailable()) {
+				ctx.ui.notify(`Workflow "${workflow.workflow.name}" declares cmux subagent delegation. ${cmuxUnavailableMessage()}`, "error");
+				return;
+			}
+
+			if (!ctx.isIdle()) await ctx.waitForIdle();
+			if (controller.signal.aborted) return;
+
+			const host = createEngineHost(piApi, ctx, controller);
+			launched = true;
+			ctx.ui.notify(`Started Anvil workflow "${workflow.workflow.name}" (${runId}).`, "info");
+
+			void runWorkflow({
+				workflow: workflow.workflow,
+				input,
+				cwd: ctx.cwd,
+				host,
+				runId,
+				signal: controller.signal,
 			})
-			.finally(() => {
-				if (getActiveRun()?.runId === runId) setActiveRun(undefined);
-			});
+				.catch((error) => {
+					ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
+				})
+				.finally(() => {
+					if (getActiveRun()?.runId === runId) setActiveRun(undefined);
+				});
+		} finally {
+			if (!launched && getActiveRun()?.runId === runId) setActiveRun(undefined);
+		}
 	}
 }
+/* v8 ignore stop */
+/* c8 ignore stop */
 
 function createEngineHost(pi: ExtensionAPI, ctx: ExtensionCommandContext, controller: AbortController): EngineHost {
 	let pendingTurn: Promise<void> | undefined;
@@ -247,6 +259,7 @@ function createEngineHost(pi: ExtensionAPI, ctx: ExtensionCommandContext, contro
 					stepId: request.stepId,
 					model: request.model,
 					thinkingLevel: request.thinkingLevel,
+					timeoutMs: request.timeoutMs,
 				},
 				signal,
 			);
@@ -317,7 +330,7 @@ function createEngineHost(pi: ExtensionAPI, ctx: ExtensionCommandContext, contro
 }
 
 async function handleList(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise<void> {
-	const workflows = await discoverWorkflows({ cwd: ctx.cwd });
+	const workflows = await discoverWorkflows({ cwd: ctx.cwd, useCache: false });
 	if (workflows.length === 0) {
 		ctx.ui.notify("No Anvil workflows found in ~/.pi/agent/anvil/workflows or .pi/anvil/workflows.", "info");
 		return;
@@ -344,7 +357,7 @@ async function handleValidate(pi: ExtensionAPI, ctx: ExtensionCommandContext, re
 }
 
 async function findWorkflow(cwd: string, name: string): Promise<DiscoveredWorkflow | undefined> {
-	const workflows = await discoverWorkflows({ cwd });
+	const workflows = await discoverWorkflows({ cwd, useCache: false });
 	return workflows.find((workflow) => workflow.name === name);
 }
 
@@ -468,7 +481,7 @@ function waitForTurnCompletion(ctx: ExtensionCommandContext, signal?: AbortSigna
 }
 
 function waitForOneTurnOrIdle(ctx: ExtensionCommandContext, signal?: AbortSignal): Promise<void> {
-	if (signal?.aborted) return Promise.reject(new Error("Anvil run aborted"));
+	if (signal?.aborted) return Promise.reject(new AnvilAbortError());
 	return new Promise<void>((resolve, reject) => {
 		const waiter: TurnWaiter = {
 			started: false,
@@ -479,7 +492,7 @@ function waitForOneTurnOrIdle(ctx: ExtensionCommandContext, signal?: AbortSignal
 			}, 2_000),
 			signal,
 		};
-		waiter.onAbort = () => rejectTurnWaiter(waiter, new Error("Anvil run aborted"));
+		waiter.onAbort = () => rejectTurnWaiter(waiter, new AnvilAbortError());
 		if (signal) signal.addEventListener("abort", waiter.onAbort, { once: true });
 		turnWaiters.add(waiter);
 	});
@@ -504,3 +517,5 @@ function cleanupTurnWaiter(waiter: TurnWaiter): void {
 function newRunId(): string {
 	return `anvil-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
+
+export const __testing__ = { resolveModelReference, parseAnvilArgs, parseRunArgs };

@@ -1,9 +1,9 @@
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { findLatestAssistantError, shouldAutoExitOnAgentEnd } from "../src/subagent/child.ts";
-import { __testing__, pollForExit } from "../src/subagent/cmux.ts";
+import { __testing__, pollForExit, sendLongCommand } from "../src/subagent/cmux.ts";
 import { buildSubagentLaunchCommand, extractLastAssistantText } from "../src/subagent/runner.ts";
 
 function tempDir(): string {
@@ -128,6 +128,53 @@ describe("pollForExit", () => {
 		controller.abort();
 
 		await expect(pollForExit("surface:1", join(tempDir(), "s.jsonl"), controller.signal)).rejects.toThrow("aborted");
+	});
+
+	it("times out when a subagent never writes an exit sidecar or sentinel", async () => {
+		const sessionFile = join(tempDir(), "session.jsonl");
+		const delayedSidecar = setTimeout(() => {
+			writeFileSync(`${sessionFile}.exit`, JSON.stringify({ type: "done" }), "utf8");
+		}, 25);
+
+		try {
+			await expect(pollForExit("surface:1", sessionFile, undefined, 1, 5)).rejects.toThrow(/timed out/i);
+		} finally {
+			clearTimeout(delayedSidecar);
+		}
+	});
+});
+
+// Static contract tests for the cmux launch hardening issues are intentionally
+// source-level until the launch path is dependency-injected enough for isolated
+// process-spawn tests.
+describe("cmux launch hardening contracts", () => {
+	it("does not use synchronous process calls or blocking sleeps on the launch path", () => {
+		const source = readFileSync(new URL("../src/subagent/cmux.ts", import.meta.url), "utf8");
+
+		expect(source).not.toMatch(/\bexec(?:File)?Sync\b/);
+		expect(source).not.toContain("Atomics.wait");
+	});
+
+	it("writes subagent launch scripts with owner-only permissions", () => {
+		const dir = tempDir();
+		const scriptPath = join(dir, "launch.sh");
+		const fakeCmux = join(dir, "cmux");
+		writeFileSync(fakeCmux, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+		const previousPath = process.env.PATH;
+		process.env.PATH = `${dir}:${previousPath ?? ""}`;
+		try {
+			sendLongCommand("surface:1", "echo hello", scriptPath);
+		} finally {
+			process.env.PATH = previousPath;
+		}
+
+		expect(statSync(scriptPath).mode & 0o777).toBe(0o600);
+	});
+
+	it("creates per-run temporary workspaces with owner-only permissions", () => {
+		const source = readFileSync(new URL("../src/subagent/runner.ts", import.meta.url), "utf8");
+
+		expect(source).toContain("mkdirSync(workDir, { recursive: true, mode: 0o700 })");
 	});
 });
 

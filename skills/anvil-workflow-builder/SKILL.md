@@ -34,6 +34,7 @@ Guide the user with pickers when Anvil-specific choices are missing. The user ma
    - `id` (stable kebab-case identifier)
    - purpose / prompt
    - optional per-step `model` and/or `thinkingLevel`. Pi's thinking shorthand is colon-based (`provider/model:high`, not `provider/model/high`). Supported `thinkingLevel` values are `off`, `minimal`, `low`, `medium`, `high`, and `xhigh`. Omitted model/thinking values use the workflow-start defaults.
+   - optional `subagentTimeoutMs` on workflow defaults or individual steps that use declarative subagent delegation (defaults to 1,800,000ms).
    - optional per-step `delegation` override or `runInMain: true`
 5. For each step, determine whether it has gating checks.
    - If the user explicitly provides one or more checks for the step, capture them.
@@ -41,7 +42,7 @@ Guide the user with pickers when Anvil-specific choices are missing. The user ma
    - If they are not explicit about whether there is no gating check for the step, ask with a picker: add a gating check, or no gating check.
 6. For each gating check, determine its type and details.
    - Explain that checks may be deterministic or non-deterministic.
-   - Deterministic checks: a repeatable command or script, optional timeout/cwd. If the user says that a bash command must run successfully, treat it as implicitly deterministic.
+   - Deterministic checks: a repeatable command or script, optional timeout/cwd. String commands render `{input}` and `{loop}` as quoted shell-variable expansions before running; function commands must quote any context values they interpolate. If the user says that a bash command must run successfully, treat it as implicitly deterministic.
    - Non-deterministic checks: natural-language criteria judged by an agent, optional evaluation subagent.
    - If the user is not explicit about whether a check is deterministic and it is not completely obvious, ask with a picker: deterministic command/script check, or non-deterministic agent-judged check.
    - If the deterministic check does not name a script or command that already exists somewhere, offer to write the script/command for them as part of creating the workflow.

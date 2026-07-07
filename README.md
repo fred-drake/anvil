@@ -44,7 +44,8 @@ Steps can override the workflow default with their own `delegation`, and `runInM
 Requirements and behavior:
 
 - Start pi inside cmux (`cmux pi`). `/anvil run` refuses to start a workflow that declares `{ subagent: "cmux" }` when cmux is unavailable.
-- The subagent runs in the project cwd with a fresh session; the first subagent opens a right split, later ones stack as tabs in the same pane. Session, task, and launch files live under `<tmpdir>/pi-anvil/<runId>/` for debugging.
+- The subagent runs in the project cwd with a fresh session; the first subagent opens a right split, later ones stack as tabs in the same pane. Session, task, and launch files live under an owner-only `<tmpdir>/pi-anvil/<runId>/` directory for debugging.
+- Subagent execution times out after 1,800,000ms by default. Set `subagentTimeoutMs` on a step or workflow defaults to override it.
 - Per-step `model` / `thinkingLevel` are passed to the child session (`pi --model ... --thinking ...`) instead of switching the main session's model.
 - The subagent's final assistant message is injected into the main session's context (no extra turn), so agent checks and later steps can build on it. Check loops still work: `onFail: { goto }` feedback is appended to the next subagent's task.
 - A subagent that exits with an error (or a nonzero exit code) fails the run with that reason.
@@ -63,7 +64,7 @@ export default defineWorkflow({
 
 ## Per-step model selection
 
-A step may declare a model and/or thinking level. Omitted values are reset to the model and thinking level that were active when the workflow started, so a previous step's model selection does not leak into later defaulted steps.
+A step may declare a model and/or thinking level. Omitted values are reset to the model and thinking level that were active when the workflow started, so a previous step's model selection does not leak into later defaulted steps or after the run ends.
 
 Pi's model shorthand uses a colon suffix for thinking levels: `provider/model:thinking` (for example, `openai-codex/gpt-5.5:high`). The slash form `provider/model/thinking` is not Pi's thinking-level syntax.
 
@@ -101,5 +102,7 @@ export default defineWorkflow({
 	],
 });
 ```
+
+For string deterministic commands, `{input}` and `{loop}` placeholders are rendered as quoted shell-variable expansions before Anvil runs `bash -c`, so they remain safe even inside existing single or double quotes. Function commands are treated as fully-rendered command strings and must quote any context values they interpolate.
 
 See `examples/workflows/demo.ts` and the `anvil-workflow-builder` skill for authoring guidance.

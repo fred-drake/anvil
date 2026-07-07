@@ -74,6 +74,8 @@ export interface WorkflowStep {
 	thinkingLevel?: WorkflowThinkingLevel;
 	/** Preferred per-step delegation mode; overrides workflow.defaults.delegation. */
 	delegation?: WorkflowDelegation;
+	/** Timeout for declarative subagent execution. Defaults to 1_800_000ms. */
+	subagentTimeoutMs?: number;
 	/** Legacy delegation hint. Prefer delegation: { skill: "..." } or delegation: "auto". */
 	agent?: string;
 	/** Main agent does the work itself. */
@@ -91,6 +93,8 @@ export interface WorkflowDefinition {
 	defaults?: {
 		/** Preferred workflow-wide delegation mode; defaults to no delegation. */
 		delegation?: WorkflowDelegation;
+		/** Default timeout for declarative subagent execution. Defaults to 1_800_000ms. */
+		subagentTimeoutMs?: number;
 		/** Legacy delegation hint. Prefer delegation: { skill: "..." } or delegation: "auto". */
 		agent?: string;
 		onFail?: OnFailPolicy;

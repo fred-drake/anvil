@@ -1,3 +1,4 @@
+import { AnvilAbortError, isAnvilAbortError, throwIfAborted } from "./errors.ts";
 import { executeAgentCheck, executeDeterministicCheck, type GateResult, type Verdict } from "./gates.ts";
 import { buildStepInstruction, buildSubagentStepTask, resolveStepDelegation } from "./prompts.ts";
 import type {
@@ -44,6 +45,7 @@ export interface SubagentStepRunRequest {
 	cwd: string;
 	model?: string;
 	thinkingLevel?: WorkflowThinkingLevel;
+	timeoutMs?: number;
 }
 
 export interface SubagentStepRunResult {
@@ -136,6 +138,7 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<RunSumma
 	const loopCounts: Record<string, number> = {};
 	const feedbackByStep = new Map<string, string>();
 	const attempts = new Map<string, number>();
+	let shouldRestoreModelSelection = false;
 	const steps = options.workflow.steps.map<StepRunState>((step) => ({
 		id: step.id,
 		title: step.title,
@@ -156,6 +159,16 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<RunSumma
 	};
 
 	const finish = async (state: RunSummary["state"], failureReason?: string): Promise<RunSummary> => {
+		if (shouldRestoreModelSelection) {
+			try {
+				await options.host.applyStepModelSelection?.(undefined);
+			} catch (error) {
+				options.host.notify(
+					`Failed to restore workflow-start model/thinking: ${error instanceof Error ? error.message : String(error)}`,
+					"warning",
+				);
+			}
+		}
 		const summary: RunSummary = {
 			runId,
 			workflowName: options.workflow.name,
@@ -234,6 +247,7 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<RunSumma
 							cwd: options.cwd,
 							model: selection?.model,
 							thinkingLevel: selection?.thinkingLevel,
+							timeoutMs: step.subagentTimeoutMs ?? options.workflow.defaults?.subagentTimeoutMs,
 						},
 						options.signal,
 					);
@@ -253,6 +267,7 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<RunSumma
 				}
 			} else {
 				try {
+					shouldRestoreModelSelection = true;
 					await options.host.applyStepModelSelection?.(resolveStepModelSelection(step));
 				} catch (error) {
 					stepState.status = "failed";
@@ -353,7 +368,7 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<RunSumma
 
 		return finish("succeeded");
 	} catch (error) {
-		if (options.signal?.aborted || isAbortError(error)) {
+		if (options.signal?.aborted || isAnvilAbortError(error)) {
 			return finish("aborted", "aborted");
 		}
 		return finish("failed", error instanceof Error ? error.message : String(error));
@@ -494,10 +509,4 @@ function newRunId(): string {
 	return `anvil-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
-function throwIfAborted(signal: AbortSignal | undefined): void {
-	if (signal?.aborted) throw new Error("Anvil run aborted");
-}
-
-function isAbortError(error: unknown): boolean {
-	return error instanceof Error && /aborted|abort/i.test(error.message);
-}
+export { AnvilAbortError };

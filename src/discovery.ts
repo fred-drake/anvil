@@ -1,4 +1,4 @@
-import { readdir } from "node:fs/promises";
+import { readdir, stat } from "node:fs/promises";
 import { basename, extname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createJiti } from "jiti";
@@ -19,9 +19,26 @@ export interface DiscoveredWorkflow {
 
 const WORKFLOW_EXTENSIONS = new Set([".ts", ".js", ".mjs"]);
 const TYPES_ALIAS_PATH = fileURLToPath(new URL("./types.ts", import.meta.url));
+const discoveryCache = new Map<string, { signature: string; workflows: DiscoveredWorkflow[] }>();
 
-export async function discoverWorkflows(options: AnvilPathOptions = {}): Promise<DiscoveredWorkflow[]> {
+export interface WorkflowDiscoveryOptions extends AnvilPathOptions {
+	/**
+	 * Reuse mtime-based discovery results when available. Keep this enabled for
+	 * keystroke-driven autocomplete, but disable it for commands that must reflect
+	 * the workflow on disk even when mtimes or imported helper files make the
+	 * directory signature look unchanged.
+	 */
+	useCache?: boolean;
+}
+
+export async function discoverWorkflows(options: WorkflowDiscoveryOptions = {}): Promise<DiscoveredWorkflow[]> {
 	const dirs = getWorkflowDirs(options);
+	const useCache = options.useCache !== false;
+	const cacheKey = `${dirs.user}\0${dirs.project}`;
+	const signature = await workflowDirsSignature(dirs);
+	const cached = discoveryCache.get(cacheKey);
+	if (useCache && cached?.signature === signature) return cached.workflows;
+
 	const user = await loadWorkflowDir(dirs.user, "user");
 	const project = await loadWorkflowDir(dirs.project, "project");
 
@@ -30,7 +47,9 @@ export async function discoverWorkflows(options: AnvilPathOptions = {}): Promise
 		byName.set(result.name, result);
 	}
 
-	return [...byName.values()].sort((a, b) => a.name.localeCompare(b.name));
+	const workflows = [...byName.values()].sort((a, b) => a.name.localeCompare(b.name));
+	discoveryCache.set(cacheKey, { signature, workflows });
+	return workflows;
 }
 
 export async function loadWorkflowFile(file: string, source: WorkflowSource): Promise<DiscoveredWorkflow> {
@@ -63,6 +82,34 @@ export async function loadWorkflowFile(file: string, source: WorkflowSource): Pr
 		source,
 		errors: validation.errors,
 	};
+}
+
+async function workflowDirsSignature(dirs: { user: string; project: string }): Promise<string> {
+	const [user, project] = await Promise.all([workflowDirSignature(dirs.user), workflowDirSignature(dirs.project)]);
+	return `${dirs.user}:${user}\0${dirs.project}:${project}`;
+}
+
+async function workflowDirSignature(dir: string): Promise<string> {
+	try {
+		const entries = await readdir(dir);
+		const parts = await Promise.all(
+			entries
+				.filter((entry) => WORKFLOW_EXTENSIONS.has(extname(entry)))
+				.sort((a, b) => a.localeCompare(b))
+				.map(async (entry) => {
+					const file = join(dir, entry);
+					try {
+						const info = await stat(file);
+						return `${entry}:${info.mtimeMs}:${info.size}`;
+					} catch (error) {
+						return `${entry}:error:${formatError(error)}`;
+					}
+				}),
+		);
+		return parts.join("|");
+	} catch (error) {
+		return isNodeError(error) && error.code === "ENOENT" ? "missing" : `error:${formatError(error)}`;
+	}
 }
 
 async function loadWorkflowDir(dir: string, source: WorkflowSource): Promise<DiscoveredWorkflow[]> {

@@ -1,3 +1,4 @@
+import { shellEscape } from "./shell.ts";
 import type {
 	AgentCheck,
 	Templatable,
@@ -22,8 +23,87 @@ export async function renderTemplatable(template: Templatable, ctx: WorkflowCont
 	return renderTemplateString(template, ctx);
 }
 
+export async function renderCommandTemplatable(template: Templatable, ctx: WorkflowContext): Promise<string> {
+	if (typeof template === "function") return template(ctx);
+	return renderCommandTemplateString(template, ctx);
+}
+
 export function renderTemplateString(template: string, ctx: WorkflowContext): string {
-	return template.replaceAll("{input}", ctx.input).replaceAll("{loop}", String(getCurrentLoopCount(ctx)));
+	return replaceTemplatePlaceholders(template, ctx, (value) => value);
+}
+
+export function renderCommandTemplateString(template: string, ctx: WorkflowContext): string {
+	return renderCommandPlaceholders(template, [
+		{ token: "{input}", variable: "__ANVIL_INPUT", value: ctx.input },
+		{ token: "{loop}", variable: "__ANVIL_LOOP", value: String(getCurrentLoopCount(ctx)) },
+	]);
+}
+
+function replaceTemplatePlaceholders(
+	template: string,
+	ctx: WorkflowContext,
+	escapeValue: (value: string) => string,
+): string {
+	return template
+		.replaceAll("{input}", escapeValue(ctx.input))
+		.replaceAll("{loop}", escapeValue(String(getCurrentLoopCount(ctx))));
+}
+
+type ShellQuote = "single" | "double" | undefined;
+
+interface CommandPlaceholder {
+	token: string;
+	variable: string;
+	value: string;
+}
+
+function renderCommandPlaceholders(template: string, placeholders: CommandPlaceholder[]): string {
+	let rendered = "";
+	let quote: ShellQuote;
+	let usedPlaceholder = false;
+
+	for (let index = 0; index < template.length;) {
+		const placeholder = placeholders.find((candidate) => template.startsWith(candidate.token, index));
+		if (placeholder) {
+			rendered += commandPlaceholderExpansion(placeholder.variable, quote);
+			index += placeholder.token.length;
+			usedPlaceholder = true;
+			continue;
+		}
+
+		const char = template[index]!;
+		if (char === "\\" && quote !== "single" && index + 1 < template.length) {
+			rendered += template.slice(index, index + 2);
+			index += 2;
+			continue;
+		}
+
+		rendered += char;
+		if (quote === "single") {
+			if (char === "'") quote = undefined;
+		} else if (quote === "double") {
+			if (char === '"') quote = undefined;
+		} else if (char === "'") {
+			quote = "single";
+		} else if (char === '"') {
+			quote = "double";
+		}
+		index += 1;
+	}
+
+	if (!usedPlaceholder) return template;
+
+	const assignments = placeholders
+		.map((placeholder) => `${placeholder.variable}=${shellEscape(placeholder.value)}`)
+		.join(" ");
+	return `${assignments}; ${rendered}`;
+}
+
+function commandPlaceholderExpansion(variable: string, quote: ShellQuote): string {
+	const parameterExpansion = `\${${variable}}`;
+	if (quote === "single") return `'"${parameterExpansion}"'`;
+	if (quote === "double") return parameterExpansion;
+	return `"${parameterExpansion}"`;
 }
 
 export async function buildStepInstruction(options: StepInstructionOptions): Promise<string> {

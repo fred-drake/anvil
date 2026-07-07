@@ -3,7 +3,7 @@
  * surface, waits for it to finish, and extracts the final assistant message as
  * the step summary.
  */
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -30,6 +30,7 @@ export interface SubagentLaunch {
 	/** Pi model reference (provider/id) for the child session. */
 	model?: string;
 	thinkingLevel?: string;
+	timeoutMs?: number;
 }
 
 export interface SubagentResult {
@@ -89,11 +90,16 @@ export function extractLastAssistantText(sessionFile: string): string | undefine
 	return last;
 }
 
+/* v8 ignore start -- launches real cmux/pi child processes; command building and summary extraction are covered separately. */
 export async function runCmuxSubagent(launch: SubagentLaunch, signal?: AbortSignal): Promise<SubagentResult> {
 	if (!isCmuxAvailable()) throw new Error(cmuxUnavailableMessage());
 
-	const workDir = join(tmpdir(), "pi-anvil", launch.runId);
-	mkdirSync(workDir, { recursive: true });
+	const rootDir = join(tmpdir(), "pi-anvil");
+	mkdirSync(rootDir, { recursive: true, mode: 0o700 });
+	chmodSync(rootDir, 0o700);
+	const workDir = join(rootDir, launch.runId);
+	mkdirSync(workDir, { recursive: true, mode: 0o700 });
+	chmodSync(workDir, 0o700);
 	const base = join(workDir, `${sanitizeForFilename(launch.stepId)}-${Date.now().toString(36)}`);
 	const sessionFile = `${base}.jsonl`;
 	const taskFile = `${base}.task.md`;
@@ -107,10 +113,10 @@ export async function runCmuxSubagent(launch: SubagentLaunch, signal?: AbortSign
 		thinkingLevel: launch.thinkingLevel,
 	});
 
-	const surface = createSurface(launch.name);
+	const surface = await createSurface(launch.name);
 	try {
-		sendLongCommand(surface, command, `${base}.sh`);
-		const exit = await pollForExit(surface, sessionFile, signal);
+		await sendLongCommand(surface, command, `${base}.sh`);
+		const exit = await pollForExit(surface, sessionFile, signal, undefined, launch.timeoutMs);
 		const summary =
 			extractLastAssistantText(sessionFile) ??
 			(exit.errorMessage
@@ -121,13 +127,15 @@ export async function runCmuxSubagent(launch: SubagentLaunch, signal?: AbortSign
 		return { summary, sessionFile, exitCode: exit.exitCode, errorMessage: exit.errorMessage };
 	} finally {
 		try {
-			closeSurface(surface);
+			await closeSurface(surface);
 		} catch {
 			// Surface may already be gone.
 		}
 	}
 }
+/* v8 ignore stop */
 
+/* v8 ignore next -- only used by ignored real-process launcher. */
 function sanitizeForFilename(value: string): string {
 	return value.replace(/[^a-zA-Z0-9-]+/g, "-").replace(/^-+|-+$/g, "") || "step";
 }

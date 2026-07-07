@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { resolveStepModelSelection } from "../src/engine.ts";
 import { defineWorkflow, type WorkflowDefinition } from "../src/types.ts";
@@ -27,5 +28,16 @@ describe("workflow public contract", () => {
 		expect(resolveStepModelSelection({ id: "three", prompt: "c", model: "router/model:exacto" })).toEqual({
 			model: "router/model:exacto",
 		});
+	});
+
+	it("keeps feature-forge prompts aligned with this TypeScript/Vitest repository", () => {
+		const source = readFileSync(new URL("../.pi/anvil/workflows/feature-forge.ts", import.meta.url), "utf8");
+
+		expect(source).not.toMatch(/XCTest|SwiftUI|CLI\/GUI parity/);
+		expect(source).not.toContain("docs/ISSUES.md");
+		expect(source).toContain("docs/ISSUE.md");
+		expect(source).toMatch(/Vitest|test\/.*\.test\.ts|TypeScript/);
+		expect(source).toContain("npx vitest run --coverage");
+		expect(source).not.toContain("npm test -- --coverage");
 	});
 });

@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -60,6 +60,24 @@ describe("getAnvilCompletions", () => {
 		const completions = await getAnvilCompletions("val", project);
 
 		expect(completions).toEqual([{ value: "validate", label: "validate" }]);
+	});
+
+	it("does not re-import workflow modules on repeated completion keystrokes without file changes", async () => {
+		const counterFile = join(root, "imports.txt");
+		await writeFile(counterFile, "0", "utf8");
+		await writeFile(
+			join(project, ".pi", "anvil", "workflows", "side-effect.ts"),
+			`import { readFileSync, writeFileSync } from "node:fs";
+			const counterFile = ${JSON.stringify(counterFile)};
+			writeFileSync(counterFile, String(Number(readFileSync(counterFile, "utf8")) + 1));
+			export default { name: "side-effect", steps: [{ id: "one", prompt: "side" }] };`,
+			"utf8",
+		);
+
+		await getAnvilCompletions("run side", project);
+		await getAnvilCompletions("run side", project);
+
+		expect(await readFile(counterFile, "utf8")).toBe("1");
 	});
 });
 

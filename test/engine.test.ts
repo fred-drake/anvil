@@ -114,6 +114,7 @@ describe("runWorkflow", () => {
 			undefined,
 			{ model: "openai-codex/gpt-5.5", thinkingLevel: "xhigh" },
 			{ thinkingLevel: "low" },
+			undefined,
 		]);
 	});
 
@@ -132,7 +133,7 @@ describe("runWorkflow", () => {
 
 		expect(summary.state).toBe("succeeded");
 		expect(host.instructions).toHaveLength(1);
-		expect(host.modelSelections).toEqual([undefined]);
+		expect(host.modelSelections).toEqual([undefined, undefined]);
 	});
 
 	it("fails before sending a step when model selection fails", async () => {
@@ -421,6 +422,39 @@ describe("runWorkflow", () => {
 		expect(summary.state).toBe("aborted");
 		expect(host.checkpoints.at(-1)?.phase).toBe("run_end");
 		expect(host.checkpoints.at(-1)?.finalState).toBe("aborted");
+	});
+
+	it("restores the workflow-start model when a run is aborted mid-step", async () => {
+		const host = new FakeHost();
+		const controller = new AbortController();
+		host.onWait = () => {
+			controller.abort();
+			throw new Error("Anvil run aborted");
+		};
+
+		const summary = await runWorkflow({
+			workflow: workflow([{ id: "one", prompt: "1", model: "openai-codex/gpt-5.5:high" }]),
+			input: "task",
+			cwd: "/tmp",
+			host,
+			runId: "run",
+			signal: controller.signal,
+		});
+
+		expect(summary.state).toBe("aborted");
+		expect(host.modelSelections).toEqual([{ model: "openai-codex/gpt-5.5", thinkingLevel: "high" }, undefined]);
+	});
+
+	it("does not classify non-user upstream abort messages as user aborts", async () => {
+		const host = new FakeHost();
+		host.onWait = () => {
+			throw new Error("request aborted by upstream provider");
+		};
+
+		const summary = await runWorkflow({ workflow: workflow([{ id: "one", prompt: "1" }]), input: "task", cwd: "/tmp", host, runId: "run" });
+
+		expect(summary.state).toBe("failed");
+		expect(summary.failureReason).toBe("request aborted by upstream provider");
 	});
 });
 

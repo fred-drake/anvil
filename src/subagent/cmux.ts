@@ -6,28 +6,27 @@
  * same pane. Completion is detected via a `<sessionFile>.exit` sidecar written
  * by the child extension, with the terminal sentinel as crash fallback.
  */
-import { execFileSync, execSync, spawnSync } from "node:child_process";
+import { execFile } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { promisify } from "node:util";
-import { execFile } from "node:child_process";
+import { AnvilAbortError, throwIfAborted } from "../errors.ts";
+import { shellEscape } from "../shell.ts";
 
 const execFileAsync = promisify(execFile);
 
 export const SUBAGENT_SENTINEL_PREFIX = "__ANVIL_SUBAGENT_DONE_";
 const SENTINEL_RE = /__ANVIL_SUBAGENT_DONE_(\d+)__/;
+export const DEFAULT_SUBAGENT_TIMEOUT_MS = 1_800_000;
 
 /** Tracked subagent pane — reused across launches so tabs stack instead of splitting. */
 let subagentPane: string | null = null;
 
-export function shellEscape(value: string): string {
-	return `'${value.replaceAll("'", "'\\''")}'`;
-}
+export { shellEscape };
 
+/* v8 ignore start -- cmux process/UI launch integration is covered by source-level contracts and manual cmux behavior. */
 export function isCmuxAvailable(): boolean {
-	if (!process.env.CMUX_SOCKET_PATH) return false;
-	const result = spawnSync("cmux", ["--version"], { encoding: "utf8" });
-	return !result.error;
+	return Boolean(process.env.CMUX_SOCKET_PATH);
 }
 
 export function cmuxUnavailableMessage(): string {
@@ -44,11 +43,11 @@ interface CreatedSurface {
 	paneRef?: string;
 }
 
-function readCmuxJson(args: string[]): Record<string, unknown> | null {
-	const result = spawnSync("cmux", args, { encoding: "utf8" });
-	if (result.error || result.status !== 0 || !result.stdout.trim()) return null;
+async function readCmuxJson(args: string[]): Promise<Record<string, unknown> | null> {
 	try {
-		const parsed = JSON.parse(result.stdout);
+		const { stdout } = await execFileAsync("cmux", args, { encoding: "utf8" });
+		if (!stdout.trim()) return null;
+		const parsed = JSON.parse(stdout);
 		return typeof parsed === "object" && parsed !== null ? (parsed as Record<string, unknown>) : null;
 	} catch {
 		return null;
@@ -63,16 +62,16 @@ function toFocusSnapshot(value: unknown): FocusSnapshot | null {
 	return surfaceRef || paneRef ? { surfaceRef, paneRef } : null;
 }
 
-function captureIdentify(): { focused: FocusSnapshot | null; caller: FocusSnapshot | null } {
-	const parsed = readCmuxJson(["identify", "--json"]);
+async function captureIdentify(): Promise<{ focused: FocusSnapshot | null; caller: FocusSnapshot | null }> {
+	const parsed = await readCmuxJson(["identify", "--json"]);
 	return {
 		focused: toFocusSnapshot(parsed?.focused),
 		caller: toFocusSnapshot(parsed?.caller),
 	};
 }
 
-function readPaneRefForSurface(surface: string): string | undefined {
-	const parsed = readCmuxJson(["identify", "--surface", surface]);
+async function readPaneRefForSurface(surface: string): Promise<string | undefined> {
+	const parsed = await readCmuxJson(["identify", "--surface", surface]);
 	if (!parsed) return undefined;
 	if (parsed.surface_ref === surface && typeof parsed.pane_ref === "string" && parsed.pane_ref) return parsed.pane_ref;
 	const caller = parsed.caller;
@@ -83,10 +82,14 @@ function readPaneRefForSurface(surface: string): string | undefined {
 	return undefined;
 }
 
-function restoreFocus(snapshot: FocusSnapshot | null): void {
+async function restoreFocus(snapshot: FocusSnapshot | null): Promise<void> {
 	if (!snapshot) return;
-	if (snapshot.paneRef) spawnSync("cmux", ["focus-pane", "--pane", snapshot.paneRef], { encoding: "utf8" });
-	if (snapshot.surfaceRef) spawnSync("cmux", ["focus-panel", "--panel", snapshot.surfaceRef], { encoding: "utf8" });
+	try {
+		if (snapshot.paneRef) await execFileAsync("cmux", ["focus-pane", "--pane", snapshot.paneRef], { encoding: "utf8" });
+		if (snapshot.surfaceRef) await execFileAsync("cmux", ["focus-panel", "--panel", snapshot.surfaceRef], { encoding: "utf8" });
+	} catch {
+		// Best-effort focus restoration only.
+	}
 }
 
 function focusMatches(focus: FocusSnapshot | null, snapshot: FocusSnapshot | null | undefined): boolean {
@@ -98,15 +101,15 @@ function focusMatches(focus: FocusSnapshot | null, snapshot: FocusSnapshot | nul
  * Creating a split/surface can steal keyboard focus. If focus landed on the
  * new child (or settled back onto the caller's pane), put it back where it was.
  */
-function restoreFocusIfStolen(snapshot: FocusSnapshot | null, child: CreatedSurface, caller: FocusSnapshot | null): void {
+async function restoreFocusIfStolen(snapshot: FocusSnapshot | null, child: CreatedSurface, caller: FocusSnapshot | null): Promise<void> {
 	if (!snapshot) return;
-	Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
-	const current = captureIdentify().focused;
+	await sleep(100);
+	const current = (await captureIdentify()).focused;
 	if (
 		focusMatches(current, { surfaceRef: child.surface, paneRef: child.paneRef }) ||
 		focusMatches(current, caller)
 	) {
-		restoreFocus(snapshot);
+		await restoreFocus(snapshot);
 	}
 }
 
@@ -116,39 +119,39 @@ function parseCreatedSurface(output: string, command: string): CreatedSurface {
 	return { surface: surfaceMatch[0], paneRef: output.match(/pane:\d+/)?.[0] };
 }
 
-function renameSurface(surface: string, name: string): void {
-	execFileSync("cmux", ["rename-tab", "--surface", surface, name], { encoding: "utf8" });
+async function renameSurface(surface: string, name: string): Promise<void> {
+	await execFileAsync("cmux", ["rename-tab", "--surface", surface, name], { encoding: "utf8" });
 }
 
-function createSplitSurface(name: string): CreatedSurface {
-	const { focused, caller } = captureIdentify();
+async function createSplitSurface(name: string): Promise<CreatedSurface> {
+	const { focused, caller } = await captureIdentify();
 	let child: CreatedSurface | null = null;
 	try {
 		const args = ["new-split", "right"];
 		if (process.env.CMUX_SURFACE_ID) args.push("--surface", process.env.CMUX_SURFACE_ID);
-		const output = execFileSync("cmux", args, { encoding: "utf8" }).trim();
-		child = parseCreatedSurface(output, "new-split");
-		child.paneRef ??= readPaneRefForSurface(child.surface);
-		renameSurface(child.surface, name);
+		const { stdout } = await execFileAsync("cmux", args, { encoding: "utf8" });
+		child = parseCreatedSurface(stdout.trim(), "new-split");
+		child.paneRef ??= await readPaneRefForSurface(child.surface);
+		await renameSurface(child.surface, name);
 		return child;
 	} finally {
-		if (child) restoreFocusIfStolen(focused, child, caller);
-		else restoreFocus(focused);
+		if (child) await restoreFocusIfStolen(focused, child, caller);
+		else await restoreFocus(focused);
 	}
 }
 
-function createSurfaceInPane(name: string, pane: string): string {
-	const { focused, caller } = captureIdentify();
+async function createSurfaceInPane(name: string, pane: string): Promise<string> {
+	const { focused, caller } = await captureIdentify();
 	let child: CreatedSurface | null = null;
 	try {
-		const output = execFileSync("cmux", ["new-surface", "--pane", pane], { encoding: "utf8" }).trim();
-		child = parseCreatedSurface(output, "new-surface");
+		const { stdout } = await execFileAsync("cmux", ["new-surface", "--pane", pane], { encoding: "utf8" });
+		child = parseCreatedSurface(stdout.trim(), "new-surface");
 		child.paneRef ??= pane;
-		renameSurface(child.surface, name);
+		await renameSurface(child.surface, name);
 		return child.surface;
 	} finally {
-		if (child) restoreFocusIfStolen(focused, child, caller);
-		else restoreFocus(focused);
+		if (child) await restoreFocusIfStolen(focused, child, caller);
+		else await restoreFocus(focused);
 	}
 }
 
@@ -157,16 +160,18 @@ function createSurfaceInPane(name: string, pane: string): string {
  * split; subsequent calls add tabs to that pane so splits don't keep shrinking.
  * Returns a `surface:<n>` identifier.
  */
-export function createSurface(name: string): string {
+export async function createSurface(name: string): Promise<string> {
 	if (subagentPane) {
 		try {
-			const tree = execSync("cmux tree", { encoding: "utf8" });
-			if (tree.includes(subagentPane)) return createSurfaceInPane(name, subagentPane);
+			const { stdout: tree } = await execFileAsync("cmux", ["tree"], { encoding: "utf8" });
+			if (new RegExp(`(^|\\s)${escapeRegExp(subagentPane)}($|\\s)`).test(tree)) {
+				return createSurfaceInPane(name, subagentPane);
+			}
 		} catch {}
 		subagentPane = null;
 	}
 
-	const created = createSplitSurface(name);
+	const created = await createSplitSurface(name);
 	subagentPane = created.paneRef ?? null;
 	return created.surface;
 }
@@ -175,12 +180,10 @@ export function createSurface(name: string): string {
  * Send a command by writing it to a script file and executing that, so long
  * commands survive terminal line-wrapping. The script is kept for debugging.
  */
-export function sendLongCommand(surface: string, command: string, scriptPath: string): void {
+export async function sendLongCommand(surface: string, command: string, scriptPath: string): Promise<void> {
 	mkdirSync(dirname(scriptPath), { recursive: true });
-	writeFileSync(scriptPath, `#!/bin/bash\n${command}\n`, { mode: 0o755 });
-	execSync(`cmux send --surface ${shellEscape(surface)} ${shellEscape(`bash ${shellEscape(scriptPath)}\n`)}`, {
-		encoding: "utf8",
-	});
+	writeFileSync(scriptPath, `#!/bin/bash\n${command}\n`, { mode: 0o600 });
+	await execFileAsync("cmux", ["send", "--surface", surface, `bash ${shellEscape(scriptPath)}\n`], { encoding: "utf8" });
 }
 
 export async function readScreen(surface: string, lines = 5): Promise<string> {
@@ -190,9 +193,10 @@ export async function readScreen(surface: string, lines = 5): Promise<string> {
 	return stdout;
 }
 
-export function closeSurface(surface: string): void {
-	execSync(`cmux close-surface --surface ${shellEscape(surface)}`, { encoding: "utf8" });
+export async function closeSurface(surface: string): Promise<void> {
+	await execFileAsync("cmux", ["close-surface", "--surface", surface], { encoding: "utf8" });
 }
+/* v8 ignore stop */
 
 export interface SubagentExit {
 	reason: "done" | "error" | "sentinel";
@@ -233,9 +237,12 @@ export async function pollForExit(
 	sessionFile: string,
 	signal?: AbortSignal,
 	intervalMs = 1000,
+	timeoutMs = DEFAULT_SUBAGENT_TIMEOUT_MS,
 ): Promise<SubagentExit> {
+	const deadline = Date.now() + timeoutMs;
 	for (;;) {
-		if (signal?.aborted) throw new Error("Anvil run aborted");
+		throwIfAborted(signal);
+		if (Date.now() >= deadline) throw new Error(`Subagent timed out after ${timeoutMs}ms`);
 
 		const sidecar = consumeExitSidecar(sessionFile);
 		if (sidecar) return sidecar;
@@ -245,28 +252,33 @@ export async function pollForExit(
 			const match = screen.match(SENTINEL_RE);
 			if (match) return { reason: "sentinel", exitCode: Number.parseInt(match[1]!, 10) };
 		} catch {
-			// Surface may already be gone — the sidecar may still have landed.
+			// Surface may already be gone — the sidecar may still have landed before the timeout elapsed.
+			if (Date.now() >= deadline) throw new Error(`Subagent timed out after ${timeoutMs}ms`);
 			const lateSidecar = consumeExitSidecar(sessionFile);
 			if (lateSidecar) return lateSidecar;
 		}
 
-		await sleep(intervalMs, signal);
+		await sleep(Math.min(intervalMs, Math.max(0, deadline - Date.now())), signal);
 	}
 }
 
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
 	return new Promise((resolve, reject) => {
-		if (signal?.aborted) return reject(new Error("Anvil run aborted"));
+		if (signal?.aborted) return reject(new AnvilAbortError());
 		const timer = setTimeout(() => {
 			signal?.removeEventListener("abort", onAbort);
 			resolve();
 		}, ms);
 		function onAbort() {
 			clearTimeout(timer);
-			reject(new Error("Anvil run aborted"));
+			reject(new AnvilAbortError());
 		}
 		signal?.addEventListener("abort", onAbort, { once: true });
 	});
+}
+
+function escapeRegExp(value: string): string {
+	return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 export const __testing__ = { interpretExitSidecar };

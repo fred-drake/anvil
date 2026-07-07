@@ -75,6 +75,9 @@ function validateDefaults(defaults: unknown, errors: string[]): void {
 	if (defaults.maxLoops !== undefined && !isNonNegativeInteger(defaults.maxLoops)) {
 		errors.push("workflow.defaults.maxLoops must be a non-negative integer when provided");
 	}
+	if (defaults.subagentTimeoutMs !== undefined && !isPositiveInteger(defaults.subagentTimeoutMs)) {
+		errors.push("workflow.defaults.subagentTimeoutMs must be a positive integer when provided");
+	}
 	if (defaults.onFail !== undefined) {
 		validateOnFailPolicy(defaults.onFail, "workflow.defaults.onFail", undefined, errors);
 	}
@@ -106,6 +109,9 @@ function validateStep(step: unknown, index: number, stepIds: Set<string>, errors
 	}
 	if (step.delegation !== undefined) {
 		validateDelegation(step.delegation, `${path}.delegation`, errors);
+	}
+	if (step.subagentTimeoutMs !== undefined && !isPositiveInteger(step.subagentTimeoutMs)) {
+		errors.push(`${path}.subagentTimeoutMs must be a positive integer when provided`);
 	}
 	if (step.agent !== undefined && typeof step.agent !== "string") {
 		errors.push(`${path}.agent must be a string when provided`);

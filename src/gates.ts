@@ -1,5 +1,6 @@
 import type { EngineHost } from "./engine.ts";
-import { buildAgentCheckInstruction, buildVerdictReprompt, renderTemplatable } from "./prompts.ts";
+import { abortError } from "./errors.ts";
+import { buildAgentCheckInstruction, buildVerdictReprompt, renderCommandTemplatable } from "./prompts.ts";
 import type { AgentCheck, Check, DeterministicCheck, WorkflowContext, WorkflowDefinition, WorkflowStep } from "./types.ts";
 
 export interface Verdict {
@@ -91,7 +92,7 @@ export async function executeDeterministicCheck(args: {
 	checkId: string;
 	signal?: AbortSignal;
 }): Promise<GateResult> {
-	const command = await renderTemplatable(args.check.command, args.ctx);
+	const command = await renderCommandTemplatable(args.check.command, args.ctx);
 	const result = await args.host.exec("bash", ["-c", command], {
 		cwd: args.check.cwd ?? args.ctx.cwd,
 		timeout: args.check.timeoutMs ?? DEFAULT_DETERMINISTIC_TIMEOUT_MS,
@@ -99,12 +100,17 @@ export async function executeDeterministicCheck(args: {
 	});
 	const output = [result.stdout, result.stderr].filter(Boolean).join("\n");
 	const pass = result.code === 0;
+	const timeoutMs = args.check.timeoutMs ?? DEFAULT_DETERMINISTIC_TIMEOUT_MS;
 	return {
 		check: args.check,
 		checkId: args.checkId,
 		name: checkDisplayName(args.check, args.checkId),
 		pass,
-		reason: pass ? "command exited 0" : tail(output || `command exited ${result.code}`, 2000),
+		reason: pass
+			? "command exited 0"
+			: result.killed
+				? `command timed out after ${timeoutMs}ms${output ? `: ${tail(output, 2000)}` : ""}`
+				: tail(output || `command exited ${result.code}`, 2000),
 		output,
 	};
 }
@@ -191,8 +197,4 @@ function checkDisplayName(check: Check, fallback: string): string {
 
 function tail(text: string, maxChars: number): string {
 	return text.length <= maxChars ? text : text.slice(-maxChars);
-}
-
-function abortError(): Error {
-	return new Error("Anvil run aborted");
 }

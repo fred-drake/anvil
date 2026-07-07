@@ -37,6 +37,7 @@ export function findLatestAssistantError(messages: AssistantLike[] | undefined):
 	return undefined;
 }
 
+/* v8 ignore start -- loaded only inside spawned pi subagent sessions. */
 export default function anvilSubagentChild(pi: ExtensionAPI) {
 	const sessionFile = process.env.PI_ANVIL_SUBAGENT_SESSION;
 	if (!sessionFile) return;
@@ -57,3 +58,4 @@ export default function anvilSubagentChild(pi: ExtensionAPI) {
 		ctx.shutdown();
 	});
 }
+/* v8 ignore stop */

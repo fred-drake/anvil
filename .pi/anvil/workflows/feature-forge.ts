@@ -37,11 +37,11 @@ Requirements:
 Using the research and plan from the previous step, write the unit test stubs needed to cover the requested behavior before implementation.
 
 Requirements:
-- Follow this repository's testing conventions and keep tests in the appropriate XCTest target.
+- Follow this TypeScript repository's Vitest conventions and keep tests under the appropriate test/*.test.ts file.
 - Stub all important success, edge, and failure cases implied by the request.
 - Keep stubs compileable; placeholders may fail until the implementation step completes.
 - Do not implement production behavior in this step beyond minimal compile support needed for the tests.
-- If the request changes CLI JSON or public contracts, include contract test stubs too.`,
+- If the request changes commands, public TypeScript contracts, README behavior, or workflow examples, include contract test stubs too.`,
 		},
 		{
 			id: "implement-feature",
@@ -51,9 +51,9 @@ Requirements:
 {input}
 
 Requirements:
-- Implement real logic in the appropriate core layer before touching thin CLI or SwiftUI surfaces.
+- Implement real logic in the appropriate core module before touching thin command/extension wiring.
 - Fill in the unit test stubs with meaningful assertions; do not delete coverage unless it is obsolete and replaced.
-- Keep CLI/GUI parity and documentation/contracts in sync when the requested feature affects them.
+- Keep CLI command behavior, README documentation, workflow examples, and TypeScript contracts in sync when the requested feature affects them.
 - Run and fix the test suite until all tests pass and coverage is at least 85%.
 - Address any feedback from failed verification or review checks before finishing.`,
 			checks: [
@@ -61,7 +61,7 @@ Requirements:
 					type: "deterministic",
 					id: "tests-and-coverage",
 					name: "All tests pass with >=85% coverage",
-					command: "npm run check && npm test -- --coverage",
+					command: "npm run check && npx vitest run --coverage",
 					timeoutMs: 1_800_000,
 					onFail: { goto: "implement-feature", maxLoops: 3, onExhausted: "stop", feedback: true },
 				},
@@ -78,7 +78,7 @@ Requirements:
 - Perform a code review focused on correctness, test quality, maintainability, architecture contracts, concurrency safety, and repository conventions.
 - Treat correctness regressions, broken contracts, missing required tests, failing verification, data loss, security/privacy issues, and architecture violations as blocking.
 - If you find blocking issues, leave clear review findings with enough detail for the implementation step to remediate them.
-- If you find only non-blocking issues, append them to docs/ISSUES.md using that file's existing style.
+- If you find only non-blocking issues, append them to docs/ISSUE.md using that file's existing style.
 - If you find no issues, state that explicitly.`,
 			checks: [
 				{
@@ -90,7 +90,7 @@ Requirements:
 
 Pass only if all of the following are true:
 - The code review found no blocking issues that require remediation before shipping.
-- Any non-blocking issues discovered during review were added to docs/ISSUES.md.
+- Any non-blocking issues discovered during review were added to docs/ISSUE.md.
 - The implementation still satisfies the feature request and repository conventions.
 
 Fail if there are unresolved blocking findings, missing required issue documentation for non-blockers, or evidence that tests/coverage should be rerun.`,

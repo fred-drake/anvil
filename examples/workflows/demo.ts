@@ -1,5 +1,9 @@
 import { defineWorkflow } from "pi-anvil";
 
+function shellEscape(value: string): string {
+	return `'${value.replaceAll("'", "'\\''")}'`;
+}
+
 export default defineWorkflow({
 	name: "demo",
 	description: "Create or update a file, then verify its contents with a retry loop.",
@@ -20,7 +24,7 @@ export default defineWorkflow({
 					command: (ctx) => {
 						const match = /(?:create|write)\s+(\S+)/i.exec(ctx.input);
 						const file = match?.[1] ?? "/tmp/anvil-demo.txt";
-						return `test -f ${JSON.stringify(file)}`;
+						return `test -f ${shellEscape(file)}`;
 					},
 					onFail: { goto: "create-file", maxLoops: 2, feedback: true },
 				},
