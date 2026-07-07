@@ -18,6 +18,7 @@ const execFileAsync = promisify(execFile);
 export const SUBAGENT_SENTINEL_PREFIX = "__ANVIL_SUBAGENT_DONE_";
 const SENTINEL_RE = /__ANVIL_SUBAGENT_DONE_(\d+)__/;
 export const DEFAULT_SUBAGENT_TIMEOUT_MS = 1_800_000;
+export const DEFAULT_READ_SCREEN_FAILURE_LIMIT = 2;
 
 /** Tracked subagent pane — reused across launches so tabs stack instead of splitting. */
 let subagentPane: string | null = null;
@@ -240,6 +241,7 @@ export async function pollForExit(
 	timeoutMs = DEFAULT_SUBAGENT_TIMEOUT_MS,
 ): Promise<SubagentExit> {
 	const deadline = Date.now() + timeoutMs;
+	let consecutiveReadFailures = 0;
 	for (;;) {
 		throwIfAborted(signal);
 		if (Date.now() >= deadline) throw new Error(`Subagent timed out after ${timeoutMs}ms`);
@@ -249,13 +251,19 @@ export async function pollForExit(
 
 		try {
 			const screen = await readScreen(surface, 5);
+			consecutiveReadFailures = 0;
 			const match = screen.match(SENTINEL_RE);
 			if (match) return { reason: "sentinel", exitCode: Number.parseInt(match[1]!, 10) };
 		} catch {
-			// Surface may already be gone — the sidecar may still have landed before the timeout elapsed.
+			// Surface may already be gone — give the child a short grace period to write the sidecar,
+			// then fail fast instead of waiting for the full subagent timeout.
 			if (Date.now() >= deadline) throw new Error(`Subagent timed out after ${timeoutMs}ms`);
 			const lateSidecar = consumeExitSidecar(sessionFile);
 			if (lateSidecar) return lateSidecar;
+			consecutiveReadFailures += 1;
+			if (consecutiveReadFailures >= DEFAULT_READ_SCREEN_FAILURE_LIMIT) {
+				throw new Error(`Subagent surface closed before completion: ${surface}`);
+			}
 		}
 
 		await sleep(Math.min(intervalMs, Math.max(0, deadline - Date.now())), signal);

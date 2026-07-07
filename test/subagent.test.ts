@@ -142,6 +142,17 @@ describe("pollForExit", () => {
 			clearTimeout(delayedSidecar);
 		}
 	});
+
+	it("bails out when the cmux surface closes before an exit sidecar is written", async () => {
+		const sessionFile = join(tempDir(), "session.jsonl");
+		const timeoutMs = 100;
+		const startedAt = Date.now();
+
+		await expect(pollForExit("surface:missing", sessionFile, undefined, 1, timeoutMs)).rejects.toThrow(
+			/surface closed before completion/i,
+		);
+		expect(Date.now() - startedAt).toBeLessThan(timeoutMs);
+	});
 });
 
 // Static contract tests for the cmux launch hardening issues are intentionally
