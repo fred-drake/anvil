@@ -1,8 +1,8 @@
-# Anvil
-
 <p align="center">
   <img src="assets/anvil-logo.png" alt="Anvil logo" width="320">
 </p>
+
+# Anvil
 
 A Pi extension that runs declarative TypeScript workflows with deterministic and agent-judged gates.
 
