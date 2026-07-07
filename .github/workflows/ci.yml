@@ -24,9 +24,9 @@ jobs:
         node-version: [22.14.0, 24]
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: ${{ matrix.node-version }}
           cache: npm
@@ -37,7 +37,10 @@ jobs:
           set -euo pipefail
           mkdir -p "$HOME/.local/bin"
           curl -fsSL https://hypabolic.github.io/Hypa/install.sh -o /tmp/install-hypa.sh
-          HYPA_INSTALL_DIR="$HOME/.local/bin" sh /tmp/install-hypa.sh
+          # The installer prefers npm when npm is on PATH, but GitHub's npm
+          # script policy can leave the native Hypa package unlinked. Hide npm
+          # for this invocation so the installer uses signed release assets.
+          PATH=/usr/bin:/bin sh /tmp/install-hypa.sh
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
           "$HOME/.local/bin/hypa" --version || "$HOME/.local/bin/hypa" version
 
