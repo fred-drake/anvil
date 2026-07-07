@@ -17,6 +17,9 @@ export default defineWorkflow({
 		{
 			id: "create-file",
 			title: "Create the requested file",
+			// Optional: start cheap, then escalate model/thinking after retries.
+			// model: "cheap/model:minimal",
+			// retryModelSelections: [{ retry: 1, model: "strong/model", thinkingLevel: "high" }],
 			prompt: "Complete this file task: {input}",
 			checks: [
 				{

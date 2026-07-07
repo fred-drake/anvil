@@ -36,6 +36,7 @@ Guide the user with pickers when Anvil-specific choices are missing. The user ma
    - `id` (stable kebab-case identifier)
    - purpose / prompt
    - optional per-step `model` and/or `thinkingLevel`. Pi's thinking shorthand is colon-based (`provider/model:high`, not `provider/model/high`). Supported `thinkingLevel` values are `off`, `minimal`, `low`, `medium`, `high`, and `xhigh`. Omitted model/thinking values use the workflow-start defaults.
+   - optional `retryModelSelections` when the user wants retry-aware model or thinking changes. `retry: 0` is the first attempt; `retry: 1` is the first retry. The highest retry less than or equal to the current retry count wins, and omitted fields fall back to the step's regular model/thinking. These selections affect main-session steps and declarative subagent launches.
    - optional `subagentTimeoutMs` on workflow defaults or individual steps that use declarative subagent delegation (defaults to 1,800,000ms).
    - optional per-step `delegation` override or `runInMain: true`
 5. For each step, determine whether it has gating checks.
@@ -71,6 +72,10 @@ export default defineWorkflow({
 			id: "implement",
 			title: "Implement the change",
 			model: "openai-codex/gpt-5.5:high",
+			retryModelSelections: [
+				{ retry: 0, model: "openai-codex/gpt-5.5:minimal" }, // first attempt
+				{ retry: 1, model: "openai-codex/gpt-5.5", thinkingLevel: "high" },
+			],
 			prompt: "Implement this request: {input}",
 			checks: [
 				{

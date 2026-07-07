@@ -1,6 +1,6 @@
 import { AnvilAbortError, isAnvilAbortError, throwIfAborted } from "./errors.ts";
 import { executeAgentCheck, executeDeterministicCheck, type GateResult, type Verdict } from "./gates.ts";
-import { buildStepInstruction, buildSubagentStepTask, resolveStepDelegation } from "./prompts.ts";
+import { buildStepInstruction, buildSubagentStepTask, getCurrentLoopCount, resolveStepDelegation } from "./prompts.ts";
 import type {
 	Check,
 	OnFailPolicy,
@@ -242,7 +242,7 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<RunSumma
 				feedbackByStep.delete(step.id);
 
 				checkpoint({ phase: "step_start", stepId: step.id, stepIndex });
-				const selection = resolveStepModelSelection(step);
+				const selection = resolveStepModelSelection(step, getCurrentLoopCount(ctx));
 				let result: SubagentStepRunResult;
 				try {
 					result = await options.host.runSubagent(
@@ -280,7 +280,7 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<RunSumma
 				if (workflowHasModelSelectionOverrides) {
 					try {
 						shouldRestoreModelSelection = true;
-						await options.host.applyStepModelSelection?.(resolveStepModelSelection(step));
+						await options.host.applyStepModelSelection?.(resolveStepModelSelection(step, getCurrentLoopCount(ctx)));
 					} catch (error) {
 						stepState.status = "failed";
 						updateStepUi(options, steps, stepIndex, "failed");
@@ -453,12 +453,46 @@ function resolveFailure(args: {
 }
 
 function hasWorkflowModelSelectionOverrides(workflow: WorkflowDefinition): boolean {
-	return workflow.steps.some((step) => step.model !== undefined || step.thinkingLevel !== undefined);
+	return workflow.steps.some(
+		(step) =>
+			step.model !== undefined ||
+			step.thinkingLevel !== undefined ||
+			(step.retryModelSelections !== undefined && step.retryModelSelections.length > 0),
+	);
 }
 
-export function resolveStepModelSelection(step: WorkflowStep): StepModelSelection | undefined {
-	const parsed = parseModelReference(step.model);
-	return parsed || step.thinkingLevel ? { ...parsed, thinkingLevel: step.thinkingLevel ?? parsed?.thinkingLevel } : undefined;
+export function resolveStepModelSelection(step: WorkflowStep, retryCount = 0): StepModelSelection | undefined {
+	const baseSelection = mergeModelSelection(parseModelReference(step.model), { thinkingLevel: step.thinkingLevel });
+	const retrySelection = selectRetryModelSelection(step, retryCount);
+	if (!retrySelection) return emptyToUndefined(baseSelection);
+
+	const parsedRetryModel = parseModelReference(retrySelection.model);
+	return emptyToUndefined(
+		mergeModelSelection(baseSelection, parsedRetryModel, { thinkingLevel: retrySelection.thinkingLevel }),
+	);
+}
+
+function selectRetryModelSelection(step: WorkflowStep, retryCount: number): StepModelSelection | undefined {
+	let selected: (StepModelSelection & { retry: number }) | undefined;
+	for (const candidate of step.retryModelSelections ?? []) {
+		if (candidate.retry > retryCount) continue;
+		if (!selected || candidate.retry > selected.retry) selected = candidate;
+	}
+	return selected;
+}
+
+function mergeModelSelection(...selections: Array<StepModelSelection | undefined>): StepModelSelection {
+	const merged: StepModelSelection = {};
+	for (const selection of selections) {
+		if (!selection) continue;
+		if (selection.model !== undefined) merged.model = selection.model;
+		if (selection.thinkingLevel !== undefined) merged.thinkingLevel = selection.thinkingLevel;
+	}
+	return merged;
+}
+
+function emptyToUndefined(selection: StepModelSelection): StepModelSelection | undefined {
+	return selection.model !== undefined || selection.thinkingLevel !== undefined ? selection : undefined;
 }
 
 function parseModelReference(model: string | undefined): StepModelSelection | undefined {

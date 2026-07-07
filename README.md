@@ -14,7 +14,7 @@ Anvil is for those Pi tasks where you keep thinking, “I want the agent to do t
 - For each workflow step, set any number of gating checks that must pass. Checks can be deterministic, like a script or executable that returns exit code `0`, or non-deterministic, where a subagent evaluates the result and gives a 👍 or 👎 based on what it thinks should happen.
 - Define subagent behavior based on how you have configured Pi. cmux and herdr compatibility come out of the box, you can choose a custom skill that you wrote for handling subagent processing, or no subagent at all if you wish.
 - Optionally define the number of times a step has to be retried before bailing.
-- Optionally define a different model and thinking level for each step.
+- Optionally define a different model and thinking level for each step, including retry-based upgrades.
 
 ## Build workflows by talking to Pi
 
@@ -43,21 +43,21 @@ Use `/anvil resume` after a failed or aborted run to see a numbered step map, fo
 
 ## Declarative subagents
 
-Each workflow step can decide how much help it wants from another agent:
+Each workflow step can decide how much help it wants from another agent. By default, `delegation: "auto"` auto-detects your mux environment, using `HERDR_ENV=1` for herdr first, then `CMUX_SHELL_INTEGRATION=1` for cmux. Current supported environments are cmux and herdr. You can also force one of these two environments with `delegation: { subagent: "cmux" }` or `delegation: { subagent: "herdr" }`. Or if you prefer to use a specific skill that you've crafted that handles subagents, you can tell it to use that instead. Lastly, you can explicitly tell it to do not use subagents.
 
-- Use the default `delegation: "auto"` to auto-detect the current subagent surface.
-- Run as a declarative cmux subagent with `delegation: { subagent: "cmux" }`.
-- Run as a declarative herdr subagent with `delegation: { subagent: "herdr" }`.
-- Prefer a specific skill for the subagent to use.
-- Do no delegation and keep the step in the main session.
+⚠️ It is advised to use subagents on any step that is non-trivial, because you run the risk of context pollution.
 
-For non-trivial work, sending the step into a subagent is strongly encouraged. It keeps the main session cleaner and gives that step room to focus. But it is your workflow, your rules: leave the default as `delegation: "auto"` when you want Anvil to detect the right visible Pi subagent backend, choose cmux or herdr explicitly when you want a fixed backend, use a skill when you have a custom way of doing the work, or turn delegation off entirely.
+⚠️ While skills are supported, be aware that unlike the other options you are at the mercy of the model to get it right. Non-deterministic skills run the risk of it doing the right thing 95% of the time, then misbehaving in that one time out of twenty.
 
-Auto detection prefers `HERDR_ENV=1` as herdr, then `CMUX_SHELL_INTEGRATION=1` as cmux. If neither variable is set, auto-delegated steps run in the main session with a prompt hint. If a workflow uses cmux subagents, start Pi inside cmux with `cmux pi` so Anvil has somewhere to launch them. If it uses herdr subagents, start Pi inside herdr so Anvil can create panes and tabs for each delegated step. Declarative cmux/herdr subagents are launched in Pi print mode and close their surface automatically when the step exits; if Pi stops at a startup prompt such as a missing saved cwd, Anvil reports the blocked launch instead of waiting for a timeout.
+Warnings aside, this is ultimately _your workflow, your rules_. Checks still guard the workflow either way: deterministic checks run commands, while agent-judged checks ask for a clear pass/fail verdict before the workflow moves on.
 
-Checks still guard the workflow either way: deterministic checks run commands, while agent-judged checks ask for a clear pass/fail verdict before the workflow moves on.
+### Retry-based model selection
 
-See `examples/workflows/demo.ts` and the `anvil-workflow-builder` skill for authoring guidance.
+When you ask Pi to build a workflow, you can tell it to use different models or thinking levels after a step has to retry. For example, `retryModelSelections: [{ retry: 0, model: "cheap/model:minimal" }, { retry: 1, model: "strong/model", thinkingLevel: "high" }]` starts cheaper on the first attempt (`retry: 0`), then upgrades after the first retry. The highest selection with `retry` less than or equal to the current retry count wins, and model selection also applies to declarative subagent launches.
+
+This is useful when most runs should stay fast and inexpensive, but difficult cases deserve more reasoning instead of repeating the same attempt with the same settings. By default, Anvil keeps the same model and thinking level for every attempt, so nothing changes unless you ask for retry-based escalation.
+
+You do not need to know the workflow syntax for this feature. Describe the escalation you want in plain language, and the `anvil-workflow-builder` skill will capture it while building the workflow.
 
 ## Develop
 

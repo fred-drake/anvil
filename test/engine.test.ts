@@ -609,6 +609,129 @@ describe("runWorkflow", () => {
 		expect(host.subagentRequests[1]?.task).toContain("missing file");
 	});
 
+	it("uses static subagent model and thinking on every retry when no retry selections are configured", async () => {
+		const host = new FakeHost();
+		host.enableSubagents();
+		host.execQueue.push({ stdout: "", stderr: "missing file", code: 1 }, { stdout: "ok", stderr: "", code: 0 });
+
+		const summary = await runWorkflow({
+			workflow: workflow([
+				{
+					id: "implement",
+					prompt: "Implement {input}",
+					delegation: { subagent: "cmux" },
+					model: "cheap/model:minimal",
+					checks: [{ type: "deterministic", id: "tests", command: "test", onFail: { goto: "implement", maxLoops: 1 } }],
+				},
+			]),
+			input: "task",
+			cwd: "/repo",
+			host,
+			runId: "run-static-subagent-model-retry",
+		});
+
+		expect(summary.state).toBe("succeeded");
+		expect(host.subagentRequests.map(({ model, thinkingLevel }) => ({ model, thinkingLevel }))).toEqual([
+			{ model: "cheap/model", thinkingLevel: "minimal" },
+			{ model: "cheap/model", thinkingLevel: "minimal" },
+		]);
+	});
+
+	it("switches subagent model and thinking from the highest retry threshold less than or equal to the retry count", async () => {
+		const host = new FakeHost();
+		host.enableSubagents();
+		host.execQueue.push(
+			{ stdout: "", stderr: "retry 1", code: 1 },
+			{ stdout: "", stderr: "retry 2", code: 1 },
+			{ stdout: "", stderr: "retry 3", code: 1 },
+			{ stdout: "ok", stderr: "", code: 0 },
+		);
+
+		const summary = await runWorkflow({
+			workflow: workflow([
+				{
+					id: "implement",
+					prompt: "Implement {input}; retry {loop}",
+					delegation: { subagent: "cmux" },
+					model: "cheap/model:minimal",
+					retryModelSelections: [
+						{ retry: 1, model: "strong/model", thinkingLevel: "high" },
+						{ retry: 3, model: "strongest/model:xhigh" },
+					],
+					checks: [{ type: "deterministic", id: "tests", command: "test", onFail: { goto: "implement", maxLoops: 3 } }],
+				},
+			]),
+			input: "task",
+			cwd: "/repo",
+			host,
+			runId: "run-retry-subagent-models",
+		});
+
+		expect(summary.state).toBe("succeeded");
+		expect(host.subagentRequests.map(({ model, thinkingLevel }) => ({ model, thinkingLevel }))).toEqual([
+			{ model: "cheap/model", thinkingLevel: "minimal" },
+			{ model: "strong/model", thinkingLevel: "high" },
+			{ model: "strong/model", thinkingLevel: "high" },
+			{ model: "strongest/model", thinkingLevel: "xhigh" },
+		]);
+	});
+
+	it("uses resume-seeded retry count when choosing subagent retry model selection", async () => {
+		const host = new FakeHost();
+		host.enableSubagents();
+
+		const summary = await runWorkflow({
+			workflow: workflow([
+				{
+					id: "implement",
+					prompt: "Implement {input}; retry {loop}",
+					delegation: { subagent: "herdr" },
+					model: "cheap/model:low",
+					retryModelSelections: [{ retry: 2, model: "strong/model:high" }],
+				},
+			]),
+			input: "resume feature",
+			cwd: "/repo",
+			host,
+			runId: "run-resume-subagent-retry-model",
+			resume: { stepNumber: 1, retryCount: 2 },
+		});
+
+		expect(summary.state).toBe("succeeded");
+		expect(host.subagentRequests).toHaveLength(1);
+		expect(host.subagentRequests[0]).toMatchObject({ model: "strong/model", thinkingLevel: "high" });
+		expect(host.subagentRequests[0]?.task).toContain("retry 2");
+	});
+
+	it("applies retry model selections to main-session retries as well as subagent launches", async () => {
+		const host = new FakeHost();
+		host.execQueue.push({ stdout: "", stderr: "missing file", code: 1 }, { stdout: "ok", stderr: "", code: 0 });
+
+		const summary = await runWorkflow({
+			workflow: workflow([
+				{
+					id: "implement",
+					prompt: "Implement {input}; retry {loop}",
+					delegation: "none",
+					model: "cheap/model:minimal",
+					retryModelSelections: [{ retry: 1, model: "strong/model", thinkingLevel: "high" }],
+					checks: [{ type: "deterministic", id: "tests", command: "test", onFail: { goto: "implement", maxLoops: 1 } }],
+				},
+			]),
+			input: "task",
+			cwd: "/repo",
+			host,
+			runId: "run-main-session-retry-models",
+		});
+
+		expect(summary.state).toBe("succeeded");
+		expect(host.modelSelections).toEqual([
+			{ model: "cheap/model", thinkingLevel: "minimal" },
+			{ model: "strong/model", thinkingLevel: "high" },
+			undefined,
+		]);
+	});
+
 	it("returns an aborted summary when aborted mid-step", async () => {
 		const host = new FakeHost();
 		const controller = new AbortController();

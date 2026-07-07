@@ -23,6 +23,7 @@ const STEP_KEYS = new Set([
 	"prompt",
 	"model",
 	"thinkingLevel",
+	"retryModelSelections",
 	"delegation",
 	"subagentTimeoutMs",
 	"agent",
@@ -35,6 +36,7 @@ const DETERMINISTIC_CHECK_KEYS = new Set(["type", "id", "name", "command", "cwd"
 const AGENT_CHECK_KEYS = new Set(["type", "id", "name", "prompt", "agent", "onFail"]);
 const CHECK_KEYS = new Set([...DETERMINISTIC_CHECK_KEYS, ...AGENT_CHECK_KEYS]);
 const ON_FAIL_KEYS = new Set(["goto", "maxLoops", "onExhausted", "feedback"]);
+const RETRY_MODEL_SELECTION_KEYS = new Set(["retry", "model", "thinkingLevel"]);
 
 export function validateWorkflow(value: unknown): ValidationResult {
 	const errors: string[] = [];
@@ -131,6 +133,9 @@ function validateStep(step: unknown, index: number, stepIds: Set<string>, errors
 			`${path}.thinkingLevel must be one of "off", "minimal", "low", "medium", "high", or "xhigh" when provided`,
 		);
 	}
+	if (step.retryModelSelections !== undefined) {
+		validateRetryModelSelections(step.retryModelSelections, `${path}.retryModelSelections`, errors);
+	}
 	if (step.delegation !== undefined) {
 		validateDelegation(step.delegation, `${path}.delegation`, errors);
 	}
@@ -159,6 +164,45 @@ function validateStep(step: unknown, index: number, stepIds: Set<string>, errors
 			);
 		}
 	}
+}
+
+function validateRetryModelSelections(selections: unknown, path: string, errors: string[]): void {
+	if (!Array.isArray(selections)) {
+		errors.push(`${path} must be an array when provided`);
+		return;
+	}
+
+	const seenRetries = new Set<number>();
+	const duplicateRetries = new Set<number>();
+	selections.forEach((selection, index) => {
+		const selectionPath = `${path}[${index}]`;
+		if (!isRecord(selection)) {
+			errors.push(`${selectionPath} must be an object`);
+			return;
+		}
+
+		validateKnownKeys(selection, selectionPath, RETRY_MODEL_SELECTION_KEYS, errors);
+		if (!isNonNegativeInteger(selection.retry)) {
+			errors.push(`${selectionPath}.retry must be a non-negative integer`);
+		} else {
+			const retry = selection.retry as number;
+			if (seenRetries.has(retry)) duplicateRetries.add(retry);
+			seenRetries.add(retry);
+		}
+		if (selection.model !== undefined && (typeof selection.model !== "string" || selection.model.length === 0)) {
+			errors.push(`${selectionPath}.model must be a non-empty string when provided`);
+		}
+		if (selection.thinkingLevel !== undefined && !isThinkingLevel(selection.thinkingLevel)) {
+			errors.push(
+				`${selectionPath}.thinkingLevel must be one of "off", "minimal", "low", "medium", "high", or "xhigh" when provided`,
+			);
+		}
+		if (selection.model === undefined && selection.thinkingLevel === undefined) {
+			errors.push(`${selectionPath} must provide model or thinkingLevel`);
+		}
+	});
+
+	for (const retry of duplicateRetries) errors.push(`${path} duplicate retry value ${retry}`);
 }
 
 function validateCheck(check: unknown, path: string, stepIds: Set<string>, errors: string[]): void {

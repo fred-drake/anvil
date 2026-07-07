@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { loadWorkflowFile } from "../src/discovery.ts";
-import { resolveStepModelSelection } from "../src/engine.ts";
+import { resolveStepModelSelection, type StepModelSelection } from "../src/engine.ts";
 import { workflowSubagentBackends } from "../src/prompts.ts";
 import { defineWorkflow, type WorkflowDefinition } from "../src/types.ts";
 
@@ -18,6 +18,29 @@ describe("workflow public contract", () => {
 
 		expect(workflow.steps[0]?.model).toBe("openai-codex/gpt-5.5:high");
 		expect(workflow.steps[1]?.thinkingLevel).toBe("xhigh");
+	});
+
+	it("exposes retry-based model selection fields", () => {
+		const workflow = defineWorkflow({
+			name: "retry-model-contract",
+			steps: [
+				{
+					id: "implement",
+					prompt: "Use retry-aware model selection",
+					model: "cheap/model:minimal",
+					retryModelSelections: [{ retry: 1, model: "strong/model", thinkingLevel: "high" }],
+				},
+			],
+		});
+		const source = readFileSync(new URL("../src/types.ts", import.meta.url), "utf8");
+
+		expect((workflow.steps[0] as any).retryModelSelections).toEqual([
+			{ retry: 1, model: "strong/model", thinkingLevel: "high" },
+		]);
+		expect(source).toMatch(/export\s+interface\s+WorkflowModelSelection/);
+		expect(source).toMatch(/export\s+interface\s+WorkflowRetryModelSelection/);
+		expect(source).toMatch(/retry\s*:\s*number/);
+		expect(source).toMatch(/retryModelSelections\??\s*:\s*WorkflowRetryModelSelection\[\]/);
 	});
 
 	it("exposes herdr as a supported declarative subagent backend", () => {
@@ -43,6 +66,27 @@ describe("workflow public contract", () => {
 		expect(resolveStepModelSelection({ id: "three", prompt: "c", model: "router/model:exacto" })).toEqual({
 			model: "router/model:exacto",
 		});
+	});
+
+	it("resolves retry-based model selections with fallback and threshold semantics", () => {
+		const resolve = resolveStepModelSelection as unknown as (
+			step: WorkflowDefinition["steps"][number],
+			retryCount?: number,
+		) => StepModelSelection | undefined;
+		const step = {
+			id: "implement",
+			prompt: "a",
+			model: "cheap/model:minimal",
+			retryModelSelections: [
+				{ retry: 1, model: "strong/model", thinkingLevel: "high" },
+				{ retry: 3, model: "strongest/model:xhigh", thinkingLevel: "medium" },
+			],
+		};
+
+		expect(resolve(step, 0)).toEqual({ model: "cheap/model", thinkingLevel: "minimal" });
+		expect(resolve(step, 1)).toEqual({ model: "strong/model", thinkingLevel: "high" });
+		expect(resolve(step, 2)).toEqual({ model: "strong/model", thinkingLevel: "high" });
+		expect(resolve(step, 3)).toEqual({ model: "strongest/model", thinkingLevel: "medium" });
 	});
 
 	it("reports auto-detected default subagent backends for workflow preflight", () => {
@@ -87,6 +131,15 @@ describe("workflow public contract", () => {
 		expect(readme).toContain("CMUX_SHELL_INTEGRATION=1");
 	});
 
+	it("documents retry-based subagent model selection in the README", () => {
+		const readme = readFileSync(new URL("../README.md", import.meta.url), "utf8");
+
+		expect(readme).toContain("retryModelSelections");
+		expect(readme).toMatch(/retry\s*:\s*0[^\n]+first attempt|first attempt[^\n]+retry\s*:\s*0/i);
+		expect(readme).toMatch(/highest[^\n]+retry[^\n]+less than or equal|less than or equal[^\n]+retry[^\n]+wins/i);
+		expect(readme).toMatch(/subagent[\s\S]{0,240}model|model[\s\S]{0,240}subagent/i);
+	});
+
 	it("keeps the workflow builder skill aligned with supported subagent backends", () => {
 		const source = readFileSync(new URL("../skills/anvil-workflow-builder/SKILL.md", import.meta.url), "utf8");
 
@@ -96,6 +149,14 @@ describe("workflow public contract", () => {
 		expect(source).toContain("HERDR_ENV=1");
 		expect(source).toContain("CMUX_SHELL_INTEGRATION=1");
 		expect(source).toMatch(/default[^\n]+delegation:\s*"auto"|delegation:\s*"auto"[^\n]+default/i);
+	});
+
+	it("keeps the workflow builder skill aligned with retry-based model selection", () => {
+		const source = readFileSync(new URL("../skills/anvil-workflow-builder/SKILL.md", import.meta.url), "utf8");
+
+		expect(source).toContain("retryModelSelections");
+		expect(source).toMatch(/retry\s*:\s*0[^\n]+first attempt|first attempt[^\n]+retry\s*:\s*0/i);
+		expect(source).toMatch(/retry[\s\S]{0,240}model|model[\s\S]{0,240}retry/i);
 	});
 
 	it("keeps workflow examples aligned with auto-detected subagent defaults", () => {

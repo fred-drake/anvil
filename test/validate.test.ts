@@ -104,6 +104,63 @@ describe("validateWorkflow", () => {
 		expect(validateWorkflow(workflow)).toEqual({ ok: true, workflow });
 	});
 
+	it("accepts retry-based model and thinking-level settings", () => {
+		const workflow = {
+			name: "retry-model-selection",
+			steps: [
+				{
+					id: "implement",
+					prompt: "a",
+					model: "cheap/model:minimal",
+					retryModelSelections: [
+						{ retry: 1, model: "strong/model", thinkingLevel: "high" },
+						{ retry: 3, model: "strongest/model:xhigh" },
+						{ retry: 4, thinkingLevel: "xhigh" },
+					],
+				},
+			],
+		};
+
+		expect(validateWorkflow(workflow)).toEqual({ ok: true, workflow });
+	});
+
+	it("rejects malformed retry-based model and thinking-level settings", () => {
+		const result = validateWorkflow({
+			name: "bad-retry-model-selection",
+			steps: [
+				{
+					id: "implement",
+					prompt: "a",
+					retryModelSelections: [
+						"not-object",
+						{ retry: -1, model: "strong/model" },
+						{ retry: 1.5, thinkingLevel: "deep" },
+						{ retry: 2, model: "" },
+						{ retry: 3 },
+						{ retry: 2, model: "other/model" },
+					],
+				},
+				{ id: "other", prompt: "b", retryModelSelections: "nope" },
+			],
+		});
+
+		expect(result.ok).toBe(false);
+		if (!result.ok) {
+			expect(result.errors).toContain("workflow.steps[0].retryModelSelections[0] must be an object");
+			expect(result.errors).toContain("workflow.steps[0].retryModelSelections[1].retry must be a non-negative integer");
+			expect(result.errors).toContain("workflow.steps[0].retryModelSelections[2].retry must be a non-negative integer");
+			expect(result.errors).toContain("workflow.steps[0].retryModelSelections[3].model must be a non-empty string when provided");
+			expect(result.errors).toContain(
+				'workflow.steps[0].retryModelSelections[2].thinkingLevel must be one of "off", "minimal", "low", "medium", "high", or "xhigh" when provided',
+			);
+			expect(result.errors).toContain(
+				"workflow.steps[0].retryModelSelections[4] must provide model or thinkingLevel",
+			);
+			expect(result.errors).toContain("workflow.steps[0].retryModelSelections duplicate retry value 2");
+			expect(result.errors).toContain("workflow.steps[1].retryModelSelections must be an array when provided");
+		}
+	});
+
 	it("rejects malformed per-step model and thinking-level settings", () => {
 		const result = validateWorkflow({
 			name: "bad-model-selection",
@@ -169,6 +226,7 @@ describe("validateWorkflow", () => {
 					id: "one",
 					prompt: "a",
 					skipif: () => false,
+					retrymodelselections: [{ retry: 1, model: "strong/model" }],
 					onFail: { goto: "one", onexhausted: "continue" },
 					checks: [
 						{
@@ -188,6 +246,7 @@ describe("validateWorkflow", () => {
 			expect(result.errors).toContain("workflow.defaults.maxloops is not recognized");
 			expect(result.errors).toContain("workflow.defaults.onFail.maxloops is not recognized");
 			expect(result.errors).toContain("workflow.steps[0].skipif is not recognized");
+			expect(result.errors).toContain("workflow.steps[0].retrymodelselections is not recognized");
 			expect(result.errors).toContain("workflow.steps[0].onFail.onexhausted is not recognized");
 			expect(result.errors).toContain("workflow.steps[0].checks[0].check is not recognized");
 			expect(result.errors).toContain("workflow.steps[0].checks[0].onFail.maxloops is not recognized");

@@ -64,6 +64,18 @@ export interface AgentCheck {
 
 export type Check = DeterministicCheck | AgentCheck;
 
+export interface WorkflowModelSelection {
+	/** Model reference. Supports pi's provider/id and optional :<thinking> shorthand. */
+	model?: string;
+	/** Thinking level. Omitted values keep the workflow-start or base step default. */
+	thinkingLevel?: WorkflowThinkingLevel;
+}
+
+export interface WorkflowRetryModelSelection extends WorkflowModelSelection {
+	/** Retry count threshold where this selection begins applying; 0 is the first attempt. */
+	retry: number;
+}
+
 export interface WorkflowStep {
 	id: string;
 	title?: string;
@@ -72,6 +84,8 @@ export interface WorkflowStep {
 	model?: string;
 	/** Thinking level for this step. Omitted steps use the workflow-start default. */
 	thinkingLevel?: WorkflowThinkingLevel;
+	/** Retry-based model/thinking overrides. Highest retry <= current retry count wins. */
+	retryModelSelections?: WorkflowRetryModelSelection[];
 	/** Preferred per-step delegation mode; overrides workflow.defaults.delegation. */
 	delegation?: WorkflowDelegation;
 	/** Timeout for declarative subagent execution. Defaults to 1_800_000ms. */
