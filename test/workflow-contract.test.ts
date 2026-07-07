@@ -116,6 +116,22 @@ describe("workflow public contract", () => {
 		expect(source).toContain("npx vitest run --coverage");
 		expect(source).not.toContain("npm test -- --coverage");
 	});
+
+	it("exposes a public runWorkflow resume contract", () => {
+		const source = readFileSync(new URL("../src/engine.ts", import.meta.url), "utf8");
+
+		expect(source).toMatch(/export\s+interface\s+ResumeWorkflowOptions/);
+		expect(source).toMatch(/stepNumber\s*:\s*number/);
+		expect(source).toMatch(/retryCount\??\s*:\s*number/);
+		expect(source).toMatch(/resume\??\s*:\s*ResumeWorkflowOptions/);
+	});
+
+	it("documents the resume command and numbered step selection in the README", () => {
+		const readme = readFileSync(new URL("../README.md", import.meta.url), "utf8");
+
+		expect(readme).toContain("/anvil resume <step> [retry-number]");
+		expect(readme).toMatch(/resume[\s\S]*(numbered|step\s+number|1\.)[\s\S]*(retry-number|retry count)/i);
+	});
 });
 
 type AutoSubagentEnv = Partial<Record<"HERDR_ENV" | "CMUX_SHELL_INTEGRATION", string>>;

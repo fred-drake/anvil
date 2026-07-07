@@ -33,10 +33,13 @@ Workflows live in:
 /anvil list
 /anvil validate <name>
 /anvil run <name> <free-form task input>
+/anvil resume <step> [retry-number]
 /anvil abort
 ```
 
 Use `/anvil list` to see available workflows, `/anvil validate` to check that one is ready, and `/anvil run` to start a workflow with whatever task input you want to give it.
+
+Use `/anvil resume` after a failed or aborted run to see a numbered step map, for example `1. Plan`, `2. Implement`, `3. Verify`. Then run `/anvil resume <step> [retry-number]` with the one-based step number to restart from that workflow step using the original task input. Omit `retry-number` for no retries, or pass a retry count to seed `{loop}` on the resumed step.
 
 ## Declarative subagents
 

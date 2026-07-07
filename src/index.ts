@@ -3,14 +3,14 @@ import { fileURLToPath } from "node:url";
 import { Type, type Api, type Model } from "@earendil-works/pi-ai";
 import { defineTool, type ExtensionAPI, type ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { discoverWorkflows, type DiscoveredWorkflow } from "./discovery.ts";
-import { type EngineHost, runWorkflow, type StepModelSelection } from "./engine.ts";
+import { type AnvilCheckpoint, type EngineHost, runWorkflow, type StepModelSelection } from "./engine.ts";
 import { AnvilAbortError } from "./errors.ts";
 import { VerdictBus } from "./gates.ts";
 import { buildSubagentResultMessage, workflowSubagentBackends } from "./prompts.ts";
 import { cmuxUnavailableMessage, isCmuxAvailable } from "./subagent/cmux.ts";
 import { herdrUnavailableMessage, isHerdrAvailable } from "./subagent/herdr.ts";
 import { runCmuxSubagent, runHerdrSubagent } from "./subagent/runner.ts";
-import type { WorkflowSubagentBackend } from "./types.ts";
+import type { WorkflowDefinition, WorkflowSubagentBackend } from "./types.ts";
 import { renderSummaryMarkdown } from "./ui.ts";
 
 const baseDir = dirname(fileURLToPath(import.meta.url));
@@ -19,6 +19,14 @@ const builderSkillPath = join(baseDir, "..", "skills", "anvil-workflow-builder",
 type ActiveRun = {
 	controller: AbortController;
 	runId: string;
+};
+
+type ResumableRun = {
+	runId: string;
+	workflowName: string;
+	input: string;
+	finalState: "failed" | "aborted";
+	timestamp: string;
 };
 
 type AutocompleteItem = {
@@ -146,8 +154,13 @@ export default function piAnvil(pi: ExtensionAPI) {
 							activeRun = run;
 						});
 						return;
+					case "resume":
+						await handleResume(pi, ctx, rest, () => activeRun, (run) => {
+							activeRun = run;
+						});
+						return;
 					default:
-						ctx.ui.notify("Usage: /anvil <run|list|validate|abort> ...", "warning");
+						ctx.ui.notify("Usage: /anvil <run|list|validate|abort|resume> ...", "warning");
 				}
 			} catch (error) {
 				ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
@@ -210,6 +223,96 @@ export default function piAnvil(pi: ExtensionAPI) {
 				cwd: ctx.cwd,
 				host,
 				runId,
+				signal: controller.signal,
+			})
+				.catch((error) => {
+					ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
+				})
+				.finally(() => {
+					if (getActiveRun()?.runId === runId) setActiveRun(undefined);
+				});
+		} finally {
+			if (!launched && getActiveRun()?.runId === runId) setActiveRun(undefined);
+		}
+	}
+
+	async function handleResume(
+		piApi: ExtensionAPI,
+		ctx: ExtensionCommandContext,
+		rest: string,
+		getActiveRun: () => ActiveRun | undefined,
+		setActiveRun: (run: ActiveRun | undefined) => void,
+	): Promise<void> {
+		if (getActiveRun()) {
+			ctx.ui.notify("An Anvil workflow is already running in this session.", "error");
+			return;
+		}
+
+		const previousRun = findLatestResumableRun(getSessionEntries(ctx));
+		if (!previousRun) {
+			ctx.ui.notify("No failed or aborted Anvil run was found to resume in this session.", "warning");
+			return;
+		}
+
+		const parsed = parseResumeArgs(rest);
+		if (parsed.error || parsed.stepNumber === undefined) {
+			const workflow = await findWorkflow(ctx.cwd, previousRun.workflowName);
+			if (!workflow) {
+				ctx.ui.notify(`Workflow "${previousRun.workflowName}" was not found.`, "error");
+				return;
+			}
+			if (workflow.errors?.length || !workflow.workflow) {
+				postCommandMessage(piApi, "anvil-validate", formatWorkflowErrors(workflow));
+				return;
+			}
+			if (parsed.error) ctx.ui.notify(parsed.error, "error");
+			postCommandMessage(piApi, "anvil-resume", formatResumeStepMap(previousRun, workflow.workflow));
+			return;
+		}
+
+		const controller = new AbortController();
+		const runId = newRunId();
+		setActiveRun({ controller, runId });
+		let launched = false;
+		try {
+			const workflow = await findWorkflow(ctx.cwd, previousRun.workflowName);
+			if (!workflow) {
+				ctx.ui.notify(`Workflow "${previousRun.workflowName}" was not found.`, "error");
+				return;
+			}
+			if (workflow.errors?.length || !workflow.workflow) {
+				postCommandMessage(piApi, "anvil-validate", formatWorkflowErrors(workflow));
+				return;
+			}
+			if (parsed.stepNumber < 1 || parsed.stepNumber > workflow.workflow.steps.length) {
+				ctx.ui.notify(`Resume step ${parsed.stepNumber} is out of range for workflow "${workflow.workflow.name}".`, "error");
+				postCommandMessage(piApi, "anvil-resume", formatResumeStepMap(previousRun, workflow.workflow));
+				return;
+			}
+
+			const unavailableBackend = workflowSubagentBackends(workflow.workflow).find((backend) => !isSubagentBackendAvailable(backend));
+			if (unavailableBackend) {
+				ctx.ui.notify(
+					`Workflow "${workflow.workflow.name}" declares ${unavailableBackend} subagent delegation. ${subagentUnavailableMessage(unavailableBackend)}`,
+					"error",
+				);
+				return;
+			}
+
+			if (!ctx.isIdle()) await ctx.waitForIdle();
+			if (controller.signal.aborted) return;
+
+			const host = createEngineHost(piApi, ctx, controller);
+			launched = true;
+			ctx.ui.notify(`Resumed Anvil workflow "${workflow.workflow.name}" from step ${parsed.stepNumber} (${runId}).`, "info");
+
+			void runWorkflow({
+				workflow: workflow.workflow,
+				input: previousRun.input,
+				cwd: ctx.cwd,
+				host,
+				runId,
+				resume: { stepNumber: parsed.stepNumber, retryCount: parsed.retryCount },
 				signal: controller.signal,
 			})
 				.catch((error) => {
@@ -424,7 +527,7 @@ function extractAnvilArgumentText(textBeforeCursor: string): string | undefined 
 }
 
 export async function getAnvilCompletions(argumentPrefix: string, cwd: string) {
-	const subcommands = ["run", "list", "validate", "abort"];
+	const subcommands = ["run", "list", "validate", "abort", "resume"];
 	const trimmedStart = argumentPrefix.trimStart();
 	const parts = trimmedStart.split(/\s+/);
 	if (parts.length <= 1 && !trimmedStart.endsWith(" ")) {
@@ -458,6 +561,69 @@ function parseAnvilArgs(args: string): { subcommand: string; rest: string } {
 function parseRunArgs(rest: string): { name: string; input: string } {
 	const match = /^(\S+)(?:\s+([\s\S]*))?$/.exec(rest.trim());
 	return { name: match?.[1] ?? "", input: match?.[2] ?? "" };
+}
+
+function parseResumeArgs(rest: string): { stepNumber?: number; retryCount?: number; error?: string } {
+	const parts = rest.trim().split(/\s+/).filter(Boolean);
+	if (parts.length === 0) return {};
+	if (parts.length > 2) return { error: "Usage: /anvil resume <step> [retry-number]" };
+	if (!/^\d+$/.test(parts[0]!)) return { error: "Resume step must be a positive integer." };
+	const stepNumber = Number(parts[0]);
+	if (stepNumber < 1) return { error: "Resume step must be a positive integer." };
+	if (parts[1] === undefined) return { stepNumber };
+	if (!/^\d+$/.test(parts[1]!)) return { error: "Resume retry-number must be a non-negative integer." };
+	return { stepNumber, retryCount: Number(parts[1]) };
+}
+
+function getSessionEntries(ctx: ExtensionCommandContext): unknown[] {
+	const sessionManager = (ctx as ExtensionCommandContext & { sessionManager?: { getEntries?: () => unknown[] } }).sessionManager;
+	const entries = sessionManager?.getEntries?.();
+	return Array.isArray(entries) ? entries : [];
+}
+
+function findLatestResumableRun(entries: unknown[]): ResumableRun | undefined {
+	let latest: ResumableRun | undefined;
+	for (const entry of entries) {
+		const checkpoint = toAnvilCheckpoint(entry);
+		if (!checkpoint || checkpoint.phase !== "run_end") continue;
+		if (checkpoint.finalState !== "aborted" && checkpoint.finalState !== "failed") continue;
+		if (!checkpoint.runId || !checkpoint.workflowName || checkpoint.input === undefined) continue;
+		latest = {
+			runId: checkpoint.runId,
+			workflowName: checkpoint.workflowName,
+			input: checkpoint.input,
+			finalState: checkpoint.finalState,
+			timestamp: checkpoint.timestamp ?? "",
+		};
+	}
+	return latest;
+}
+
+function toAnvilCheckpoint(entry: unknown): Partial<AnvilCheckpoint> | undefined {
+	if (!entry || typeof entry !== "object") return undefined;
+	const record = entry as Record<string, unknown>;
+	if (record.customType !== "anvil-run") return undefined;
+	const data = record.data ?? record.details ?? record;
+	return data && typeof data === "object" ? (data as Partial<AnvilCheckpoint>) : undefined;
+}
+
+function formatResumeStepMap(run: ResumableRun, workflow: WorkflowDefinition): string {
+	const lines = [
+		`# Resume Anvil workflow \`${workflow.name}\``,
+		"",
+		`Latest resumable run: \`${run.runId}\` (${run.finalState})`,
+		`Task input: ${run.input || "_(empty)_"}`,
+		"",
+		"Choose the one-based step number to resume from:",
+		"",
+	];
+	workflow.steps.forEach((step, index) => {
+		const title = step.title ?? step.id;
+		lines.push(`${index + 1}. ${title} (\`${step.id}\`)`);
+	});
+	lines.push("", "Run `/anvil resume <step> [retry-number]`.");
+	lines.push("Omit `retry-number` for no retries, or pass the current retry count to seed `{loop}` for the resumed step.");
+	return lines.join("\n");
 }
 
 function formatWorkflowList(workflows: DiscoveredWorkflow[]): string {

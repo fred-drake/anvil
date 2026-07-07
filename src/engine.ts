@@ -70,12 +70,20 @@ export interface EngineHost {
 	postSummary(summary: RunSummary): void | Promise<void>;
 }
 
+export interface ResumeWorkflowOptions {
+	/** One-based workflow step number to resume from. */
+	stepNumber: number;
+	/** Current retry/loop count for the resumed step. Defaults to 0. */
+	retryCount?: number;
+}
+
 export interface RunWorkflowOptions {
 	workflow: WorkflowDefinition;
 	input: string;
 	cwd: string;
 	host: EngineHost;
 	runId?: string;
+	resume?: ResumeWorkflowOptions;
 	signal?: AbortSignal;
 }
 
@@ -147,6 +155,7 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<RunSumma
 		loops: 0,
 		checks: [],
 	}));
+	const resume = resolveResumeState(options, loopCounts, steps);
 
 	const checkpoint = (entry: Omit<AnvilCheckpoint, "runId" | "workflowName" | "input" | "timestamp">) => {
 		options.host.checkpoint({
@@ -193,8 +202,9 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<RunSumma
 		options.host.setStatus(formatStatus({ workflowName: options.workflow.name, phase: "starting" }));
 		options.host.setWidget(formatStepWidget(steps));
 		checkpoint({ phase: "run_start" });
+		if (resume.error) return finish("failed", resume.error);
 
-		let stepIndex = 0;
+		let stepIndex = resume.startIndex;
 		while (stepIndex < options.workflow.steps.length) {
 			throwIfAborted(options.signal);
 			const step = options.workflow.steps[stepIndex]!;
@@ -378,6 +388,33 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<RunSumma
 	}
 }
 
+function resolveResumeState(
+	options: RunWorkflowOptions,
+	loopCounts: Record<string, number>,
+	steps: StepRunState[],
+): { startIndex: number; error?: string } {
+	if (!options.resume) return { startIndex: 0 };
+
+	const { stepNumber, retryCount = 0 } = options.resume;
+	if (!Number.isInteger(stepNumber) || stepNumber < 1 || stepNumber > options.workflow.steps.length) {
+		return { startIndex: 0, error: `resume step must be an integer from 1 to ${options.workflow.steps.length}` };
+	}
+	if (!Number.isInteger(retryCount) || retryCount < 0) {
+		return { startIndex: 0, error: "resume retry count must be a non-negative integer" };
+	}
+
+	const startIndex = stepNumber - 1;
+	for (let index = 0; index < startIndex; index += 1) steps[index]!.status = "skipped";
+
+	if (retryCount > 0) {
+		const step = options.workflow.steps[startIndex]!;
+		loopCounts[`resume->${step.id}`] = retryCount;
+		steps[startIndex]!.loops = retryCount;
+	}
+
+	return { startIndex };
+}
+
 function resolveFailure(args: {
 	workflow: WorkflowDefinition;
 	step: WorkflowStep;
@@ -397,7 +434,8 @@ function resolveFailure(args: {
 	if (targetIndex === -1) return { kind: "stop", reason: `goto target "${policy.goto}" does not exist` };
 
 	const loopKey = `${args.check.id ?? `${args.step.id}:check${args.checkIndex + 1}`}->${policy.goto}`;
-	const nextCount = (args.loopCounts[loopKey] ?? 0) + 1;
+	const resumeSeed = args.loopCounts[`resume->${policy.goto}`] ?? 0;
+	const nextCount = Math.max(args.loopCounts[loopKey] ?? 0, resumeSeed) + 1;
 	args.loopCounts[loopKey] = nextCount;
 	const maxLoops = policy.maxLoops ?? args.workflow.defaults?.maxLoops ?? 3;
 

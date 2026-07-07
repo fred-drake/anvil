@@ -656,6 +656,111 @@ describe("runWorkflow", () => {
 		expect(summary.state).toBe("failed");
 		expect(summary.failureReason).toBe("request aborted by upstream provider");
 	});
+
+	it("resumes from a one-based step number without rerunning earlier steps", async () => {
+		const host = new FakeHost();
+		const summary = await runWorkflow({
+			workflow: workflow([
+				{ id: "plan", title: "Plan", prompt: "Plan {input}" },
+				{ id: "implement", title: "Implement", prompt: "Implement {input}" },
+				{ id: "verify", title: "Verify", prompt: "Verify {input}" },
+			]),
+			input: "resume feature",
+			cwd: "/tmp",
+			host,
+			runId: "run-resume",
+			resume: { stepNumber: 2 },
+		} as Parameters<typeof runWorkflow>[0] & { resume: { stepNumber: number } });
+
+		expect(summary.state).toBe("succeeded");
+		expect(host.instructions).toHaveLength(2);
+		expect(host.instructions[0]).toContain("step 2/3: Implement");
+		expect(host.instructions[0]).toContain("Implement resume feature");
+		expect(host.instructions[1]).toContain("step 3/3: Verify");
+		expect(host.checkpoints.filter((entry) => entry.phase === "step_start").map((entry) => entry.stepIndex)).toEqual([1, 2]);
+		expect(summary.steps.map((step) => step.status)).toEqual(["skipped", "passed", "passed"]);
+	});
+
+	it("seeds the resumed step loop count from the optional retry number", async () => {
+		const host = new FakeHost();
+		const summary = await runWorkflow({
+			workflow: workflow([{ id: "implement", prompt: "Implement {input}; retry {loop}" }]),
+			input: "resume feature",
+			cwd: "/tmp",
+			host,
+			runId: "run-resume-retry",
+			resume: { stepNumber: 1, retryCount: 3 },
+		} as Parameters<typeof runWorkflow>[0] & { resume: { stepNumber: number; retryCount: number } });
+
+		expect(summary.state).toBe("succeeded");
+		expect(host.instructions).toHaveLength(1);
+		expect(host.instructions[0]).toContain("Implement resume feature; retry 3");
+		expect(Math.max(0, ...Object.values(summary.loopCounts))).toBe(3);
+	});
+
+	it("increments retry loops from the resumed retry number on later check failures", async () => {
+		const host = new FakeHost();
+		host.execQueue.push({ stdout: "", stderr: "still failing", code: 1 }, { stdout: "", stderr: "", code: 0 });
+
+		const summary = await runWorkflow({
+			workflow: workflow([
+				{
+					id: "implement",
+					prompt: "Implement {input}; retry {loop}",
+					checks: [{ type: "deterministic", command: "test", onFail: { goto: "implement", maxLoops: 4 } }],
+				},
+			]),
+			input: "resume feature",
+			cwd: "/tmp",
+			host,
+			runId: "run-resume-retry-failure",
+			resume: { stepNumber: 1, retryCount: 3 },
+		});
+
+		expect(summary.state).toBe("succeeded");
+		expect(host.instructions[0]).toContain("retry 3");
+		expect(host.instructions[1]).toContain("retry 4");
+		expect(summary.loopCounts["implement:check1->implement"]).toBe(4);
+	});
+
+	it("rejects invalid resume step numbers before sending instructions", async () => {
+		const host = new FakeHost();
+		const summary = await runWorkflow({
+			workflow: workflow([{ id: "one", prompt: "1" }]),
+			input: "task",
+			cwd: "/tmp",
+			host,
+			runId: "run-bad-resume",
+			resume: { stepNumber: 0 },
+		} as Parameters<typeof runWorkflow>[0] & { resume: { stepNumber: number } });
+
+		expect(summary.state).toBe("failed");
+		expect(summary.failureReason).toMatch(/resume step.*1/i);
+		expect(host.instructions).toHaveLength(0);
+		expect(host.checkpoints.filter((entry) => entry.phase === "step_start")).toHaveLength(0);
+	});
+
+	it("resumes subagent-delegated steps with the original workflow step index", async () => {
+		const host = new FakeHost();
+		host.enableSubagents();
+		const summary = await runWorkflow({
+			workflow: workflow([
+				{ id: "plan", prompt: "Plan {input}" },
+				{ id: "implement", title: "Implement", prompt: "Implement {input}", delegation: { subagent: "cmux" } },
+			]),
+			input: "resume feature",
+			cwd: "/repo",
+			host,
+			runId: "run-resume-subagent",
+			resume: { stepNumber: 2 },
+		} as Parameters<typeof runWorkflow>[0] & { resume: { stepNumber: number } });
+
+		expect(summary.state).toBe("succeeded");
+		expect(host.instructions).toHaveLength(0);
+		expect(host.subagentRequests).toHaveLength(1);
+		expect(host.subagentRequests[0]).toMatchObject({ stepId: "implement", stepIndex: 1, stepCount: 2 });
+		expect(host.subagentRequests[0]?.task).toContain("step 2/2: Implement");
+	});
 });
 
 function workflow(steps: WorkflowDefinition["steps"]): WorkflowDefinition {
