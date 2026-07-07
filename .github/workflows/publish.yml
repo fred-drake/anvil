@@ -1,0 +1,77 @@
+name: Publish Package
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag, for example v0.1.0'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: publish-${{ github.workflow }}-${{ github.event.inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish @fred-drake/anvil
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Resolve version
+        id: version
+        shell: pwsh
+        env:
+          # Pass event data through env vars rather than interpolating it into the
+          # script body, so untrusted values cannot be injected into the run step.
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          $tag = $env:INPUT_TAG
+          if ([string]::IsNullOrWhiteSpace($tag)) { $tag = $env:REF_NAME }
+          if ($tag -notmatch '^v\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$') { throw "Tag must be vX.Y.Z or vX.Y.Z-prerelease. Got '$tag'." }
+          $version = $tag.Substring(1)
+          "version=$version" >> $env:GITHUB_OUTPUT
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          cache: npm
+
+      - name: Install Hypa
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSL https://hypabolic.github.io/Hypa/install.sh -o /tmp/install-hypa.sh
+          HYPA_INSTALL_DIR="$HOME/.local/bin" sh /tmp/install-hypa.sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/hypa" --version || "$HOME/.local/bin/hypa" version
+
+      - name: Install dependencies
+        run: hypa -c "npm ci"
+
+      - name: Stamp package version from tag
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: npm version "$VERSION" --no-git-tag-version --allow-same-version
+
+      - name: Validate package
+        run: |
+          hypa -c "npm run check"
+          hypa -c "npm pack --dry-run"
+
+      - name: Publish package
+        run: npx --yes npm@^11 publish --access public

@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Check (Node ${{ matrix.node-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: [22.14.0, 24]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+
+      - name: Install Hypa
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSL https://hypabolic.github.io/Hypa/install.sh -o /tmp/install-hypa.sh
+          HYPA_INSTALL_DIR="$HOME/.local/bin" sh /tmp/install-hypa.sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/hypa" --version || "$HOME/.local/bin/hypa" version
+
+      - name: Install dependencies
+        run: hypa -c "npm ci"
+
+      - name: Run checks
+        run: hypa -c "npm run check"
+
+      - name: Verify npm package contents
+        run: hypa -c "npm pack --dry-run"
