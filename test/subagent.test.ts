@@ -21,11 +21,26 @@ describe("buildSubagentLaunchCommand", () => {
 
 		expect(command).toContain("cd '/repo' && ");
 		expect(command).toContain("PI_ANVIL_SUBAGENT_SESSION='/tmp/run/step.jsonl' ");
-		expect(command).toContain("pi --session '/tmp/run/step.jsonl' -e '/ext/child.ts'");
+		expect(command).toMatch(/\bpi\b(?=[^;]*\s--session '\/tmp\/run\/step\.jsonl')(?=[^;]*\s-e '\/ext\/child\.ts')/);
 		expect(command).toContain("'@/tmp/run/step.task.md'");
 		expect(command).toContain("echo '__ANVIL_SUBAGENT_DONE_'$?'__'");
 		expect(command).not.toContain("--model");
 		expect(command).not.toContain("--thinking");
+	});
+
+	it("forces child pi into print mode so startup prompts cannot block pane closure", () => {
+		const command = buildSubagentLaunchCommand({
+			cwd: "/repo",
+			sessionFile: "/tmp/run/step.jsonl",
+			taskFile: "/tmp/run/step.task.md",
+			childExtensionPath: "/ext/child.ts",
+		});
+
+		expect(command).toMatch(/\bpi\b(?=[^;]*(?:\s--print\b|\s-p\b))(?=[^;]*\s--session\s)/);
+		expect(command).toContain("PI_ANVIL_SUBAGENT_SESSION='/tmp/run/step.jsonl'");
+		expect(command).toContain("echo '__ANVIL_SUBAGENT_DONE_'$?'__'");
+		expect(command).not.toContain("--continue");
+		expect(command).not.toContain("--resume");
 	});
 
 	it("passes model and thinking level to the child session", () => {

@@ -3,6 +3,8 @@ import { AnvilAbortError, throwIfAborted } from "../errors.ts";
 
 export const SUBAGENT_SENTINEL_PREFIX = "__ANVIL_SUBAGENT_DONE_";
 const SENTINEL_RE = /__ANVIL_SUBAGENT_DONE_(\d+)__/;
+const MISSING_CWD_PROMPT_RE = /cwd from session file does not exist/i;
+const CONTINUE_CANCEL_PROMPT_RE = /continue in current cwd[\s\S]*?(?:^|\n)\s*(?:→\s*)?Continue\b[\s\S]*?(?:^|\n)\s*Cancel\b/im;
 export const DEFAULT_SUBAGENT_TIMEOUT_MS = 1_800_000;
 export const DEFAULT_READ_SCREEN_FAILURE_LIMIT = 2;
 
@@ -67,6 +69,8 @@ export async function pollForExitWithReadScreen(
 			consecutiveReadFailures = 0;
 			const match = screen.match(SENTINEL_RE);
 			if (match) return { reason: "sentinel", exitCode: Number.parseInt(match[1]!, 10) };
+			const blockingPrompt = detectBlockingPiStartupPrompt(screen);
+			if (blockingPrompt) return { reason: "error", exitCode: 1, errorMessage: blockingPrompt };
 		} catch {
 			// Surface may already be gone — give the child a short grace period to write the sidecar,
 			// then fail fast instead of waiting for the full subagent timeout.
@@ -81,6 +85,16 @@ export async function pollForExitWithReadScreen(
 
 		await sleep(Math.min(intervalMs, Math.max(0, deadline - Date.now())), signal);
 	}
+}
+
+function detectBlockingPiStartupPrompt(screen: string): string | undefined {
+	if (MISSING_CWD_PROMPT_RE.test(screen)) {
+		return "Pi startup prompt blocked subagent auto-exit: cwd from session file does not exist.";
+	}
+	if (CONTINUE_CANCEL_PROMPT_RE.test(screen)) {
+		return "Pi startup prompt blocked subagent auto-exit; rerun the step after the session startup prompt is resolved.";
+	}
+	return undefined;
 }
 
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {

@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -122,10 +122,48 @@ describe("herdr backend parity with cmux", () => {
 		});
 
 		expect(readFileSync(logFile, "utf8").trim().split("\n")).toEqual([
-			"pane read 1-2 --source recent-unwrapped --lines 5",
+			"pane read 1-2 --source recent-unwrapped --lines 20",
 		]);
 	});
+
+	it("treats Pi's missing-cwd startup prompt as a subagent error instead of waiting for timeout", async () => {
+		const dir = tempDir();
+		const logFile = join(dir, "herdr.log");
+		installFakeHerdr(dir, logFile, { screenOutput: missingCwdPrompt() });
+		process.env.PATH = `${dir}:${ORIGINAL_PATH ?? ""}`;
+
+		await expect(pollForExit("1-2", join(dir, "session.jsonl"), undefined, 1, 50)).resolves.toMatchObject({
+			reason: "error",
+			exitCode: 1,
+			errorMessage: expect.stringContaining("cwd from session file does not exist"),
+		});
+	});
+
+	it("prefers an exit sidecar over stale missing-cwd prompt text in the herdr pane", async () => {
+		const dir = tempDir();
+		const logFile = join(dir, "herdr.log");
+		const sessionFile = join(dir, "session.jsonl");
+		installFakeHerdr(dir, logFile, { screenOutput: missingCwdPrompt() });
+		writeFileSync(`${sessionFile}.exit`, JSON.stringify({ type: "done" }), "utf8");
+		process.env.PATH = `${dir}:${ORIGINAL_PATH ?? ""}`;
+
+		await expect(pollForExit("1-2", sessionFile, undefined, 1, 50)).resolves.toEqual({ reason: "done", exitCode: 0 });
+		expect(existsSync(logFile)).toBe(false);
+	});
 });
+
+function missingCwdPrompt(): string {
+	return [
+		"cwd from session file does not exist",
+		"/private/var/folders/example/anvil-command/project",
+		"",
+		"continue in current cwd",
+		"/private/var/folders/example/anvil-command/project",
+		"",
+		"→ Continue",
+		"  Cancel",
+	].join("\n");
+}
 
 function installFakeHerdr(dir: string, logFile: string, options: { malformedCreate?: boolean; screenOutput?: string } = {}): void {
 	writeFileSync(

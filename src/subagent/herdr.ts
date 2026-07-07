@@ -124,7 +124,8 @@ export function pollForExit(
 	intervalMs?: number,
 	timeoutMs?: number,
 ): Promise<SubagentExit> {
-	return pollForExitWithReadScreen(readScreen, surface, sessionFile, signal, intervalMs, timeoutMs);
+	const readForPoll = (pane: string, lines = 5) => readScreen(pane, Math.max(lines, 20));
+	return pollForExitWithReadScreen(readForPoll, surface, sessionFile, signal, intervalMs, timeoutMs);
 }
 
 export async function closeSurface(surface: string): Promise<void> {
