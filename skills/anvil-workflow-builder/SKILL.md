@@ -25,7 +25,11 @@ Guide the user with pickers when Anvil-specific choices are missing. The user ma
    - If the user explicitly says user/global/personal scope, use user scope (`~/.pi/agent/anvil/workflows/<name>.ts`).
    - If the user explicitly says project/repo/local scope, use project scope (`.pi/anvil/workflows/<name>.ts`).
    - If they do not specifically name the user or project scope, ask with a picker containing exactly these two choices: user scope or project scope.
-3. Decide workflow delegation defaults: `delegation: { skill: "<skill-name>" }` to prefer a specific skill, `delegation: "auto"` to let the agent choose, or `delegation: "none"` to avoid subagents.
+3. Decide workflow delegation defaults:
+   - `delegation: { subagent: "cmux" }` — Anvil itself spawns each step in a dedicated pi subagent session inside a cmux surface (declarative; requires running pi inside cmux). Per-step `model`/`thinkingLevel` are passed to the subagent.
+   - `delegation: { skill: "<skill-name>" }` — prompt hint to prefer a specific skill (the main agent decides).
+   - `delegation: "auto"` — prompt hint to let the agent choose.
+   - `delegation: "none"` — avoid subagents.
 4. For each step, capture:
    - `id` (stable kebab-case identifier)
    - purpose / prompt

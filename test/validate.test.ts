@@ -62,6 +62,24 @@ describe("validateWorkflow", () => {
 		expect(validateWorkflow(workflow)).toEqual({ ok: true, workflow });
 	});
 
+	it("accepts cmux subagent delegation settings", () => {
+		const workflow = {
+			name: "subagent-delegation",
+			defaults: { delegation: { subagent: "cmux" } },
+			steps: [{ id: "one", prompt: "a", delegation: { subagent: "cmux" } }],
+		};
+		expect(validateWorkflow(workflow)).toEqual({ ok: true, workflow });
+	});
+
+	it("rejects unsupported subagent backends", () => {
+		const result = validateWorkflow({
+			name: "bad-subagent",
+			steps: [{ id: "one", prompt: "a", delegation: { subagent: "tmux" } }],
+		});
+		expect(result.ok).toBe(false);
+		if (!result.ok) expect(result.errors).toContain('workflow.steps[0].delegation.subagent must be "cmux"');
+	});
+
 	it("accepts per-step model and thinking-level settings", () => {
 		const workflow = {
 			name: "model-selection",
@@ -100,7 +118,9 @@ describe("validateWorkflow", () => {
 		});
 		expect(result.ok).toBe(false);
 		if (!result.ok) {
-			expect(result.errors).toContain('workflow.defaults.delegation must be "auto", "none", or an object with a skill string');
+			expect(result.errors).toContain(
+				'workflow.defaults.delegation must be "auto", "none", { skill: string }, or { subagent: "cmux" }',
+			);
 			expect(result.errors).toContain("workflow.steps[0].delegation.skill must be a non-empty string");
 		}
 	});

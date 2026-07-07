@@ -5,6 +5,9 @@ import { defineTool, type ExtensionAPI, type ExtensionCommandContext } from "@ea
 import { discoverWorkflows, type DiscoveredWorkflow } from "./discovery.ts";
 import { type EngineHost, runWorkflow, type StepModelSelection } from "./engine.ts";
 import { VerdictBus } from "./gates.ts";
+import { buildSubagentResultMessage, workflowUsesSubagentDelegation } from "./prompts.ts";
+import { cmuxUnavailableMessage, isCmuxAvailable } from "./subagent/cmux.ts";
+import { runCmuxSubagent } from "./subagent/runner.ts";
 import { renderSummaryMarkdown } from "./ui.ts";
 
 const baseDir = dirname(fileURLToPath(import.meta.url));
@@ -175,6 +178,11 @@ export default function piAnvil(pi: ExtensionAPI) {
 			return;
 		}
 
+		if (workflowUsesSubagentDelegation(workflow.workflow) && !isCmuxAvailable()) {
+			ctx.ui.notify(`Workflow "${workflow.workflow.name}" declares cmux subagent delegation. ${cmuxUnavailableMessage()}`, "error");
+			return;
+		}
+
 		if (!ctx.isIdle()) await ctx.waitForIdle();
 
 		const controller = new AbortController();
@@ -228,6 +236,40 @@ function createEngineHost(pi: ExtensionAPI, ctx: ExtensionCommandContext, contro
 				model,
 				(selection.thinkingLevel ?? defaultThinkingLevel) as ReturnType<ExtensionAPI["getThinkingLevel"]>,
 			);
+		},
+		async runSubagent(request, signal) {
+			const result = await runCmuxSubagent(
+				{
+					name: `Anvil: ${request.stepTitle}`,
+					task: request.task,
+					cwd: request.cwd,
+					runId: request.runId,
+					stepId: request.stepId,
+					model: request.model,
+					thinkingLevel: request.thinkingLevel,
+				},
+				signal,
+			);
+			// Inject the outcome into the main session's context (no extra turn)
+			// so agent checks and later steps know what the subagent did.
+			pi.sendMessage(
+				{
+					customType: "anvil-subagent-result",
+					content: buildSubagentResultMessage({
+						workflowName: request.workflowName,
+						stepTitle: request.stepTitle,
+						stepIndex: request.stepIndex,
+						stepCount: request.stepCount,
+						backend: request.backend,
+						summary: result.summary,
+						sessionFile: result.sessionFile,
+					}),
+					display: true,
+					details: { ...result, stepId: request.stepId, runId: request.runId },
+				},
+				{ triggerTurn: false },
+			);
+			return result;
 		},
 		sendInstruction(instruction) {
 			pendingTurn = waitForTurnCompletion(ctx, controller.signal);

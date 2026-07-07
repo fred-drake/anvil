@@ -1,6 +1,14 @@
 import { executeAgentCheck, executeDeterministicCheck, type GateResult, type Verdict } from "./gates.ts";
-import { buildStepInstruction } from "./prompts.ts";
-import type { Check, OnFailPolicy, WorkflowContext, WorkflowDefinition, WorkflowStep, WorkflowThinkingLevel } from "./types.ts";
+import { buildStepInstruction, buildSubagentStepTask, resolveStepDelegation } from "./prompts.ts";
+import type {
+	Check,
+	OnFailPolicy,
+	WorkflowContext,
+	WorkflowDefinition,
+	WorkflowStep,
+	WorkflowSubagentBackend,
+	WorkflowThinkingLevel,
+} from "./types.ts";
 import { formatStatus, formatStepWidget } from "./ui.ts";
 
 export interface EngineExecOptions {
@@ -23,8 +31,32 @@ export interface StepModelSelection {
 
 const THINKING_LEVELS = new Set<WorkflowThinkingLevel>(["off", "minimal", "low", "medium", "high", "xhigh"]);
 
+export interface SubagentStepRunRequest {
+	runId: string;
+	workflowName: string;
+	stepId: string;
+	stepTitle: string;
+	stepIndex: number;
+	stepCount: number;
+	backend: WorkflowSubagentBackend;
+	/** Full task prompt for the subagent session. */
+	task: string;
+	cwd: string;
+	model?: string;
+	thinkingLevel?: WorkflowThinkingLevel;
+}
+
+export interface SubagentStepRunResult {
+	summary: string;
+	sessionFile?: string;
+	exitCode: number;
+	errorMessage?: string;
+}
+
 export interface EngineHost {
 	applyStepModelSelection?(selection: StepModelSelection | undefined): void | Promise<void>;
+	/** Run a subagent-delegated step to completion. Required for workflows using delegation: { subagent }. */
+	runSubagent?(request: SubagentStepRunRequest, signal?: AbortSignal): Promise<SubagentStepRunResult>;
 	sendInstruction(instruction: string): void;
 	waitForTurnComplete(signal?: AbortSignal): Promise<void>;
 	exec(command: string, args: string[], options?: EngineExecOptions): Promise<EngineExecResult>;
@@ -165,27 +197,83 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<RunSumma
 
 			stepState.status = "running";
 			updateStepUi(options, steps, stepIndex, "step");
-			try {
-				await options.host.applyStepModelSelection?.(resolveStepModelSelection(step));
-			} catch (error) {
-				stepState.status = "failed";
-				updateStepUi(options, steps, stepIndex, "failed");
-				throw error;
-			}
-			const instruction = await buildStepInstruction({
-				workflow: options.workflow,
-				step,
-				ctx,
-				stepIndex,
-				stepCount: options.workflow.steps.length,
-				feedback: feedbackByStep.get(step.id),
-			});
-			feedbackByStep.delete(step.id);
+			const delegation = resolveStepDelegation(options.workflow, step);
+			if (delegation.mode === "subagent") {
+				if (!options.host.runSubagent) {
+					stepState.status = "failed";
+					updateStepUi(options, steps, stepIndex, "failed");
+					return finish(
+						"failed",
+						`step "${step.id}" declares delegation: { subagent: "${delegation.backend}" }, but this host cannot run subagents`,
+					);
+				}
+				const task = await buildSubagentStepTask({
+					workflow: options.workflow,
+					step,
+					ctx,
+					stepIndex,
+					stepCount: options.workflow.steps.length,
+					feedback: feedbackByStep.get(step.id),
+				});
+				feedbackByStep.delete(step.id);
 
-			checkpoint({ phase: "step_start", stepId: step.id, stepIndex });
-			options.host.sendInstruction(instruction);
-			await options.host.waitForTurnComplete(options.signal);
-			throwIfAborted(options.signal);
+				checkpoint({ phase: "step_start", stepId: step.id, stepIndex });
+				const selection = resolveStepModelSelection(step);
+				let result: SubagentStepRunResult;
+				try {
+					result = await options.host.runSubagent(
+						{
+							runId,
+							workflowName: options.workflow.name,
+							stepId: step.id,
+							stepTitle: step.title ?? step.id,
+							stepIndex,
+							stepCount: options.workflow.steps.length,
+							backend: delegation.backend,
+							task,
+							cwd: options.cwd,
+							model: selection?.model,
+							thinkingLevel: selection?.thinkingLevel,
+						},
+						options.signal,
+					);
+				} catch (error) {
+					stepState.status = "failed";
+					updateStepUi(options, steps, stepIndex, "failed");
+					throw error;
+				}
+				throwIfAborted(options.signal);
+				if (result.errorMessage || result.exitCode !== 0) {
+					stepState.status = "failed";
+					updateStepUi(options, steps, stepIndex, "failed");
+					return finish(
+						"failed",
+						result.errorMessage ?? `subagent for step "${step.id}" exited with code ${result.exitCode}`,
+					);
+				}
+			} else {
+				try {
+					await options.host.applyStepModelSelection?.(resolveStepModelSelection(step));
+				} catch (error) {
+					stepState.status = "failed";
+					updateStepUi(options, steps, stepIndex, "failed");
+					throw error;
+				}
+				const instruction = await buildStepInstruction({
+					workflow: options.workflow,
+					step,
+					ctx,
+					stepIndex,
+					stepCount: options.workflow.steps.length,
+					feedback: feedbackByStep.get(step.id),
+				});
+				feedbackByStep.delete(step.id);
+
+				checkpoint({ phase: "step_start", stepId: step.id, stepIndex });
+				options.host.sendInstruction(instruction);
+				await options.host.waitForTurnComplete(options.signal);
+				throwIfAborted(options.signal);
+			}
 
 			const checks = step.checks ?? [];
 			let jumpedOrAdvanced = false;

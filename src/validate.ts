@@ -184,7 +184,13 @@ function validateAgentCheck(check: Record<string, unknown>, path: string, errors
 function validateDelegation(delegation: unknown, path: string, errors: string[]): void {
 	if (delegation === "auto" || delegation === "none") return;
 	if (!isRecord(delegation)) {
-		errors.push(`${path} must be "auto", "none", or an object with a skill string`);
+		errors.push(`${path} must be "auto", "none", { skill: string }, or { subagent: "cmux" }`);
+		return;
+	}
+	if ("subagent" in delegation) {
+		if (delegation.subagent !== "cmux") {
+			errors.push(`${path}.subagent must be "cmux"`);
+		}
 		return;
 	}
 	if (typeof delegation.skill !== "string" || delegation.skill.length === 0) {

@@ -1,4 +1,12 @@
-import type { AgentCheck, WorkflowContext, WorkflowDefinition, WorkflowStep, Templatable, WorkflowDelegation } from "./types.ts";
+import type {
+	AgentCheck,
+	Templatable,
+	WorkflowContext,
+	WorkflowDefinition,
+	WorkflowDelegation,
+	WorkflowStep,
+	WorkflowSubagentBackend,
+} from "./types.ts";
 
 export interface StepInstructionOptions {
 	workflow: WorkflowDefinition;
@@ -46,6 +54,38 @@ export async function buildStepInstruction(options: StepInstructionOptions): Pro
 	return `${header}\n\nDo this workflow step directly in the main agent. Do not delegate to a subagent.\n\n${task}`;
 }
 
+/** Task prompt for a step Anvil runs itself in a dedicated subagent session. */
+export async function buildSubagentStepTask(options: StepInstructionOptions): Promise<string> {
+	const renderedPrompt = await renderTemplatable(options.step.prompt, options.ctx);
+	const task = appendFeedback(renderedPrompt, options.feedback);
+	const title = options.step.title ?? options.step.id;
+	const header = `[anvil] Workflow "${options.workflow.name}" — step ${options.stepIndex + 1}/${options.stepCount}: ${title}`;
+
+	return (
+		`${header}\n\n` +
+		`You are a subagent session executing this workflow step. Complete the task autonomously, without asking for confirmation. ` +
+		`Your final message is reported back to the main workflow session as this step's outcome, so end with a concise summary of what you did.\n\n` +
+		`Task:\n${task}`
+	);
+}
+
+export function buildSubagentResultMessage(args: {
+	workflowName: string;
+	stepTitle: string;
+	stepIndex: number;
+	stepCount: number;
+	backend: WorkflowSubagentBackend;
+	summary: string;
+	sessionFile?: string;
+}): string {
+	const sessionLine = args.sessionFile ? `\n\nSubagent session: ${args.sessionFile}` : "";
+	return (
+		`[anvil] Workflow "${args.workflowName}" — step ${args.stepIndex + 1}/${args.stepCount} "${args.stepTitle}" ` +
+		`was executed by a ${args.backend} subagent session. Treat the summary below as this step's outcome; do not redo the work.\n\n` +
+		`Subagent summary:\n${args.summary}${sessionLine}`
+	);
+}
+
 export async function buildAgentCheckInstruction(args: {
 	workflow: WorkflowDefinition;
 	step: WorkflowStep;
@@ -79,7 +119,8 @@ export function appendFeedback(prompt: string, feedback?: string): string {
 export type ResolvedStepDelegation =
 	| { mode: "none" }
 	| { mode: "auto"; hint?: string }
-	| { mode: "skill"; skill: string };
+	| { mode: "skill"; skill: string }
+	| { mode: "subagent"; backend: WorkflowSubagentBackend };
 
 export function resolveStepDelegation(workflow: WorkflowDefinition, step: WorkflowStep): ResolvedStepDelegation {
 	if (step.runInMain) return { mode: "none" };
@@ -96,7 +137,12 @@ function resolveConfiguredDelegation(delegation: WorkflowDelegation | undefined)
 	if (!delegation) return undefined;
 	if (delegation === "auto") return { mode: "auto" };
 	if (delegation === "none") return { mode: "none" };
+	if ("subagent" in delegation) return { mode: "subagent", backend: delegation.subagent };
 	return { mode: "skill", skill: delegation.skill };
+}
+
+export function workflowUsesSubagentDelegation(workflow: WorkflowDefinition): boolean {
+	return workflow.steps.some((step) => resolveStepDelegation(workflow, step).mode === "subagent");
 }
 
 export function getCurrentLoopCount(ctx: WorkflowContext): number {

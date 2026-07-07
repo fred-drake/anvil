@@ -24,12 +24,19 @@ export type OnFailPolicy =
 			feedback?: boolean;
 	  };
 
+/** Terminal-multiplexer backend Anvil can spawn subagent sessions in. */
+export type WorkflowSubagentBackend = "cmux";
+
 export type WorkflowDelegation =
 	| "auto"
 	| "none"
 	| {
 			/** Pi skill name to prefer when delegating this workflow/step. */
 			skill: string;
+	  }
+	| {
+			/** Anvil spawns the step itself in a dedicated subagent session on this backend. */
+			subagent: WorkflowSubagentBackend;
 	  };
 
 export interface DeterministicCheck {

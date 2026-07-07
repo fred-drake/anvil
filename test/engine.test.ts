@@ -6,6 +6,8 @@ import {
 	type EngineExecResult,
 	type RunSummary,
 	type StepModelSelection,
+	type SubagentStepRunRequest,
+	type SubagentStepRunResult,
 } from "../src/engine.ts";
 import type { Verdict } from "../src/gates.ts";
 import type { WorkflowDefinition } from "../src/types.ts";
@@ -21,6 +23,16 @@ class FakeHost implements EngineHost {
 	modelSelections: Array<StepModelSelection | undefined> = [];
 	modelSelectionError?: Error;
 	onWait?: () => void | Promise<void>;
+	subagentRequests: SubagentStepRunRequest[] = [];
+	subagentQueue: SubagentStepRunResult[] = [];
+	runSubagent?: (request: SubagentStepRunRequest, signal?: AbortSignal) => Promise<SubagentStepRunResult>;
+
+	enableSubagents(): void {
+		this.runSubagent = async (request) => {
+			this.subagentRequests.push(request);
+			return this.subagentQueue.shift() ?? { summary: "subagent done", sessionFile: "/tmp/child.jsonl", exitCode: 0 };
+		};
+	}
 
 	async applyStepModelSelection(selection: StepModelSelection | undefined): Promise<void> {
 		this.modelSelections.push(selection);
@@ -291,6 +303,109 @@ describe("runWorkflow", () => {
 		});
 
 		expect(host.instructions[0]).toContain('Prefer agent/skill "implementer"');
+	});
+
+	it("runs subagent-delegated steps through host.runSubagent instead of the main session", async () => {
+		const host = new FakeHost();
+		host.enableSubagents();
+		const summary = await runWorkflow({
+			workflow: {
+				...workflow([{ id: "one", title: "Implement", prompt: "Do {input}", model: "openai-codex/gpt-5.5:high" }]),
+				defaults: { delegation: { subagent: "cmux" } },
+			},
+			input: "task",
+			cwd: "/repo",
+			host,
+			runId: "run",
+		});
+
+		expect(summary.state).toBe("succeeded");
+		expect(host.instructions).toHaveLength(0);
+		expect(host.modelSelections).toHaveLength(0);
+		expect(host.subagentRequests).toHaveLength(1);
+		const request = host.subagentRequests[0]!;
+		expect(request.backend).toBe("cmux");
+		expect(request.cwd).toBe("/repo");
+		expect(request.stepTitle).toBe("Implement");
+		expect(request.model).toBe("openai-codex/gpt-5.5");
+		expect(request.thinkingLevel).toBe("high");
+		expect(request.task).toContain("Do task");
+		expect(request.task).toContain("subagent session executing this workflow step");
+	});
+
+	it("lets steps override subagent delegation back to the main agent", async () => {
+		const host = new FakeHost();
+		host.enableSubagents();
+		await runWorkflow({
+			workflow: {
+				...workflow([{ id: "one", prompt: "Do {input}", runInMain: true }]),
+				defaults: { delegation: { subagent: "cmux" } },
+			},
+			input: "task",
+			cwd: "/repo",
+			host,
+			runId: "run",
+		});
+
+		expect(host.subagentRequests).toHaveLength(0);
+		expect(host.instructions).toHaveLength(1);
+	});
+
+	it("fails when subagent delegation is declared but the host cannot run subagents", async () => {
+		const host = new FakeHost();
+		const summary = await runWorkflow({
+			workflow: workflow([{ id: "one", prompt: "1", delegation: { subagent: "cmux" } }]),
+			input: "task",
+			cwd: "/repo",
+			host,
+			runId: "run",
+		});
+
+		expect(summary.state).toBe("failed");
+		expect(summary.steps[0]?.status).toBe("failed");
+		expect(summary.failureReason).toContain("cannot run subagents");
+		expect(host.instructions).toHaveLength(0);
+	});
+
+	it("fails the run when the subagent reports an error", async () => {
+		const host = new FakeHost();
+		host.enableSubagents();
+		host.subagentQueue.push({ summary: "boom", exitCode: 1, errorMessage: "provider overloaded" });
+		const summary = await runWorkflow({
+			workflow: workflow([{ id: "one", prompt: "1", delegation: { subagent: "cmux" } }]),
+			input: "task",
+			cwd: "/repo",
+			host,
+			runId: "run",
+		});
+
+		expect(summary.state).toBe("failed");
+		expect(summary.failureReason).toBe("provider overloaded");
+	});
+
+	it("loops subagent steps with feedback from failed checks", async () => {
+		const host = new FakeHost();
+		host.enableSubagents();
+		host.execQueue.push({ stdout: "", stderr: "missing file", code: 1 }, { stdout: "ok", stderr: "", code: 0 });
+		const summary = await runWorkflow({
+			workflow: workflow([
+				{
+					id: "implement",
+					prompt: "Implement {input}",
+					delegation: { subagent: "cmux" },
+					checks: [{ type: "deterministic", id: "tests", command: "test", onFail: { goto: "implement", maxLoops: 1 } }],
+				},
+			]),
+			input: "task",
+			cwd: "/repo",
+			host,
+			runId: "run",
+		});
+
+		expect(summary.state).toBe("succeeded");
+		expect(host.subagentRequests).toHaveLength(2);
+		expect(host.subagentRequests[1]?.task).toContain("## Feedback from failed check");
+		expect(host.subagentRequests[1]?.task).toContain("missing file");
 	});
 
 	it("returns an aborted summary when aborted mid-step", async () => {
