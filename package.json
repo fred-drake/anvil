@@ -1,7 +1,32 @@
 {
-  "name": "anvil",
-  "version": "0.1.0",
-  "private": true,
+  "name": "@fred-drake/anvil",
+  "version": "0.0.1",
+  "description": "Pi extension that runs declarative TypeScript workflows with deterministic and agent-judged gates.",
+  "homepage": "https://github.com/fred-drake/anvil#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/fred-drake/anvil.git"
+  },
+  "bugs": {
+    "url": "https://github.com/fred-drake/anvil/issues"
+  },
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-extension",
+    "workflow",
+    "agent"
+  ],
+  "files": [
+    "assets",
+    "extensions",
+    "skills",
+    "src",
+    "README.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
   "type": "module",
   "scripts": {
     "dev": "pi -e ./src/index.ts",
@@ -12,6 +37,9 @@
   "pi": {
     "extensions": [
       "./extensions/anvil/index.ts"
+    ],
+    "skills": [
+      "./skills"
     ]
   },
   "dependencies": {
