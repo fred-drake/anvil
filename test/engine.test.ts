@@ -118,6 +118,41 @@ describe("runWorkflow", () => {
 		]);
 	});
 
+	it("does not touch model selection when the workflow declares no model or thinking overrides", async () => {
+		const host = new FakeHost();
+		const summary = await runWorkflow({
+			workflow: workflow([
+				{ id: "one", prompt: "1" },
+				{ id: "two", prompt: "2" },
+			]),
+			input: "task",
+			cwd: "/tmp",
+			host,
+			runId: "run",
+		});
+
+		expect(summary.state).toBe("succeeded");
+		expect(host.instructions).toHaveLength(2);
+		expect(host.modelSelections).toEqual([]);
+	});
+
+	it("does not restore model selection after a failed run with no model or thinking overrides", async () => {
+		const host = new FakeHost();
+		host.execQueue.push({ stdout: "", stderr: "boom", code: 1 });
+
+		const summary = await runWorkflow({
+			workflow: workflow([{ id: "one", prompt: "1", checks: [{ type: "deterministic", command: "false" }] }]),
+			input: "task",
+			cwd: "/tmp",
+			host,
+			runId: "run",
+		});
+
+		expect(summary.state).toBe("failed");
+		expect(summary.failureReason).toContain("boom");
+		expect(host.modelSelections).toEqual([]);
+	});
+
 	it("does not apply model selection for skipped steps", async () => {
 		const host = new FakeHost();
 		const summary = await runWorkflow({

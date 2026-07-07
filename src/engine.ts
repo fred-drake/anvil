@@ -138,6 +138,7 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<RunSumma
 	const loopCounts: Record<string, number> = {};
 	const feedbackByStep = new Map<string, string>();
 	const attempts = new Map<string, number>();
+	const workflowHasModelSelectionOverrides = hasWorkflowModelSelectionOverrides(options.workflow);
 	let shouldRestoreModelSelection = false;
 	const steps = options.workflow.steps.map<StepRunState>((step) => ({
 		id: step.id,
@@ -266,13 +267,15 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<RunSumma
 					);
 				}
 			} else {
-				try {
-					shouldRestoreModelSelection = true;
-					await options.host.applyStepModelSelection?.(resolveStepModelSelection(step));
-				} catch (error) {
-					stepState.status = "failed";
-					updateStepUi(options, steps, stepIndex, "failed");
-					throw error;
+				if (workflowHasModelSelectionOverrides) {
+					try {
+						shouldRestoreModelSelection = true;
+						await options.host.applyStepModelSelection?.(resolveStepModelSelection(step));
+					} catch (error) {
+						stepState.status = "failed";
+						updateStepUi(options, steps, stepIndex, "failed");
+						throw error;
+					}
 				}
 				const instruction = await buildStepInstruction({
 					workflow: options.workflow,
@@ -409,6 +412,10 @@ function resolveFailure(args: {
 	if (policy.feedback !== false) args.feedbackByStep.set(policy.goto, args.result.reason);
 	args.host.notify(`Anvil check failed; returning to step "${policy.goto}" (${nextCount}/${maxLoops}).`, "warning");
 	return { kind: "goto", targetIndex };
+}
+
+function hasWorkflowModelSelectionOverrides(workflow: WorkflowDefinition): boolean {
+	return workflow.steps.some((step) => step.model !== undefined || step.thinkingLevel !== undefined);
 }
 
 export function resolveStepModelSelection(step: WorkflowStep): StepModelSelection | undefined {
