@@ -38,6 +38,16 @@ describe("validateWorkflow", () => {
 		if (!result.ok) expect(result.errors.join("\n")).toContain('goto target "missing" does not exist');
 	});
 
+	it("rejects defaults goto targets that do not exist", () => {
+		const result = validateWorkflow({
+			name: "dangling-default",
+			defaults: { onFail: { goto: "missing" } },
+			steps: [{ id: "one", prompt: "a" }],
+		});
+		expect(result.ok).toBe(false);
+		if (!result.ok) expect(result.errors).toContain('workflow.defaults.onFail.goto target "missing" does not exist');
+	});
+
 	it("rejects malformed checks", () => {
 		const result = validateWorkflow({
 			name: "bad-check",
@@ -144,6 +154,41 @@ describe("validateWorkflow", () => {
 			expect(result.errors).toContain("workflow.defaults.onFail.maxLoops must be a non-negative integer when provided");
 			expect(result.errors).toContain('workflow.defaults.onFail.onExhausted must be "stop" or "continue" when provided');
 			expect(result.errors).toContain("workflow.defaults.onFail.feedback must be a boolean when provided");
+		}
+	});
+
+	it("rejects unknown keys at every workflow config level", () => {
+		const result = validateWorkflow({
+			name: "unknown-keys",
+			onfail: "continue",
+			defaults: { maxloops: 2, onFail: { goto: "one", maxloops: 1 } },
+			steps: [
+				{
+					id: "one",
+					prompt: "a",
+					skipif: () => false,
+					onFail: { goto: "one", onexhausted: "continue" },
+					checks: [
+						{
+							type: "agent",
+							prompt: "criteria",
+							check: "spelling mistake for checks",
+							onFail: { goto: "one", maxloops: 1 },
+						},
+					],
+				},
+			],
+		});
+
+		expect(result.ok).toBe(false);
+		if (!result.ok) {
+			expect(result.errors).toContain("workflow.onfail is not recognized");
+			expect(result.errors).toContain("workflow.defaults.maxloops is not recognized");
+			expect(result.errors).toContain("workflow.defaults.onFail.maxloops is not recognized");
+			expect(result.errors).toContain("workflow.steps[0].skipif is not recognized");
+			expect(result.errors).toContain("workflow.steps[0].onFail.onexhausted is not recognized");
+			expect(result.errors).toContain("workflow.steps[0].checks[0].check is not recognized");
+			expect(result.errors).toContain("workflow.steps[0].checks[0].onFail.maxloops is not recognized");
 		}
 	});
 

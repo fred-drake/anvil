@@ -15,12 +15,35 @@ export type ValidationResult =
 const WORKFLOW_NAME_RE = /^[a-z0-9-]+$/;
 const THINKING_LEVELS = new Set<WorkflowThinkingLevel>(["off", "minimal", "low", "medium", "high", "xhigh"]);
 
+const WORKFLOW_KEYS = new Set(["name", "description", "defaults", "steps"]);
+const DEFAULTS_KEYS = new Set(["delegation", "subagentTimeoutMs", "agent", "onFail", "maxLoops"]);
+const STEP_KEYS = new Set([
+	"id",
+	"title",
+	"prompt",
+	"model",
+	"thinkingLevel",
+	"delegation",
+	"subagentTimeoutMs",
+	"agent",
+	"runInMain",
+	"skipIf",
+	"checks",
+	"onFail",
+]);
+const DETERMINISTIC_CHECK_KEYS = new Set(["type", "id", "name", "command", "cwd", "timeoutMs", "onFail"]);
+const AGENT_CHECK_KEYS = new Set(["type", "id", "name", "prompt", "agent", "onFail"]);
+const CHECK_KEYS = new Set([...DETERMINISTIC_CHECK_KEYS, ...AGENT_CHECK_KEYS]);
+const ON_FAIL_KEYS = new Set(["goto", "maxLoops", "onExhausted", "feedback"]);
+
 export function validateWorkflow(value: unknown): ValidationResult {
 	const errors: string[] = [];
 
 	if (!isRecord(value)) {
 		return { ok: false, errors: ["workflow must be an object"] };
 	}
+
+	validateKnownKeys(value, "workflow", WORKFLOW_KEYS, errors);
 
 	if (typeof value.name !== "string" || value.name.length === 0) {
 		errors.push("workflow.name must be a non-empty string");
@@ -32,12 +55,9 @@ export function validateWorkflow(value: unknown): ValidationResult {
 		errors.push("workflow.description must be a string when provided");
 	}
 
-	if (value.defaults !== undefined) {
-		validateDefaults(value.defaults, errors);
-	}
-
 	const rawSteps = value.steps;
 	if (!Array.isArray(rawSteps) || rawSteps.length === 0) {
+		if (value.defaults !== undefined) validateDefaults(value.defaults, errors);
 		errors.push("workflow.steps must be a non-empty array");
 		return errors.length === 0
 			? { ok: true, workflow: value as unknown as WorkflowDefinition }
@@ -54,6 +74,7 @@ export function validateWorkflow(value: unknown): ValidationResult {
 	}
 	for (const id of duplicateIds) errors.push(`duplicate step id "${id}"`);
 
+	if (value.defaults !== undefined) validateDefaults(value.defaults, errors, stepIds);
 	rawSteps.forEach((step, index) => validateStep(step, index, stepIds, errors));
 
 	return errors.length === 0
@@ -61,11 +82,12 @@ export function validateWorkflow(value: unknown): ValidationResult {
 		: { ok: false, errors };
 }
 
-function validateDefaults(defaults: unknown, errors: string[]): void {
+function validateDefaults(defaults: unknown, errors: string[], stepIds?: Set<string>): void {
 	if (!isRecord(defaults)) {
 		errors.push("workflow.defaults must be an object when provided");
 		return;
 	}
+	validateKnownKeys(defaults, "workflow.defaults", DEFAULTS_KEYS, errors);
 	if (defaults.delegation !== undefined) {
 		validateDelegation(defaults.delegation, "workflow.defaults.delegation", errors);
 	}
@@ -79,7 +101,7 @@ function validateDefaults(defaults: unknown, errors: string[]): void {
 		errors.push("workflow.defaults.subagentTimeoutMs must be a positive integer when provided");
 	}
 	if (defaults.onFail !== undefined) {
-		validateOnFailPolicy(defaults.onFail, "workflow.defaults.onFail", undefined, errors);
+		validateOnFailPolicy(defaults.onFail, "workflow.defaults.onFail", stepIds, errors);
 	}
 }
 
@@ -89,6 +111,8 @@ function validateStep(step: unknown, index: number, stepIds: Set<string>, errors
 		errors.push(`${path} must be an object`);
 		return;
 	}
+
+	validateKnownKeys(step, path, STEP_KEYS, errors);
 
 	if (typeof step.id !== "string" || step.id.length === 0) {
 		errors.push(`${path}.id must be a non-empty string`);
@@ -154,13 +178,16 @@ function validateCheck(check: unknown, path: string, stepIds: Set<string>, error
 	}
 
 	if (check.type === "deterministic") {
+		validateKnownKeys(check, path, DETERMINISTIC_CHECK_KEYS, errors);
 		validateDeterministicCheck(check as Record<string, unknown>, path, errors);
 		return;
 	}
 	if (check.type === "agent") {
+		validateKnownKeys(check, path, AGENT_CHECK_KEYS, errors);
 		validateAgentCheck(check as Record<string, unknown>, path, errors);
 		return;
 	}
+	validateKnownKeys(check, path, CHECK_KEYS, errors);
 	errors.push(`${path}.type must be "deterministic" or "agent"`);
 }
 
@@ -216,6 +243,7 @@ function validateOnFailPolicy(
 		return;
 	}
 
+	validateKnownKeys(policy, path, ON_FAIL_KEYS, errors);
 	const goto = policy.goto;
 	if (typeof goto !== "string" || goto.length === 0) {
 		errors.push(`${path}.goto must be a non-empty string`);
@@ -234,6 +262,12 @@ function validateOnFailPolicy(
 	}
 	if (policy.feedback !== undefined && typeof policy.feedback !== "boolean") {
 		errors.push(`${path}.feedback must be a boolean when provided`);
+	}
+}
+
+function validateKnownKeys(record: Record<string, unknown>, path: string, allowed: Set<string>, errors: string[]): void {
+	for (const key of Object.keys(record)) {
+		if (!allowed.has(key)) errors.push(`${path}.${key} is not recognized`);
 	}
 }
 
