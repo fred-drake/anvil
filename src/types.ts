@@ -25,7 +25,7 @@ export type OnFailPolicy =
 	  };
 
 /** Terminal-multiplexer backend Anvil can spawn subagent sessions in. */
-export type WorkflowSubagentBackend = "cmux";
+export type WorkflowSubagentBackend = "cmux" | "herdr";
 
 export type WorkflowDelegation =
 	| "auto"
@@ -91,7 +91,7 @@ export interface WorkflowDefinition {
 	name: string;
 	description?: string;
 	defaults?: {
-		/** Preferred workflow-wide delegation mode; defaults to no delegation. */
+		/** Preferred workflow-wide delegation mode; defaults to auto-detected delegation. */
 		delegation?: WorkflowDelegation;
 		/** Default timeout for declarative subagent execution. Defaults to 1_800_000ms. */
 		subagentTimeoutMs?: number;

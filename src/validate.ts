@@ -217,12 +217,12 @@ function validateAgentCheck(check: Record<string, unknown>, path: string, errors
 function validateDelegation(delegation: unknown, path: string, errors: string[]): void {
 	if (delegation === "auto" || delegation === "none") return;
 	if (!isRecord(delegation)) {
-		errors.push(`${path} must be "auto", "none", { skill: string }, or { subagent: "cmux" }`);
+		errors.push(`${path} must be "auto", "none", { skill: string }, or { subagent: "cmux" | "herdr" }`);
 		return;
 	}
 	if ("subagent" in delegation) {
-		if (delegation.subagent !== "cmux") {
-			errors.push(`${path}.subagent must be "cmux"`);
+		if (delegation.subagent !== "cmux" && delegation.subagent !== "herdr") {
+			errors.push(`${path}.subagent must be "cmux" or "herdr"`);
 		}
 		return;
 	}

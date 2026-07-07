@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
 	runWorkflow,
 	type AnvilCheckpoint,
@@ -11,6 +11,19 @@ import {
 } from "../src/engine.ts";
 import type { Verdict } from "../src/gates.ts";
 import type { WorkflowDefinition } from "../src/types.ts";
+
+const ORIGINAL_HERDR_ENV = process.env.HERDR_ENV;
+const ORIGINAL_CMUX_SHELL_INTEGRATION = process.env.CMUX_SHELL_INTEGRATION;
+
+beforeEach(() => {
+	delete process.env.HERDR_ENV;
+	delete process.env.CMUX_SHELL_INTEGRATION;
+});
+
+afterEach(() => {
+	restoreEnv("HERDR_ENV", ORIGINAL_HERDR_ENV);
+	restoreEnv("CMUX_SHELL_INTEGRATION", ORIGINAL_CMUX_SHELL_INTEGRATION);
+});
 
 class FakeHost implements EngineHost {
 	instructions: string[] = [];
@@ -342,31 +355,183 @@ describe("runWorkflow", () => {
 	});
 
 	it("runs subagent-delegated steps through host.runSubagent instead of the main session", async () => {
-		const host = new FakeHost();
-		host.enableSubagents();
-		const summary = await runWorkflow({
-			workflow: {
-				...workflow([{ id: "one", title: "Implement", prompt: "Do {input}", model: "openai-codex/gpt-5.5:high" }]),
-				defaults: { delegation: { subagent: "cmux" } },
-			},
-			input: "task",
-			cwd: "/repo",
-			host,
-			runId: "run",
-		});
+		for (const backend of ["cmux", "herdr"] as const) {
+			const host = new FakeHost();
+			host.enableSubagents();
+			const summary = await runWorkflow({
+				workflow: {
+					...workflow([{ id: "one", title: "Implement", prompt: "Do {input}", model: "openai-codex/gpt-5.5:high" }]),
+					defaults: { delegation: { subagent: backend } },
+				},
+				input: "task",
+				cwd: "/repo",
+				host,
+				runId: "run",
+			});
 
-		expect(summary.state).toBe("succeeded");
-		expect(host.instructions).toHaveLength(0);
-		expect(host.modelSelections).toHaveLength(0);
-		expect(host.subagentRequests).toHaveLength(1);
-		const request = host.subagentRequests[0]!;
-		expect(request.backend).toBe("cmux");
-		expect(request.cwd).toBe("/repo");
-		expect(request.stepTitle).toBe("Implement");
-		expect(request.model).toBe("openai-codex/gpt-5.5");
-		expect(request.thinkingLevel).toBe("high");
-		expect(request.task).toContain("Do task");
-		expect(request.task).toContain("subagent session executing this workflow step");
+			expect(summary.state).toBe("succeeded");
+			expect(host.instructions).toHaveLength(0);
+			expect(host.modelSelections).toHaveLength(0);
+			expect(host.subagentRequests).toHaveLength(1);
+			const request = host.subagentRequests[0]!;
+			expect(request.backend).toBe(backend);
+			expect(request.cwd).toBe("/repo");
+			expect(request.stepTitle).toBe("Implement");
+			expect(request.model).toBe("openai-codex/gpt-5.5");
+			expect(request.thinkingLevel).toBe("high");
+			expect(request.task).toContain("Do task");
+			expect(request.task).toContain("subagent session executing this workflow step");
+		}
+	});
+
+	it("auto-detects HERDR_ENV=1 as herdr subagent delegation", async () => {
+		await withSubagentEnv({ HERDR_ENV: "1" }, async () => {
+			const host = new FakeHost();
+			host.enableSubagents();
+			const summary = await runWorkflow({
+				workflow: { ...workflow([{ id: "one", prompt: "Do {input}" }]), defaults: { delegation: "auto" } },
+				input: "task",
+				cwd: "/repo",
+				host,
+				runId: "run",
+			});
+
+			expect(summary.state).toBe("succeeded");
+			expect(host.instructions).toHaveLength(0);
+			expect(host.subagentRequests).toHaveLength(1);
+			expect(host.subagentRequests[0]?.backend).toBe("herdr");
+		});
+	});
+
+	it("auto-detects CMUX_SHELL_INTEGRATION=1 as cmux subagent delegation", async () => {
+		await withSubagentEnv({ CMUX_SHELL_INTEGRATION: "1" }, async () => {
+			const host = new FakeHost();
+			host.enableSubagents();
+			const summary = await runWorkflow({
+				workflow: { ...workflow([{ id: "one", prompt: "Do {input}" }]), defaults: { delegation: "auto" } },
+				input: "task",
+				cwd: "/repo",
+				host,
+				runId: "run",
+			});
+
+			expect(summary.state).toBe("succeeded");
+			expect(host.instructions).toHaveLength(0);
+			expect(host.subagentRequests).toHaveLength(1);
+			expect(host.subagentRequests[0]?.backend).toBe("cmux");
+		});
+	});
+
+	it("prefers herdr when both auto-detection environment variables are present", async () => {
+		await withSubagentEnv({ HERDR_ENV: "1", CMUX_SHELL_INTEGRATION: "1" }, async () => {
+			const host = new FakeHost();
+			host.enableSubagents();
+			await runWorkflow({
+				workflow: { ...workflow([{ id: "one", prompt: "Do {input}" }]), defaults: { delegation: "auto" } },
+				input: "task",
+				cwd: "/repo",
+				host,
+				runId: "run",
+			});
+
+			expect(host.subagentRequests[0]?.backend).toBe("herdr");
+		});
+	});
+
+	it("uses auto-detected subagents by default when no delegation is configured", async () => {
+		await withSubagentEnv({ CMUX_SHELL_INTEGRATION: "1" }, async () => {
+			const host = new FakeHost();
+			host.enableSubagents();
+			const summary = await runWorkflow({
+				workflow: workflow([{ id: "one", prompt: "Do {input}" }]),
+				input: "task",
+				cwd: "/repo",
+				host,
+				runId: "run",
+			});
+
+			expect(summary.state).toBe("succeeded");
+			expect(host.instructions).toHaveLength(0);
+			expect(host.subagentRequests[0]?.backend).toBe("cmux");
+		});
+	});
+
+	it("runs auto steps in the main session when no subagent environment is detected", async () => {
+		await withSubagentEnv({}, async () => {
+			const host = new FakeHost();
+			const summary = await runWorkflow({
+				workflow: { ...workflow([{ id: "one", prompt: "Do {input}" }]), defaults: { delegation: "auto" } },
+				input: "task",
+				cwd: "/repo",
+				host,
+				runId: "run",
+			});
+
+			expect(summary.state).toBe("succeeded");
+			expect(host.instructions).toHaveLength(1);
+			expect(host.subagentRequests).toHaveLength(0);
+		});
+	});
+
+	it("ignores non-1 shell integration values during auto detection", async () => {
+		await withSubagentEnv({ HERDR_ENV: "0", CMUX_SHELL_INTEGRATION: "true" }, async () => {
+			const host = new FakeHost();
+			const summary = await runWorkflow({
+				workflow: { ...workflow([{ id: "one", prompt: "Do {input}" }]), defaults: { delegation: "auto" } },
+				input: "task",
+				cwd: "/repo",
+				host,
+				runId: "run",
+			});
+
+			expect(summary.state).toBe("succeeded");
+			expect(host.instructions).toHaveLength(1);
+			expect(host.subagentRequests).toHaveLength(0);
+		});
+	});
+
+	it("honors explicit non-auto delegation over detected subagent environments", async () => {
+		await withSubagentEnv({ HERDR_ENV: "1", CMUX_SHELL_INTEGRATION: "1" }, async () => {
+			const noneHost = new FakeHost();
+			await runWorkflow({
+				workflow: workflow([{ id: "main", prompt: "Do {input}", delegation: "none" }]),
+				input: "task",
+				cwd: "/repo",
+				host: noneHost,
+				runId: "run-none",
+			});
+			expect(noneHost.instructions).toHaveLength(1);
+			expect(noneHost.subagentRequests).toHaveLength(0);
+
+			const cmuxHost = new FakeHost();
+			cmuxHost.enableSubagents();
+			await runWorkflow({
+				workflow: workflow([{ id: "cmux", prompt: "Do {input}", delegation: { subagent: "cmux" } }]),
+				input: "task",
+				cwd: "/repo",
+				host: cmuxHost,
+				runId: "run-cmux",
+			});
+			expect(cmuxHost.subagentRequests[0]?.backend).toBe("cmux");
+		});
+	});
+
+	it("fails when auto-detected subagent delegation is unavailable on the host", async () => {
+		await withSubagentEnv({ HERDR_ENV: "1" }, async () => {
+			const host = new FakeHost();
+			const summary = await runWorkflow({
+				workflow: { ...workflow([{ id: "one", prompt: "Do {input}" }]), defaults: { delegation: "auto" } },
+				input: "task",
+				cwd: "/repo",
+				host,
+				runId: "run",
+			});
+
+			expect(summary.state).toBe("failed");
+			expect(summary.failureReason).toContain("herdr");
+			expect(summary.failureReason).toContain("cannot run subagents");
+			expect(host.instructions).toHaveLength(0);
+		});
 	});
 
 	it("lets steps override subagent delegation back to the main agent", async () => {
@@ -495,4 +660,29 @@ describe("runWorkflow", () => {
 
 function workflow(steps: WorkflowDefinition["steps"]): WorkflowDefinition {
 	return { name: "test-workflow", steps };
+}
+
+type AutoSubagentEnv = Partial<Record<"HERDR_ENV" | "CMUX_SHELL_INTEGRATION", string>>;
+
+async function withSubagentEnv<T>(env: AutoSubagentEnv, fn: () => Promise<T>): Promise<T> {
+	const previous: AutoSubagentEnv = {
+		HERDR_ENV: process.env.HERDR_ENV,
+		CMUX_SHELL_INTEGRATION: process.env.CMUX_SHELL_INTEGRATION,
+	};
+	delete process.env.HERDR_ENV;
+	delete process.env.CMUX_SHELL_INTEGRATION;
+	if (env.HERDR_ENV !== undefined) process.env.HERDR_ENV = env.HERDR_ENV;
+	if (env.CMUX_SHELL_INTEGRATION !== undefined) process.env.CMUX_SHELL_INTEGRATION = env.CMUX_SHELL_INTEGRATION;
+
+	try {
+		return await fn();
+	} finally {
+		restoreEnv("HERDR_ENV", previous.HERDR_ENV);
+		restoreEnv("CMUX_SHELL_INTEGRATION", previous.CMUX_SHELL_INTEGRATION);
+	}
+}
+
+function restoreEnv(name: keyof AutoSubagentEnv, value: string | undefined): void {
+	if (value === undefined) delete process.env[name];
+	else process.env[name] = value;
 }

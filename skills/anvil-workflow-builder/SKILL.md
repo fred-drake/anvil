@@ -26,9 +26,11 @@ Guide the user with pickers when Anvil-specific choices are missing. The user ma
    - If the user explicitly says project/repo/local scope, use project scope (`.pi/anvil/workflows/<name>.ts`).
    - If they do not specifically name the user or project scope, ask with a picker containing exactly these two choices: user scope or project scope.
 3. Decide workflow delegation defaults:
+   - Default to `delegation: "auto"` unless the user specifically chooses otherwise; auto detects `HERDR_ENV=1` as herdr first, then `CMUX_SHELL_INTEGRATION=1` as cmux, and otherwise lets the main agent proceed.
    - `delegation: { subagent: "cmux" }` — Anvil itself spawns each step in a dedicated pi subagent session inside a cmux surface (declarative; requires running pi inside cmux). Per-step `model`/`thinkingLevel` are passed to the subagent.
+   - `delegation: { subagent: "herdr" }` — Anvil itself spawns each step in a dedicated pi subagent session inside a herdr pane/tab (declarative; requires running pi inside herdr). Per-step `model`/`thinkingLevel` are passed to the subagent.
    - `delegation: { skill: "<skill-name>" }` — prompt hint to prefer a specific skill (the main agent decides).
-   - `delegation: "auto"` — prompt hint to let the agent choose.
+   - `delegation: "auto"` — auto-detect herdr/cmux subagent support from the environment.
    - `delegation: "none"` — avoid subagents.
 4. For each step, capture:
    - `id` (stable kebab-case identifier)
@@ -60,7 +62,7 @@ export default defineWorkflow({
 	name: "example-workflow",
 	description: "Short description.",
 	defaults: {
-		delegation: { skill: "implementer" },
+		delegation: "auto",
 		onFail: "stop",
 		maxLoops: 3,
 	},

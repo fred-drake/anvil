@@ -34,6 +34,8 @@ All previously recorded High (H1) and Medium (M1–M4) issues were fixed and ver
 
 - [ ] **L14 [CLEANUP]** Stale verdict waiters linger after "no verdict reported". When `executeAgentCheck` gives up (`src/gates.ts:165-171`), the `VerdictBus` waiter stays registered for the rest of its 300s window, and a late `anvil_verdict` call is answered with "Anvil verdict recorded" (`src/index.ts:74-81`) even though the result is discarded. Cancel the waiter on the failure return, so a late verdict gets the "no active check" reply.
 
-- [ ] **L15 [DOCS]** Unclosed inline code span in README. `README.md:52` reads ``start Pi inside cmux with `cmux pi so Anvil has somewhere to launch them.`` — the closing backtick after `cmux pi` is missing, which mangles the rest of the sentence as code.
+- [x] **L15 [DOCS]** ~~Unclosed inline code span in README.~~ Fixed: the cmux launch note now closes the `cmux pi` inline code span in `README.md`.
 
 - [ ] **L16 [DOCS/SECURITY]** Workflow discovery executes workflow modules. `/anvil` completions, `list`, and `validate` import every `.pi/anvil/workflows/*.ts` via jiti (`src/discovery.ts:55-64`), running its top-level code. This matches pi's package.json-extension trust model, but it's worth a README note that opening a session in an untrusted repo and touching `/anvil` executes project-controlled code.
+
+- [ ] **L17 [ROBUSTNESS]** Herdr subagent workspace reuse has no liveness fallback. After the first split, `subagentWorkspace` is reused blindly for later tabs (`src/subagent/herdr.ts:19-20`, `:79`, `:101-103`), unlike cmux's pane-exists check; if the workspace is closed/moved or inferred as `""` because the environment lacks `HERDR_WORKSPACE_ID`, later delegated steps can fail or open in the currently focused workspace. Consider deriving the workspace from Herdr's JSON response and validating it before reusing it.

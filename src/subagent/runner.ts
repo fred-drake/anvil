@@ -1,25 +1,18 @@
 /**
- * Launches a declaratively-delegated workflow step as a pi subagent in a cmux
- * surface, waits for it to finish, and extracts the final assistant message as
- * the step summary.
+ * Launches a declaratively-delegated workflow step as a pi subagent in a
+ * terminal-multiplexer surface, waits for it to finish, and extracts the final
+ * assistant message as the step summary.
  */
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import {
-	closeSurface,
-	cmuxUnavailableMessage,
-	createSurface,
-	isCmuxAvailable,
-	pollForExit,
-	sendLongCommand,
-	shellEscape,
-	SUBAGENT_SENTINEL_PREFIX,
-} from "./cmux.ts";
+import * as cmux from "./cmux.ts";
+import * as herdr from "./herdr.ts";
+import { shellEscape, SUBAGENT_SENTINEL_PREFIX, type SubagentExit } from "./cmux.ts";
 
 export interface SubagentLaunch {
-	/** Display name for the cmux tab. */
+	/** Display name for the subagent terminal surface. */
 	name: string;
 	/** Full task prompt for the subagent. */
 	task: string;
@@ -90,9 +83,52 @@ export function extractLastAssistantText(sessionFile: string): string | undefine
 	return last;
 }
 
-/* v8 ignore start -- launches real cmux/pi child processes; command building and summary extraction are covered separately. */
+interface SubagentBackendAdapter {
+	isAvailable(): boolean;
+	unavailableMessage(): string;
+	createSurface(name: string): Promise<string>;
+	sendLongCommand(surface: string, command: string, scriptPath: string): Promise<void>;
+	pollForExit(surface: string, sessionFile: string, signal?: AbortSignal, intervalMs?: number, timeoutMs?: number): Promise<SubagentExit>;
+	closeSurface(surface: string): Promise<void>;
+}
+
+/* v8 ignore start -- launches real multiplexer/pi child processes; command building and summary extraction are covered separately. */
 export async function runCmuxSubagent(launch: SubagentLaunch, signal?: AbortSignal): Promise<SubagentResult> {
-	if (!isCmuxAvailable()) throw new Error(cmuxUnavailableMessage());
+	return runSubagentWithBackend(
+		launch,
+		{
+			isAvailable: cmux.isCmuxAvailable,
+			unavailableMessage: cmux.cmuxUnavailableMessage,
+			createSurface: cmux.createSurface,
+			sendLongCommand: cmux.sendLongCommand,
+			pollForExit: cmux.pollForExit,
+			closeSurface: cmux.closeSurface,
+		},
+		signal,
+	);
+}
+
+export async function runHerdrSubagent(launch: SubagentLaunch, signal?: AbortSignal): Promise<SubagentResult> {
+	return runSubagentWithBackend(
+		launch,
+		{
+			isAvailable: herdr.isHerdrAvailable,
+			unavailableMessage: herdr.herdrUnavailableMessage,
+			createSurface: herdr.createSurface,
+			sendLongCommand: herdr.sendLongCommand,
+			pollForExit: herdr.pollForExit,
+			closeSurface: herdr.closeSurface,
+		},
+		signal,
+	);
+}
+
+async function runSubagentWithBackend(
+	launch: SubagentLaunch,
+	backend: SubagentBackendAdapter,
+	signal?: AbortSignal,
+): Promise<SubagentResult> {
+	if (!backend.isAvailable()) throw new Error(backend.unavailableMessage());
 
 	const rootDir = join(tmpdir(), "anvil");
 	mkdirSync(rootDir, { recursive: true, mode: 0o700 });
@@ -113,10 +149,10 @@ export async function runCmuxSubagent(launch: SubagentLaunch, signal?: AbortSign
 		thinkingLevel: launch.thinkingLevel,
 	});
 
-	const surface = await createSurface(launch.name);
+	const surface = await backend.createSurface(launch.name);
 	try {
-		await sendLongCommand(surface, command, `${base}.sh`);
-		const exit = await pollForExit(surface, sessionFile, signal, undefined, launch.timeoutMs);
+		await backend.sendLongCommand(surface, command, `${base}.sh`);
+		const exit = await backend.pollForExit(surface, sessionFile, signal, undefined, launch.timeoutMs);
 		const summary =
 			extractLastAssistantText(sessionFile) ??
 			(exit.errorMessage
@@ -127,7 +163,7 @@ export async function runCmuxSubagent(launch: SubagentLaunch, signal?: AbortSign
 		return { summary, sessionFile, exitCode: exit.exitCode, errorMessage: exit.errorMessage };
 	} finally {
 		try {
-			await closeSurface(surface);
+			await backend.closeSurface(surface);
 		} catch {
 			// Surface may already be gone.
 		}

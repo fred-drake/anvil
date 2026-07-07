@@ -8,7 +8,9 @@ export default defineWorkflow({
 	name: "demo",
 	description: "Create or update a file, then verify its contents with a retry loop.",
 	defaults: {
-		delegation: { skill: "implementer" },
+		// Auto-detects HERDR_ENV=1 as herdr, then CMUX_SHELL_INTEGRATION=1 as cmux.
+		// Use { subagent: "cmux" }, { subagent: "herdr" }, { skill: "implementer" }, or "none" to override.
+		delegation: "auto",
 		maxLoops: 2,
 	},
 	steps: [

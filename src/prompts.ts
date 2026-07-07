@@ -205,24 +205,42 @@ export type ResolvedStepDelegation =
 export function resolveStepDelegation(workflow: WorkflowDefinition, step: WorkflowStep): ResolvedStepDelegation {
 	if (step.runInMain) return { mode: "none" };
 
-	const configured = step.delegation ?? workflow.defaults?.delegation;
-	const resolved = resolveConfiguredDelegation(configured);
-	if (resolved) return resolved;
-
 	const legacyHint = step.agent ?? workflow.defaults?.agent;
-	return legacyHint ? { mode: "auto", hint: legacyHint } : { mode: "none" };
+	const configured = step.delegation ?? workflow.defaults?.delegation;
+	if (configured) return resolveConfiguredDelegation(configured, legacyHint);
+
+	return resolveAutoDelegation(legacyHint);
 }
 
-function resolveConfiguredDelegation(delegation: WorkflowDelegation | undefined): ResolvedStepDelegation | undefined {
-	if (!delegation) return undefined;
-	if (delegation === "auto") return { mode: "auto" };
+function resolveConfiguredDelegation(delegation: WorkflowDelegation, legacyHint?: string): ResolvedStepDelegation {
+	if (delegation === "auto") return resolveAutoDelegation(legacyHint);
 	if (delegation === "none") return { mode: "none" };
 	if ("subagent" in delegation) return { mode: "subagent", backend: delegation.subagent };
 	return { mode: "skill", skill: delegation.skill };
 }
 
+function resolveAutoDelegation(hint?: string): ResolvedStepDelegation {
+	const backend = detectAutoSubagentBackend();
+	return backend ? { mode: "subagent", backend } : hint ? { mode: "auto", hint } : { mode: "auto" };
+}
+
+export function detectAutoSubagentBackend(): WorkflowSubagentBackend | undefined {
+	if (process.env.HERDR_ENV === "1") return "herdr";
+	if (process.env.CMUX_SHELL_INTEGRATION === "1") return "cmux";
+	return undefined;
+}
+
+export function workflowSubagentBackends(workflow: WorkflowDefinition): WorkflowSubagentBackend[] {
+	const backends = new Set<WorkflowSubagentBackend>();
+	for (const step of workflow.steps) {
+		const delegation = resolveStepDelegation(workflow, step);
+		if (delegation.mode === "subagent") backends.add(delegation.backend);
+	}
+	return [...backends];
+}
+
 export function workflowUsesSubagentDelegation(workflow: WorkflowDefinition): boolean {
-	return workflow.steps.some((step) => resolveStepDelegation(workflow, step).mode === "subagent");
+	return workflowSubagentBackends(workflow).length > 0;
 }
 
 export function getCurrentLoopCount(ctx: WorkflowContext): number {

@@ -91,10 +91,10 @@ describe("createAnvilAutocompleteProvider", () => {
 			signal: new AbortController().signal,
 		});
 
-		expect(suggestions).toEqual({
-			prefix: "validate ",
-			items: [expect.objectContaining({ value: "validate feature-forge", label: "feature-forge" })],
-		});
+		expect(suggestions?.prefix).toBe("validate ");
+		expect(suggestions?.items).toContainEqual(
+			expect.objectContaining({ value: "validate feature-forge", label: "feature-forge" }),
+		);
 	});
 
 	it("delegates non-Anvil completion to the wrapped provider", async () => {

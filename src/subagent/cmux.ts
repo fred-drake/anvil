@@ -7,18 +7,19 @@
  * by the child extension, with the terminal sentinel as crash fallback.
  */
 import { execFile } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { promisify } from "node:util";
-import { AnvilAbortError, throwIfAborted } from "../errors.ts";
 import { shellEscape } from "../shell.ts";
+import { interpretExitSidecar, pollForExitWithReadScreen } from "./exit.ts";
+import type { SubagentExit } from "./exit.ts";
+export {
+	DEFAULT_READ_SCREEN_FAILURE_LIMIT,
+	DEFAULT_SUBAGENT_TIMEOUT_MS,
+	SUBAGENT_SENTINEL_PREFIX,
+} from "./exit.ts";
 
 const execFileAsync = promisify(execFile);
-
-export const SUBAGENT_SENTINEL_PREFIX = "__ANVIL_SUBAGENT_DONE_";
-const SENTINEL_RE = /__ANVIL_SUBAGENT_DONE_(\d+)__/;
-export const DEFAULT_SUBAGENT_TIMEOUT_MS = 1_800_000;
-export const DEFAULT_READ_SCREEN_FAILURE_LIMIT = 2;
 
 /** Tracked subagent pane — reused across launches so tabs stack instead of splitting. */
 let subagentPane: string | null = null;
@@ -199,90 +200,24 @@ export async function closeSurface(surface: string): Promise<void> {
 }
 /* v8 ignore stop */
 
-export interface SubagentExit {
-	reason: "done" | "error" | "sentinel";
-	exitCode: number;
-	errorMessage?: string;
-}
-
-function interpretExitSidecar(data: unknown): SubagentExit {
-	const record = (typeof data === "object" && data !== null ? data : {}) as { type?: unknown; errorMessage?: unknown };
-	if (record.type === "error") {
-		const errorMessage =
-			typeof record.errorMessage === "string" && record.errorMessage.trim()
-				? record.errorMessage
-				: "Subagent exited with stopReason=error.";
-		return { reason: "error", exitCode: 1, errorMessage };
-	}
-	return { reason: "done", exitCode: 0 };
-}
-
-function consumeExitSidecar(sessionFile: string): SubagentExit | undefined {
-	try {
-		const exitFile = `${sessionFile}.exit`;
-		if (!existsSync(exitFile)) return undefined;
-		const data = JSON.parse(readFileSync(exitFile, "utf8"));
-		rmSync(exitFile, { force: true });
-		return interpretExitSidecar(data);
-	} catch {
-		return undefined;
-	}
-}
+export type { SubagentExit };
 
 /**
  * Poll until the subagent exits: `.exit` sidecar first (written by the child
  * extension), terminal sentinel as fallback for crashes / early shell errors.
  */
-export async function pollForExit(
+export function pollForExit(
 	surface: string,
 	sessionFile: string,
 	signal?: AbortSignal,
-	intervalMs = 1000,
-	timeoutMs = DEFAULT_SUBAGENT_TIMEOUT_MS,
+	intervalMs?: number,
+	timeoutMs?: number,
 ): Promise<SubagentExit> {
-	const deadline = Date.now() + timeoutMs;
-	let consecutiveReadFailures = 0;
-	for (;;) {
-		throwIfAborted(signal);
-		if (Date.now() >= deadline) throw new Error(`Subagent timed out after ${timeoutMs}ms`);
-
-		const sidecar = consumeExitSidecar(sessionFile);
-		if (sidecar) return sidecar;
-
-		try {
-			const screen = await readScreen(surface, 5);
-			consecutiveReadFailures = 0;
-			const match = screen.match(SENTINEL_RE);
-			if (match) return { reason: "sentinel", exitCode: Number.parseInt(match[1]!, 10) };
-		} catch {
-			// Surface may already be gone — give the child a short grace period to write the sidecar,
-			// then fail fast instead of waiting for the full subagent timeout.
-			if (Date.now() >= deadline) throw new Error(`Subagent timed out after ${timeoutMs}ms`);
-			const lateSidecar = consumeExitSidecar(sessionFile);
-			if (lateSidecar) return lateSidecar;
-			consecutiveReadFailures += 1;
-			if (consecutiveReadFailures >= DEFAULT_READ_SCREEN_FAILURE_LIMIT) {
-				throw new Error(`Subagent surface closed before completion: ${surface}`);
-			}
-		}
-
-		await sleep(Math.min(intervalMs, Math.max(0, deadline - Date.now())), signal);
-	}
+	return pollForExitWithReadScreen(readScreen, surface, sessionFile, signal, intervalMs, timeoutMs);
 }
 
-function sleep(ms: number, signal?: AbortSignal): Promise<void> {
-	return new Promise((resolve, reject) => {
-		if (signal?.aborted) return reject(new AnvilAbortError());
-		const timer = setTimeout(() => {
-			signal?.removeEventListener("abort", onAbort);
-			resolve();
-		}, ms);
-		function onAbort() {
-			clearTimeout(timer);
-			reject(new AnvilAbortError());
-		}
-		signal?.addEventListener("abort", onAbort, { once: true });
-	});
+function sleep(ms: number): Promise<void> {
+	return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function escapeRegExp(value: string): string {

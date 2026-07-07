@@ -2,6 +2,7 @@ import { defineConfig } from "vitest/config";
 
 export default defineConfig({
 	test: {
+		exclude: ["**/.direnv/**", "**/node_modules/**", "**/dist/**", "**/.git/**"],
 		coverage: {
 			exclude: ["src/subagent/cmux.ts"],
 			thresholds: {

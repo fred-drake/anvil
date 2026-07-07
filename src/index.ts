@@ -6,9 +6,11 @@ import { discoverWorkflows, type DiscoveredWorkflow } from "./discovery.ts";
 import { type EngineHost, runWorkflow, type StepModelSelection } from "./engine.ts";
 import { AnvilAbortError } from "./errors.ts";
 import { VerdictBus } from "./gates.ts";
-import { buildSubagentResultMessage, workflowUsesSubagentDelegation } from "./prompts.ts";
+import { buildSubagentResultMessage, workflowSubagentBackends } from "./prompts.ts";
 import { cmuxUnavailableMessage, isCmuxAvailable } from "./subagent/cmux.ts";
-import { runCmuxSubagent } from "./subagent/runner.ts";
+import { herdrUnavailableMessage, isHerdrAvailable } from "./subagent/herdr.ts";
+import { runCmuxSubagent, runHerdrSubagent } from "./subagent/runner.ts";
+import type { WorkflowSubagentBackend } from "./types.ts";
 import { renderSummaryMarkdown } from "./ui.ts";
 
 const baseDir = dirname(fileURLToPath(import.meta.url));
@@ -186,8 +188,12 @@ export default function piAnvil(pi: ExtensionAPI) {
 				return;
 			}
 
-			if (workflowUsesSubagentDelegation(workflow.workflow) && !isCmuxAvailable()) {
-				ctx.ui.notify(`Workflow "${workflow.workflow.name}" declares cmux subagent delegation. ${cmuxUnavailableMessage()}`, "error");
+			const unavailableBackend = workflowSubagentBackends(workflow.workflow).find((backend) => !isSubagentBackendAvailable(backend));
+			if (unavailableBackend) {
+				ctx.ui.notify(
+					`Workflow "${workflow.workflow.name}" declares ${unavailableBackend} subagent delegation. ${subagentUnavailableMessage(unavailableBackend)}`,
+					"error",
+				);
 				return;
 			}
 
@@ -250,19 +256,18 @@ function createEngineHost(pi: ExtensionAPI, ctx: ExtensionCommandContext, contro
 			);
 		},
 		async runSubagent(request, signal) {
-			const result = await runCmuxSubagent(
-				{
-					name: `Anvil: ${request.stepTitle}`,
-					task: request.task,
-					cwd: request.cwd,
-					runId: request.runId,
-					stepId: request.stepId,
-					model: request.model,
-					thinkingLevel: request.thinkingLevel,
-					timeoutMs: request.timeoutMs,
-				},
-				signal,
-			);
+			const launch = {
+				name: `Anvil: ${request.stepTitle}`,
+				task: request.task,
+				cwd: request.cwd,
+				runId: request.runId,
+				stepId: request.stepId,
+				model: request.model,
+				thinkingLevel: request.thinkingLevel,
+				timeoutMs: request.timeoutMs,
+			};
+			const result =
+				request.backend === "herdr" ? await runHerdrSubagent(launch, signal) : await runCmuxSubagent(launch, signal);
 			// Inject the outcome into the main session's context (no extra turn)
 			// so agent checks and later steps know what the subagent did.
 			pi.sendMessage(
@@ -327,6 +332,14 @@ function createEngineHost(pi: ExtensionAPI, ctx: ExtensionCommandContext, contro
 			);
 		},
 	};
+}
+
+function isSubagentBackendAvailable(backend: WorkflowSubagentBackend): boolean {
+	return backend === "herdr" ? isHerdrAvailable() : isCmuxAvailable();
+}
+
+function subagentUnavailableMessage(backend: WorkflowSubagentBackend): string {
+	return backend === "herdr" ? herdrUnavailableMessage() : cmuxUnavailableMessage();
 }
 
 async function handleList(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise<void> {

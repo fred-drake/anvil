@@ -12,7 +12,7 @@ Anvil is for those Pi tasks where you keep thinking, “I want the agent to do t
 
 - Build the workflow in your own words and Anvil will worry about how to properly build it.
 - For each workflow step, set any number of gating checks that must pass. Checks can be deterministic, like a script or executable that returns exit code `0`, or non-deterministic, where a subagent evaluates the result and gives a 👍 or 👎 based on what it thinks should happen.
-- Define subagent behavior based on how you have configured Pi. cmux compatibility comes out of the box, you can choose a custom skill that you wrote for handling subagent processing, or no subagent at all if you wish.
+- Define subagent behavior based on how you have configured Pi. cmux and herdr compatibility come out of the box, you can choose a custom skill that you wrote for handling subagent processing, or no subagent at all if you wish.
 - Optionally define the number of times a step has to be retried before bailing.
 - Optionally define a different model and thinking level for each step.
 
@@ -38,18 +38,19 @@ Workflows live in:
 
 Use `/anvil list` to see available workflows, `/anvil validate` to check that one is ready, and `/anvil run` to start a workflow with whatever task input you want to give it.
 
-## Declarative cmux subagents
+## Declarative subagents
 
 Each workflow step can decide how much help it wants from another agent:
 
-- Run as a declarative cmux subagent.
+- Use the default `delegation: "auto"` to auto-detect the current subagent surface.
+- Run as a declarative cmux subagent with `delegation: { subagent: "cmux" }`.
+- Run as a declarative herdr subagent with `delegation: { subagent: "herdr" }`.
 - Prefer a specific skill for the subagent to use.
-- Let the agent decide at runtime whether delegation makes sense.
 - Do no delegation and keep the step in the main session.
 
-For non-trivial work, sending the step into a subagent is strongly encouraged. It keeps the main session cleaner and gives that step room to focus. But it is your workflow, your rules: use cmux when you want a visibly delegated Pi session that works out of the box, use a skill when you have a custom way of doing the work, use auto when you trust the agent to choose, or turn delegation off entirely.
+For non-trivial work, sending the step into a subagent is strongly encouraged. It keeps the main session cleaner and gives that step room to focus. But it is your workflow, your rules: leave the default as `delegation: "auto"` when you want Anvil to detect the right visible Pi subagent backend, choose cmux or herdr explicitly when you want a fixed backend, use a skill when you have a custom way of doing the work, or turn delegation off entirely.
 
-If a workflow uses cmux subagents, start Pi inside cmux with `cmux pi so Anvil has somewhere to launch them.
+Auto detection prefers `HERDR_ENV=1` as herdr, then `CMUX_SHELL_INTEGRATION=1` as cmux. If neither variable is set, auto-delegated steps run in the main session with a prompt hint. If a workflow uses cmux subagents, start Pi inside cmux with `cmux pi` so Anvil has somewhere to launch them. If it uses herdr subagents, start Pi inside herdr so Anvil can create panes and tabs for each delegated step.
 
 Checks still guard the workflow either way: deterministic checks run commands, while agent-judged checks ask for a clear pass/fail verdict before the workflow moves on.
 

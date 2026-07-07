@@ -6,7 +6,7 @@ export default defineWorkflow({
 	name: "feature-forge",
 	description: "Research-backed, test-first feature implementation with verification, coverage, review, and issue capture.",
 	defaults: {
-		delegation: { subagent: "cmux" },
+		delegation: "auto",
 		onFail: "stop",
 		maxLoops: 3,
 	},
