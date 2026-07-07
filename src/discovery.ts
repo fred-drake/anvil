@@ -59,7 +59,7 @@ export async function loadWorkflowFile(file: string, source: WorkflowSource): Pr
 			moduleCache: false,
 			fsCache: false,
 			interopDefault: true,
-			alias: { "pi-anvil": TYPES_ALIAS_PATH },
+			alias: { "anvil": TYPES_ALIAS_PATH },
 		});
 		loaded = await jiti.import<unknown>(file, { default: true });
 	} catch (error) {

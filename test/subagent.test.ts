@@ -7,7 +7,7 @@ import { __testing__, pollForExit, sendLongCommand } from "../src/subagent/cmux.
 import { buildSubagentLaunchCommand, extractLastAssistantText } from "../src/subagent/runner.ts";
 
 function tempDir(): string {
-	return mkdtempSync(join(tmpdir(), "pi-anvil-test-"));
+	return mkdtempSync(join(tmpdir(), "anvil-test-"));
 }
 
 describe("buildSubagentLaunchCommand", () => {

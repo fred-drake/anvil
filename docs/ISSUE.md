@@ -1,4 +1,4 @@
-# pi-anvil Code Review Issues
+# anvil Code Review Issues
 
 Full-codebase review performed 2026-07-06. Baseline: `npm run check` passes (typecheck clean, 72/72 tests green), so everything below is a latent defect, hardening gap, or maintainability concern — not a broken build.
 
@@ -22,4 +22,4 @@ Full-codebase review performed 2026-07-06. Baseline: `npm run check` passes (typ
 
 - [ ] **L9 [CLEANUP]** `newRunId` is duplicated verbatim in `src/index.ts:504-506` and `src/engine.ts:493-495`. Export it from one place.
 
-- [ ] **L10 [ROBUSTNESS]** Terminal sentinel can false-match agent output. `pollForExit` falls back to scanning the last 5 screen lines for `__ANVIL_SUBAGENT_DONE_<n>__` (`src/subagent/cmux.ts:18`, `:246`); a subagent that prints that string (e.g. while inspecting pi-anvil itself) is treated as exited. Rare, but a per-launch random nonce in the sentinel would eliminate it.
+- [ ] **L10 [ROBUSTNESS]** Terminal sentinel can false-match agent output. `pollForExit` falls back to scanning the last 5 screen lines for `__ANVIL_SUBAGENT_DONE_<n>__` (`src/subagent/cmux.ts:18`, `:246`); a subagent that prints that string (e.g. while inspecting anvil itself) is treated as exited. Rare, but a per-launch random nonce in the sentinel would eliminate it.

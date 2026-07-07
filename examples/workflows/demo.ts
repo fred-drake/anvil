@@ -1,4 +1,4 @@
-import { defineWorkflow } from "pi-anvil";
+import { defineWorkflow } from "anvil";
 
 function shellEscape(value: string): string {
 	return `'${value.replaceAll("'", "'\\''")}'`;

@@ -1,7 +1,7 @@
 # Anvil
 
 <p align="center">
-  <img src="assets/pi-anvil-logo.png" alt="pi-anvil logo" width="160">
+  <img src="assets/anvil-logo.png" alt="anvil logo" width="160">
 </p>
 
 A Pi extension that runs declarative TypeScript workflows with deterministic and agent-judged gates.
@@ -60,7 +60,7 @@ See `examples/workflows/demo.ts` and the `anvil-workflow-builder` skill for auth
 If you use nix, a nix dev environment is included with everything you need for development.
 
 ```bash
-cd pi-anvil
+cd anvil
 npm install
 npm run typecheck
 npm test

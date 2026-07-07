@@ -5,7 +5,7 @@ description: Use when the user wants to create or edit an automated multi-step w
 
 # Anvil Workflow Builder
 
-Help the user author a declarative pi-anvil workflow. Interview them first, then write a workflow file and validate it.
+Help the user author a declarative anvil workflow. Interview them first, then write a workflow file and validate it.
 
 ## Storage policy
 
@@ -54,7 +54,7 @@ Guide the user with pickers when Anvil-specific choices are missing. The user ma
 Prefer the import form when possible:
 
 ```ts
-import { defineWorkflow } from "pi-anvil";
+import { defineWorkflow } from "anvil";
 
 export default defineWorkflow({
 	name: "example-workflow",

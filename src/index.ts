@@ -63,7 +63,7 @@ const turnWaiters = new Set<TurnWaiter>();
 const anvilVerdictTool = defineTool({
 	name: "anvil_verdict",
 	label: "Anvil Verdict",
-	description: "Report the pass/fail verdict for an active pi-anvil agent check.",
+	description: "Report the pass/fail verdict for an active anvil agent check.",
 	parameters: Type.Object({
 		check_id: Type.String({ description: "The exact check_id provided by Anvil." }),
 		pass: Type.Boolean({ description: "Whether the check passed." }),

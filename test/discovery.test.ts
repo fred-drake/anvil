@@ -49,11 +49,11 @@ describe("discoverWorkflows", () => {
 		expect(workflows[0]?.workflow?.name).toBe("plain");
 	});
 
-	it("resolves the pi-anvil alias from a temp home workflow", async () => {
+	it("resolves the anvil alias from a temp home workflow", async () => {
 		await writeWorkflow(
 			home,
 			"alias.ts",
-			`import { defineWorkflow } from "pi-anvil";
+			`import { defineWorkflow } from "anvil";
 			export default defineWorkflow({ name: "alias", steps: [{ id: "one", prompt: "alias" }] });`,
 		);
 

@@ -94,7 +94,7 @@ export function extractLastAssistantText(sessionFile: string): string | undefine
 export async function runCmuxSubagent(launch: SubagentLaunch, signal?: AbortSignal): Promise<SubagentResult> {
 	if (!isCmuxAvailable()) throw new Error(cmuxUnavailableMessage());
 
-	const rootDir = join(tmpdir(), "pi-anvil");
+	const rootDir = join(tmpdir(), "anvil");
 	mkdirSync(rootDir, { recursive: true, mode: 0o700 });
 	chmodSync(rootDir, 0o700);
 	const workDir = join(rootDir, launch.runId);
