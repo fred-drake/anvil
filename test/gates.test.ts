@@ -33,7 +33,7 @@ class GateHost implements EngineHost {
 		return this.execResult;
 	}
 
-	async awaitVerdict(checkId: string): Promise<Verdict | undefined> {
+	async awaitVerdict(checkId: string, _timeoutMs?: number, _signal?: AbortSignal): Promise<Verdict | undefined> {
 		if (this.neverVerdict) return new Promise(() => undefined);
 		if (this.verdictQueue.length > 0) {
 			const verdict = this.verdictQueue.shift();
@@ -68,6 +68,24 @@ class RealExecHost extends GateHost {
 				killed: execError.killed,
 			};
 		}
+	}
+}
+
+class TurnFirstRepromptHost extends GateHost {
+	verdictTimeouts: number[] = [];
+
+	override async awaitVerdict(checkId: string, timeoutMs = 0): Promise<Verdict | undefined> {
+		this.verdictTimeouts.push(timeoutMs);
+		if (this.verdictTimeouts.length === 1) {
+			return new Promise((resolve) => setTimeout(() => resolve(undefined), 1));
+		}
+		return { checkId, pass: true, reason: "fresh verdict after reprompt" };
+	}
+
+	override async waitForTurnComplete(): Promise<void> {
+		this.turns += 1;
+		if (this.turns === 1) return;
+		return new Promise((resolve) => setTimeout(resolve, 5));
 	}
 }
 
@@ -284,6 +302,25 @@ describe("executeAgentCheck", () => {
 
 		expect(result).toMatchObject({ name: "quality", pass: false, reason: "needs work" });
 		expect(host.instructions).toHaveLength(2);
+	});
+
+	it("starts a fresh verdict timeout when the first check turn completes without a verdict", async () => {
+		const host = new TurnFirstRepromptHost();
+
+		const result = await executeAgentCheck({
+			host,
+			workflow: workflow(),
+			step: workflow().steps[0]!,
+			check: { type: "agent", id: "quality", prompt: "criteria" },
+			ctx: ctx(),
+			checkId: "check",
+			timeoutMs: 123,
+		});
+
+		expect(result).toMatchObject({ name: "quality", pass: true, reason: "fresh verdict after reprompt" });
+		expect(host.verdictTimeouts).toEqual([123, 123]);
+		expect(host.instructions).toHaveLength(2);
+		expect(host.instructions[1]).toContain("Call the `anvil_verdict` tool now");
 	});
 });
 

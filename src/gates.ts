@@ -146,13 +146,11 @@ export async function executeAgentCheck(args: {
 		return verdictToGateResult(args.check, args.checkId, first.verdict);
 	}
 
-	if (first.kind === "verdict") {
-		verdictPromise = args.host.awaitVerdict(
-			args.checkId,
-			args.timeoutMs ?? DEFAULT_AGENT_VERDICT_TIMEOUT_MS,
-			args.signal,
-		);
-	}
+	verdictPromise = args.host.awaitVerdict(
+		args.checkId,
+		args.timeoutMs ?? DEFAULT_AGENT_VERDICT_TIMEOUT_MS,
+		args.signal,
+	);
 
 	args.host.sendInstruction(buildVerdictReprompt(args.checkId));
 	turnPromise = args.host.waitForTurnComplete(args.signal);
