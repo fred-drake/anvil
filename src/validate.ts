@@ -5,6 +5,7 @@ import type {
 	Templatable,
 	WorkflowDefinition,
 	WorkflowStep,
+	WorkflowThinkingLevel,
 } from "./types.ts";
 
 export type ValidationResult =
@@ -12,6 +13,7 @@ export type ValidationResult =
 	| { ok: false; errors: string[] };
 
 const WORKFLOW_NAME_RE = /^[a-z0-9-]+$/;
+const THINKING_LEVELS = new Set<WorkflowThinkingLevel>(["off", "minimal", "low", "medium", "high", "xhigh"]);
 
 export function validateWorkflow(value: unknown): ValidationResult {
 	const errors: string[] = [];
@@ -93,6 +95,14 @@ function validateStep(step: unknown, index: number, stepIds: Set<string>, errors
 	}
 	if (!isTemplatable(step.prompt)) {
 		errors.push(`${path}.prompt must be a string or function`);
+	}
+	if (step.model !== undefined && (typeof step.model !== "string" || step.model.length === 0)) {
+		errors.push(`${path}.model must be a non-empty string when provided`);
+	}
+	if (step.thinkingLevel !== undefined && !isThinkingLevel(step.thinkingLevel)) {
+		errors.push(
+			`${path}.thinkingLevel must be one of "off", "minimal", "low", "medium", "high", or "xhigh" when provided`,
+		);
 	}
 	if (step.delegation !== undefined) {
 		validateDelegation(step.delegation, `${path}.delegation`, errors);
@@ -221,6 +231,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isTemplatable(value: unknown): value is Templatable {
 	return typeof value === "string" || typeof value === "function";
+}
+
+function isThinkingLevel(value: unknown): value is WorkflowThinkingLevel {
+	return typeof value === "string" && THINKING_LEVELS.has(value as WorkflowThinkingLevel);
 }
 
 function isPositiveInteger(value: unknown): boolean {

@@ -1,9 +1,9 @@
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { Type } from "@earendil-works/pi-ai";
+import { Type, type Api, type Model } from "@earendil-works/pi-ai";
 import { defineTool, type ExtensionAPI, type ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { discoverWorkflows, type DiscoveredWorkflow } from "./discovery.ts";
-import { type EngineHost, runWorkflow } from "./engine.ts";
+import { type EngineHost, runWorkflow, type StepModelSelection } from "./engine.ts";
 import { VerdictBus } from "./gates.ts";
 import { renderSummaryMarkdown } from "./ui.ts";
 
@@ -13,6 +13,35 @@ const builderSkillPath = join(baseDir, "..", "skills", "anvil-workflow-builder",
 type ActiveRun = {
 	controller: AbortController;
 	runId: string;
+};
+
+type AutocompleteItem = {
+	value: string;
+	label: string;
+	description?: string;
+};
+
+type AutocompleteSuggestions = {
+	items: AutocompleteItem[];
+	prefix: string;
+};
+
+type AutocompleteProvider = {
+	triggerCharacters?: string[];
+	getSuggestions(
+		lines: string[],
+		cursorLine: number,
+		cursorCol: number,
+		options: { signal: AbortSignal; force?: boolean },
+	): Promise<AutocompleteSuggestions | null>;
+	applyCompletion(
+		lines: string[],
+		cursorLine: number,
+		cursorCol: number,
+		item: AutocompleteItem,
+		prefix: string,
+	): { lines: string[]; cursorLine: number; cursorCol: number };
+	shouldTriggerFileCompletion?(lines: string[], cursorLine: number, cursorCol: number): boolean;
 };
 
 type TurnWaiter = {
@@ -61,6 +90,10 @@ export default function piAnvil(pi: ExtensionAPI) {
 	pi.registerMessageRenderer("anvil-summary", () => undefined);
 
 	pi.on("resources_discover", () => ({ skillPaths: [builderSkillPath] }));
+
+	pi.on("session_start", (_event, ctx) => {
+		ctx.ui.addAutocompleteProvider((current) => createAnvilAutocompleteProvider(current, ctx.cwd));
+	});
 
 	pi.on("agent_start", () => {
 		for (const waiter of turnWaiters) waiter.started = true;
@@ -169,7 +202,33 @@ export default function piAnvil(pi: ExtensionAPI) {
 
 function createEngineHost(pi: ExtensionAPI, ctx: ExtensionCommandContext, controller: AbortController): EngineHost {
 	let pendingTurn: Promise<void> | undefined;
+	const defaultModel = ctx.model;
+	const defaultThinkingLevel = pi.getThinkingLevel();
+
+	async function applyModelAndThinking(
+		model: Model<Api> | undefined,
+		thinkingLevel: ReturnType<ExtensionAPI["getThinkingLevel"]>,
+	): Promise<void> {
+		if (model) {
+			const changed = await pi.setModel(model);
+			if (!changed) throw new Error(`Unable to switch to model "${model.provider}/${model.id}"; no API key is available.`);
+		}
+		pi.setThinkingLevel(thinkingLevel);
+	}
+
 	return {
+		async applyStepModelSelection(selection) {
+			if (!selection) {
+				await applyModelAndThinking(defaultModel, defaultThinkingLevel);
+				return;
+			}
+
+			const model = selection.model ? resolveModelReference(selection.model, ctx.modelRegistry.getAll()) : defaultModel;
+			await applyModelAndThinking(
+				model,
+				(selection.thinkingLevel ?? defaultThinkingLevel) as ReturnType<ExtensionAPI["getThinkingLevel"]>,
+			);
+		},
 		sendInstruction(instruction) {
 			pendingTurn = waitForTurnCompletion(ctx, controller.signal);
 			pi.sendUserMessage(instruction);
@@ -251,7 +310,52 @@ function postCommandMessage(pi: ExtensionAPI, customType: string, content: strin
 	pi.sendMessage({ customType, content, display: true }, { triggerTurn: false });
 }
 
-async function getAnvilCompletions(argumentPrefix: string, cwd: string) {
+function resolveModelReference(reference: string, models: Model<Api>[]): Model<Api> {
+	const providerSeparator = reference.indexOf("/");
+	if (providerSeparator > 0) {
+		const provider = reference.slice(0, providerSeparator);
+		const modelId = reference.slice(providerSeparator + 1);
+		const model = models.find((candidate) => candidate.provider === provider && candidate.id === modelId);
+		if (model) return model;
+		throw new Error(`model "${reference}" was not found`);
+	}
+
+	const exactMatches = models.filter((model) => model.id === reference);
+	if (exactMatches.length === 1) return exactMatches[0]!;
+	if (exactMatches.length > 1) {
+		throw new Error(`model "${reference}" is ambiguous; use provider/model syntax`);
+	}
+
+	throw new Error(`model "${reference}" was not found`);
+}
+
+export function createAnvilAutocompleteProvider(current: AutocompleteProvider, cwd: string): AutocompleteProvider {
+	return {
+		triggerCharacters: current.triggerCharacters,
+		async getSuggestions(lines, cursorLine, cursorCol, options) {
+			const currentLine = lines[cursorLine] ?? "";
+			const beforeCursor = currentLine.slice(0, cursorCol);
+			const anvilArgs = extractAnvilArgumentText(beforeCursor);
+			if (anvilArgs === undefined) return current.getSuggestions(lines, cursorLine, cursorCol, options);
+
+			const items = await getAnvilCompletions(anvilArgs, cwd);
+			if (items === null) return current.getSuggestions(lines, cursorLine, cursorCol, options);
+			return { items, prefix: anvilArgs };
+		},
+		applyCompletion(lines, cursorLine, cursorCol, item, prefix) {
+			return current.applyCompletion(lines, cursorLine, cursorCol, item, prefix);
+		},
+		shouldTriggerFileCompletion(lines, cursorLine, cursorCol) {
+			return current.shouldTriggerFileCompletion?.(lines, cursorLine, cursorCol) ?? true;
+		},
+	};
+}
+
+function extractAnvilArgumentText(textBeforeCursor: string): string | undefined {
+	return /^\/anvil(?::\d+)?\s+([\s\S]*)$/.exec(textBeforeCursor)?.[1];
+}
+
+export async function getAnvilCompletions(argumentPrefix: string, cwd: string) {
 	const subcommands = ["run", "list", "validate", "abort"];
 	const trimmedStart = argumentPrefix.trimStart();
 	const parts = trimmedStart.split(/\s+/);
@@ -268,7 +372,7 @@ async function getAnvilCompletions(argumentPrefix: string, cwd: string) {
 		return workflows
 			.filter((workflow) => workflow.name.startsWith(prefix))
 			.map((workflow) => ({
-				value: workflow.name,
+				value: `${subcommand} ${workflow.name}`,
 				label: workflow.name,
 				description: workflow.errors?.length ? "invalid" : workflow.source,
 			}));

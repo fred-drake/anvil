@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { runWorkflow, type AnvilCheckpoint, type EngineHost, type EngineExecResult, type RunSummary } from "../src/engine.ts";
+import {
+	runWorkflow,
+	type AnvilCheckpoint,
+	type EngineHost,
+	type EngineExecResult,
+	type RunSummary,
+	type StepModelSelection,
+} from "../src/engine.ts";
 import type { Verdict } from "../src/gates.ts";
 import type { WorkflowDefinition } from "../src/types.ts";
 
@@ -11,7 +18,14 @@ class FakeHost implements EngineHost {
 	widgets: Array<string[] | undefined> = [];
 	summaries: RunSummary[] = [];
 	execQueue: EngineExecResult[] = [];
+	modelSelections: Array<StepModelSelection | undefined> = [];
+	modelSelectionError?: Error;
 	onWait?: () => void | Promise<void>;
+
+	async applyStepModelSelection(selection: StepModelSelection | undefined): Promise<void> {
+		this.modelSelections.push(selection);
+		if (this.modelSelectionError) throw this.modelSelectionError;
+	}
 
 	sendInstruction(instruction: string): void {
 		this.instructions.push(instruction);
@@ -65,6 +79,65 @@ describe("runWorkflow", () => {
 			"step_pass",
 			"run_end",
 		]);
+	});
+
+	it("applies per-step model selections and restores the default for unspecified steps", async () => {
+		const host = new FakeHost();
+		const summary = await runWorkflow({
+			workflow: workflow([
+				{ id: "one", prompt: "1", model: "openai-codex/gpt-5.5:high" },
+				{ id: "two", prompt: "2" },
+				{ id: "three", prompt: "3", model: "openai-codex/gpt-5.5", thinkingLevel: "xhigh" },
+				{ id: "four", prompt: "4", thinkingLevel: "low" },
+			]),
+			input: "task",
+			cwd: "/tmp",
+			host,
+			runId: "run",
+		});
+
+		expect(summary.state).toBe("succeeded");
+		expect(host.modelSelections).toEqual([
+			{ model: "openai-codex/gpt-5.5", thinkingLevel: "high" },
+			undefined,
+			{ model: "openai-codex/gpt-5.5", thinkingLevel: "xhigh" },
+			{ thinkingLevel: "low" },
+		]);
+	});
+
+	it("does not apply model selection for skipped steps", async () => {
+		const host = new FakeHost();
+		const summary = await runWorkflow({
+			workflow: workflow([
+				{ id: "skip", prompt: "skip", model: "openai-codex/gpt-5.5:high", skipIf: () => true },
+				{ id: "run", prompt: "run" },
+			]),
+			input: "task",
+			cwd: "/tmp",
+			host,
+			runId: "run",
+		});
+
+		expect(summary.state).toBe("succeeded");
+		expect(host.instructions).toHaveLength(1);
+		expect(host.modelSelections).toEqual([undefined]);
+	});
+
+	it("fails before sending a step when model selection fails", async () => {
+		const host = new FakeHost();
+		host.modelSelectionError = new Error('model "missing-model" was not found');
+		const summary = await runWorkflow({
+			workflow: workflow([{ id: "one", prompt: "1", model: "missing-model:high" }]),
+			input: "task",
+			cwd: "/tmp",
+			host,
+			runId: "run",
+		});
+
+		expect(summary.state).toBe("failed");
+		expect(summary.steps[0]?.status).toBe("failed");
+		expect(summary.failureReason).toContain('model "missing-model" was not found');
+		expect(host.instructions).toHaveLength(0);
 	});
 
 	it("stops on a failed deterministic check by default", async () => {

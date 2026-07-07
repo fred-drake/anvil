@@ -1,6 +1,6 @@
 import { executeAgentCheck, executeDeterministicCheck, type GateResult, type Verdict } from "./gates.ts";
 import { buildStepInstruction } from "./prompts.ts";
-import type { Check, OnFailPolicy, WorkflowContext, WorkflowDefinition, WorkflowStep } from "./types.ts";
+import type { Check, OnFailPolicy, WorkflowContext, WorkflowDefinition, WorkflowStep, WorkflowThinkingLevel } from "./types.ts";
 import { formatStatus, formatStepWidget } from "./ui.ts";
 
 export interface EngineExecOptions {
@@ -16,7 +16,15 @@ export interface EngineExecResult {
 	killed?: boolean;
 }
 
+export interface StepModelSelection {
+	model?: string;
+	thinkingLevel?: WorkflowThinkingLevel;
+}
+
+const THINKING_LEVELS = new Set<WorkflowThinkingLevel>(["off", "minimal", "low", "medium", "high", "xhigh"]);
+
 export interface EngineHost {
+	applyStepModelSelection?(selection: StepModelSelection | undefined): void | Promise<void>;
 	sendInstruction(instruction: string): void;
 	waitForTurnComplete(signal?: AbortSignal): Promise<void>;
 	exec(command: string, args: string[], options?: EngineExecOptions): Promise<EngineExecResult>;
@@ -157,6 +165,13 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<RunSumma
 
 			stepState.status = "running";
 			updateStepUi(options, steps, stepIndex, "step");
+			try {
+				await options.host.applyStepModelSelection?.(resolveStepModelSelection(step));
+			} catch (error) {
+				stepState.status = "failed";
+				updateStepUi(options, steps, stepIndex, "failed");
+				throw error;
+			}
 			const instruction = await buildStepInstruction({
 				workflow: options.workflow,
 				step,
@@ -291,6 +306,24 @@ function resolveFailure(args: {
 	if (policy.feedback !== false) args.feedbackByStep.set(policy.goto, args.result.reason);
 	args.host.notify(`Anvil check failed; returning to step "${policy.goto}" (${nextCount}/${maxLoops}).`, "warning");
 	return { kind: "goto", targetIndex };
+}
+
+export function resolveStepModelSelection(step: WorkflowStep): StepModelSelection | undefined {
+	const parsed = parseModelReference(step.model);
+	return parsed || step.thinkingLevel ? { ...parsed, thinkingLevel: step.thinkingLevel ?? parsed?.thinkingLevel } : undefined;
+}
+
+function parseModelReference(model: string | undefined): StepModelSelection | undefined {
+	if (!model) return undefined;
+	const lastColon = model.lastIndexOf(":");
+	if (lastColon <= 0) return { model };
+
+	const suffix = model.slice(lastColon + 1);
+	if (!THINKING_LEVELS.has(suffix as WorkflowThinkingLevel)) return { model };
+
+	const baseModel = model.slice(0, lastColon);
+	if (!baseModel) return { model };
+	return { model: baseModel, thinkingLevel: suffix as WorkflowThinkingLevel };
 }
 
 async function executeCheck(args: {

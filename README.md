@@ -36,6 +36,22 @@ defaults: { delegation: "none" }                 // never delegate
 
 Steps can override the workflow default with their own `delegation`, and `runInMain: true` still forces a step to run in the main agent.
 
+## Per-step model selection
+
+A step may declare a model and/or thinking level. Omitted values are reset to the model and thinking level that were active when the workflow started, so a previous step's model selection does not leak into later defaulted steps.
+
+Pi's model shorthand uses a colon suffix for thinking levels: `provider/model:thinking` (for example, `openai-codex/gpt-5.5:high`). The slash form `provider/model/thinking` is not Pi's thinking-level syntax.
+
+```ts
+steps: [
+	{ id: "quick-plan", model: "openai-codex/gpt-5.5:low", prompt: "Plan: {input}" },
+	{ id: "deep-implement", model: "openai-codex/gpt-5.5", thinkingLevel: "high", prompt: "Implement: {input}" },
+	{ id: "summarize", prompt: "Summarize the result" }, // uses workflow-start defaults
+]
+```
+
+Supported thinking levels are `off`, `minimal`, `low`, `medium`, `high`, and `xhigh`.
+
 ## Workflow example
 
 ```ts

@@ -1,0 +1,31 @@
+import { describe, expect, it } from "vitest";
+import { resolveStepModelSelection } from "../src/engine.ts";
+import { defineWorkflow, type WorkflowDefinition } from "../src/types.ts";
+
+describe("workflow public contract", () => {
+	it("exposes per-step model selection fields", () => {
+		const workflow: WorkflowDefinition = defineWorkflow({
+			name: "model-contract",
+			steps: [
+				{ id: "shorthand", prompt: "Use the shorthand", model: "openai-codex/gpt-5.5:high" },
+				{ id: "explicit", prompt: "Use explicit thinking", model: "openai-codex/gpt-5.5", thinkingLevel: "xhigh" },
+			],
+		});
+
+		expect(workflow.steps[0]?.model).toBe("openai-codex/gpt-5.5:high");
+		expect(workflow.steps[1]?.thinkingLevel).toBe("xhigh");
+	});
+
+	it("parses pi's colon thinking shorthand without treating slash as a thinking separator", () => {
+		expect(resolveStepModelSelection({ id: "one", prompt: "a", model: "openai-codex/gpt-5.5:high" })).toEqual({
+			model: "openai-codex/gpt-5.5",
+			thinkingLevel: "high",
+		});
+		expect(resolveStepModelSelection({ id: "two", prompt: "b", model: "openai-codex/gpt-5.5/high" })).toEqual({
+			model: "openai-codex/gpt-5.5/high",
+		});
+		expect(resolveStepModelSelection({ id: "three", prompt: "c", model: "router/model:exacto" })).toEqual({
+			model: "router/model:exacto",
+		});
+	});
+});

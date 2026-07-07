@@ -9,6 +9,8 @@ export interface WorkflowContext {
 
 export type Templatable = string | ((ctx: WorkflowContext) => string | Promise<string>);
 
+export type WorkflowThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
+
 export type OnFailPolicy =
 	| "stop"
 	| "continue"
@@ -59,6 +61,10 @@ export interface WorkflowStep {
 	id: string;
 	title?: string;
 	prompt: Templatable;
+	/** Model reference for this step. Supports pi's provider/id and optional :<thinking> shorthand. */
+	model?: string;
+	/** Thinking level for this step. Omitted steps use the workflow-start default. */
+	thinkingLevel?: WorkflowThinkingLevel;
 	/** Preferred per-step delegation mode; overrides workflow.defaults.delegation. */
 	delegation?: WorkflowDelegation;
 	/** Legacy delegation hint. Prefer delegation: { skill: "..." } or delegation: "auto". */

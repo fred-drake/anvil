@@ -29,6 +29,7 @@ Guide the user with pickers when Anvil-specific choices are missing. The user ma
 4. For each step, capture:
    - `id` (stable kebab-case identifier)
    - purpose / prompt
+   - optional per-step `model` and/or `thinkingLevel`. Pi's thinking shorthand is colon-based (`provider/model:high`, not `provider/model/high`). Supported `thinkingLevel` values are `off`, `minimal`, `low`, `medium`, `high`, and `xhigh`. Omitted model/thinking values use the workflow-start defaults.
    - optional per-step `delegation` override or `runInMain: true`
 5. For each step, determine whether it has gating checks.
    - If the user explicitly provides one or more checks for the step, capture them.
@@ -62,6 +63,7 @@ export default defineWorkflow({
 		{
 			id: "implement",
 			title: "Implement the change",
+			model: "openai-codex/gpt-5.5:high",
 			prompt: "Implement this request: {input}",
 			checks: [
 				{

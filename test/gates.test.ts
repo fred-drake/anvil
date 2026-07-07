@@ -6,7 +6,9 @@ import type { WorkflowDefinition } from "../src/types.ts";
 class GateHost implements EngineHost {
 	instructions: string[] = [];
 	execResult: EngineExecResult = { stdout: "", stderr: "", code: 0 };
+	execCalls: Array<{ command: string; args: string[]; options?: EngineExecOptions }> = [];
 	verdict: Verdict | undefined;
+	verdictQueue: Array<Verdict | undefined> = [];
 	neverVerdict = false;
 	turns = 0;
 
@@ -18,12 +20,17 @@ class GateHost implements EngineHost {
 		this.turns += 1;
 	}
 
-	async exec(_command: string, _args: string[], _options?: EngineExecOptions): Promise<EngineExecResult> {
+	async exec(command: string, args: string[], options?: EngineExecOptions): Promise<EngineExecResult> {
+		this.execCalls.push({ command, args, options });
 		return this.execResult;
 	}
 
 	async awaitVerdict(checkId: string): Promise<Verdict | undefined> {
 		if (this.neverVerdict) return new Promise(() => undefined);
+		if (this.verdictQueue.length > 0) {
+			const verdict = this.verdictQueue.shift();
+			return verdict ? { ...verdict, checkId } : undefined;
+		}
 		return this.verdict ? { ...this.verdict, checkId } : undefined;
 	}
 
@@ -46,6 +53,37 @@ describe("VerdictBus", () => {
 	it("ignores stale verdict ids", () => {
 		const bus = new VerdictBus();
 		expect(bus.reportVerdict("missing", false, "late")).toBe(false);
+	});
+
+	it("resolves undefined on timeout or clear", async () => {
+		const bus = new VerdictBus();
+		await expect(bus.awaitVerdict("timeout", 1)).resolves.toBeUndefined();
+
+		const pending = bus.awaitVerdict("clear", 1000);
+		bus.clear();
+		await expect(pending).resolves.toBeUndefined();
+	});
+
+	it("replaces duplicate waiters for the same check id", async () => {
+		const bus = new VerdictBus();
+		const first = bus.awaitVerdict("check", 1000);
+		const second = bus.awaitVerdict("check", 1000);
+
+		await expect(first).resolves.toBeUndefined();
+		expect(bus.reportVerdict("check", false, "retry")).toBe(true);
+		await expect(second).resolves.toEqual({ checkId: "check", pass: false, reason: "retry" });
+	});
+
+	it("rejects verdict waits when aborted", async () => {
+		const bus = new VerdictBus();
+		const alreadyAborted = new AbortController();
+		alreadyAborted.abort();
+		await expect(bus.awaitVerdict("pre", 1000, alreadyAborted.signal)).rejects.toThrow("Anvil run aborted");
+
+		const controller = new AbortController();
+		const pending = bus.awaitVerdict("during", 1000, controller.signal);
+		controller.abort();
+		await expect(pending).rejects.toThrow("Anvil run aborted");
 	});
 });
 
@@ -77,6 +115,28 @@ describe("executeDeterministicCheck", () => {
 
 		expect(result.pass).toBe(false);
 		expect(result.reason).toContain("bad");
+	});
+
+	it("renders templated command options and tails long failure output", async () => {
+		const host = new GateHost();
+		host.execResult = { stdout: "x".repeat(2100), stderr: "", code: 1 };
+		const controller = new AbortController();
+
+		const result = await executeDeterministicCheck({
+			host,
+			check: { type: "deterministic", id: "id", name: "Named", command: (context) => `echo ${context.input}`, cwd: "/work", timeoutMs: 12 },
+			ctx: ctx(),
+			checkId: "check",
+			signal: controller.signal,
+		});
+
+		expect(result.name).toBe("Named");
+		expect(result.reason).toHaveLength(2000);
+		expect(host.execCalls[0]).toEqual({
+			command: "bash",
+			args: ["-c", "echo task"],
+			options: { cwd: "/work", timeout: 12, signal: controller.signal },
+		});
 	});
 });
 
@@ -116,6 +176,23 @@ describe("executeAgentCheck", () => {
 		expect(result.reason).toBe("no verdict reported");
 		expect(host.instructions).toHaveLength(2);
 		expect(host.instructions[1]).toContain("Call the `anvil_verdict` tool now");
+	});
+
+	it("re-prompts after a timed-out verdict wait and then accepts a verdict", async () => {
+		const host = new GateHost();
+		host.verdictQueue.push(undefined, { checkId: "ignored", pass: false, reason: "needs work" });
+
+		const result = await executeAgentCheck({
+			host,
+			workflow: workflow(),
+			step: workflow().steps[0]!,
+			check: { type: "agent", id: "quality", prompt: "criteria" },
+			ctx: ctx(),
+			checkId: "check",
+		});
+
+		expect(result).toMatchObject({ name: "quality", pass: false, reason: "needs work" });
+		expect(host.instructions).toHaveLength(2);
 	});
 });
 
