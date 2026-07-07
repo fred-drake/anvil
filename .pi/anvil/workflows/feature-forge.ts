@@ -1,4 +1,4 @@
-import { defineWorkflow } from "pi-anvil";
+import { defineWorkflow } from "anvil";
 
 const model = "openai-codex/gpt-5.5:high";
 

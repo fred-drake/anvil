@@ -1,5 +1,7 @@
 import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { loadWorkflowFile } from "../src/discovery.ts";
 import { resolveStepModelSelection } from "../src/engine.ts";
 import { defineWorkflow, type WorkflowDefinition } from "../src/types.ts";
 
@@ -28,6 +30,15 @@ describe("workflow public contract", () => {
 		expect(resolveStepModelSelection({ id: "three", prompt: "c", model: "router/model:exacto" })).toEqual({
 			model: "router/model:exacto",
 		});
+	});
+
+	it("loads the dogfood feature-forge workflow", async () => {
+		const file = fileURLToPath(new URL("../.pi/anvil/workflows/feature-forge.ts", import.meta.url));
+
+		const result = await loadWorkflowFile(file, "project");
+
+		expect(result.errors).toBeUndefined();
+		expect(result.workflow?.name).toBe("feature-forge");
 	});
 
 	it("keeps feature-forge prompts aligned with this TypeScript/Vitest repository", () => {
