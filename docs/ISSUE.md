@@ -1,8 +1,12 @@
 # anvil Code Review Issues
 
-Full-codebase review performed 2026-07-06; re-reviewed 2026-07-07. Baseline: `npm run check` passes (typecheck clean, 187/187 tests green), so everything below is a latent defect, hardening gap, or maintainability concern — not a broken build.
+Full-codebase review performed 2026-07-06; re-reviewed and re-run 2026-07-07. Baseline: `npm run check` passes (typecheck clean, 144/144 tests green), so everything below is a latent defect, hardening gap, or maintainability concern — not a broken build.
 
-All previously recorded High (H1) and Medium (M1–M4) issues were fixed and verified on 2026-07-07, and have been removed from this list.
+The originally recorded High (H1) and Medium (M1–M4) issues from the 2026-07-06 pass were fixed and removed. The **M5** item below was newly discovered on 2026-07-07 and is numbered to avoid collision with that history.
+
+## 🟡 Medium Priority
+
+- [ ] **M5 [BUG]** Agent-check evaluation model leaks from prior steps. `applyStepModelSelection` is only invoked in the main-agent branch of the engine (`src/engine.ts:280-289`); subagent-delegated steps never touch the main session's model/thinking. So when a workflow declares model overrides, a subagent step's agent checks — and any following main state before the next override resets it — run under whichever model the *previous main step* left active, not the workflow default or the step's own selection. Example: step A (`runInMain`, `model: cheap`) → step B (`delegation: { subagent }`) with an `agent` check. B's verdict is graded by `cheap`, not the session default. This makes agent-judged pass/fail depend on execution history, which undercuts Anvil's "same way every time" goal and its cost expectations. Fix: reset model/thinking to the resolved step selection (or the default) before running a step's checks regardless of delegation mode, so verdicts are graded under a deterministic model.
 
 ## 🟢 Low Priority
 
