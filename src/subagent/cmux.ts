@@ -7,8 +7,6 @@
  * by the child extension, with the terminal sentinel as crash fallback.
  */
 import { execFile } from "node:child_process";
-import { mkdirSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
 import { promisify } from "node:util";
 import { shellEscape } from "../shell.ts";
 import { interpretExitSidecar, pollForExitWithReadScreen } from "./exit.ts";
@@ -178,14 +176,9 @@ export async function createSurface(name: string): Promise<string> {
 	return created.surface;
 }
 
-/**
- * Send a command by writing it to a script file and executing that, so long
- * commands survive terminal line-wrapping. The script is kept for debugging.
- */
-export async function sendLongCommand(surface: string, command: string, scriptPath: string): Promise<void> {
-	mkdirSync(dirname(scriptPath), { recursive: true });
-	writeFileSync(scriptPath, `#!/bin/bash\n${command}\n`, { mode: 0o600 });
-	await execFileAsync("cmux", ["send", "--surface", surface, `bash ${shellEscape(scriptPath)}\n`], { encoding: "utf8" });
+/** Send the subagent launch command directly so the pane runs visible Pi, not a wrapper script. */
+export async function sendLongCommand(surface: string, command: string, _scriptPath: string): Promise<void> {
+	await execFileAsync("cmux", ["send", "--surface", surface, `${command}\n`], { encoding: "utf8" });
 }
 
 export async function readScreen(surface: string, lines = 5): Promise<string> {

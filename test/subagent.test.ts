@@ -1,9 +1,10 @@
-import { mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { findLatestAssistantError, shouldAutoExitOnAgentEnd } from "../src/subagent/child.ts";
 import { __testing__, pollForExit, sendLongCommand } from "../src/subagent/cmux.ts";
+import { pollForExitWithReadScreen } from "../src/subagent/exit.ts";
 import { buildSubagentLaunchCommand, extractLastAssistantText } from "../src/subagent/runner.ts";
 
 function tempDir(): string {
@@ -28,7 +29,7 @@ describe("buildSubagentLaunchCommand", () => {
 		expect(command).not.toContain("--thinking");
 	});
 
-	it("forces child pi into print mode so startup prompts cannot block pane closure", () => {
+	it("launches visible interactive pi instead of print mode", () => {
 		const command = buildSubagentLaunchCommand({
 			cwd: "/repo",
 			sessionFile: "/tmp/run/step.jsonl",
@@ -36,7 +37,8 @@ describe("buildSubagentLaunchCommand", () => {
 			childExtensionPath: "/ext/child.ts",
 		});
 
-		expect(command).toMatch(/\bpi\b(?=[^;]*(?:\s--print\b|\s-p\b))(?=[^;]*\s--session\s)/);
+		expect(command).toMatch(/\bpi\b(?=[^;]*\s--approve\b)(?=[^;]*\s--session\s)/);
+		expect(command).not.toMatch(/\s--print\b|\s-p\b/);
 		expect(command).toContain("PI_ANVIL_SUBAGENT_SESSION='/tmp/run/step.jsonl'");
 		expect(command).toContain("echo '__ANVIL_SUBAGENT_DONE_'$?'__'");
 		expect(command).not.toContain("--continue");
@@ -162,10 +164,13 @@ describe("pollForExit", () => {
 		const sessionFile = join(tempDir(), "session.jsonl");
 		const timeoutMs = 100;
 		const startedAt = Date.now();
+		const readClosedSurface = async () => {
+			throw new Error("surface closed");
+		};
 
-		await expect(pollForExit("surface:missing", sessionFile, undefined, 1, timeoutMs)).rejects.toThrow(
-			/surface closed before completion/i,
-		);
+		await expect(
+			pollForExitWithReadScreen(readClosedSurface, "surface:missing", sessionFile, undefined, 1, timeoutMs),
+		).rejects.toThrow(/surface closed before completion/i);
 		expect(Date.now() - startedAt).toBeLessThan(timeoutMs);
 	});
 });
@@ -181,20 +186,22 @@ describe("cmux launch hardening contracts", () => {
 		expect(source).not.toContain("Atomics.wait");
 	});
 
-	it("writes subagent launch scripts with owner-only permissions", () => {
+	it("sends subagent launch commands directly without wrapper scripts", async () => {
 		const dir = tempDir();
 		const scriptPath = join(dir, "launch.sh");
+		const logFile = join(dir, "cmux.log");
 		const fakeCmux = join(dir, "cmux");
-		writeFileSync(fakeCmux, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+		writeFileSync(fakeCmux, `#!/bin/sh\nprintf '%s\\n' "$@" > ${JSON.stringify(logFile)}\n`, { mode: 0o755 });
 		const previousPath = process.env.PATH;
 		process.env.PATH = `${dir}:${previousPath ?? ""}`;
 		try {
-			sendLongCommand("surface:1", "echo hello", scriptPath);
+			await sendLongCommand("surface:1", "echo hello", scriptPath);
 		} finally {
 			process.env.PATH = previousPath;
 		}
 
-		expect(statSync(scriptPath).mode & 0o777).toBe(0o600);
+		expect(existsSync(scriptPath)).toBe(false);
+		expect(readFileSync(logFile, "utf8")).toContain("echo hello");
 	});
 
 	it("creates per-run temporary workspaces with owner-only permissions", () => {

@@ -45,7 +45,7 @@ export function buildSubagentLaunchCommand(args: {
 }): string {
 	const parts = [
 		"pi",
-		"--print",
+		"--approve",
 		"--session",
 		shellEscape(args.sessionFile),
 		"-e",

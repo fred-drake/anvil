@@ -7,8 +7,6 @@
  * shared with cmux via the `.exit` sidecar and terminal sentinel poller.
  */
 import { execFile } from "node:child_process";
-import { mkdirSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
 import { promisify } from "node:util";
 import { shellEscape } from "../shell.ts";
 import { pollForExitWithReadScreen } from "./exit.ts";
@@ -103,14 +101,9 @@ export async function createSurface(name: string): Promise<string> {
 	return createSplitSurface(name);
 }
 
-/**
- * Send a command by writing it to a script file and executing that script in
- * the pane, so long commands survive terminal line-wrapping.
- */
-export async function sendLongCommand(surface: string, command: string, scriptPath: string): Promise<void> {
-	mkdirSync(dirname(scriptPath), { recursive: true });
-	writeFileSync(scriptPath, `#!/bin/bash\n${command}\n`, { mode: 0o600 });
-	await runHerdr(["pane", "run", surface, `bash ${shellEscape(scriptPath)}`]);
+/** Send the subagent launch command directly so the pane runs visible Pi, not a wrapper script. */
+export async function sendLongCommand(surface: string, command: string, _scriptPath: string): Promise<void> {
+	await runHerdr(["pane", "run", surface, command]);
 }
 
 export async function readScreen(surface: string, lines = 5): Promise<string> {

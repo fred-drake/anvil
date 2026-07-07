@@ -45,6 +45,8 @@ Use `/anvil resume` after a failed or aborted run to see a numbered step map, fo
 
 Each workflow step can decide how much help it wants from another agent. By default, `delegation: "auto"` auto-detects your mux environment, using `HERDR_ENV=1` for herdr first, then `CMUX_SHELL_INTEGRATION=1` for cmux. Current supported environments are cmux and herdr. You can also force one of these two environments with `delegation: { subagent: "cmux" }` or `delegation: { subagent: "herdr" }`. Or if you prefer to use a specific skill that you've crafted that handles subagents, you can tell it to use that instead. Lastly, you can explicitly tell it to do not use subagents.
 
+Mux subagents launch a normal interactive `pi` session directly in the spawned pane or tab, so you can watch the step work live instead of staring at a shell-script wrapper until it finishes.
+
 ⚠️ It is advised to use subagents on any step that is non-trivial, because you run the risk of context pollution.
 
 ⚠️ While skills are supported, be aware that unlike the other options you are at the mercy of the model to get it right. Non-deterministic skills run the risk of it doing the right thing 95% of the time, then misbehaving in that one time out of twenty.

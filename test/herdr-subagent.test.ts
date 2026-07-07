@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -78,7 +78,7 @@ describe("herdr backend parity with cmux", () => {
 		await expect(createSurface("Anvil: broken")).rejects.toThrow(/unexpected herdr pane split output|pane_id/i);
 	});
 
-	it("runs long commands through owner-only scripts and herdr pane run", async () => {
+	it("runs subagent launch commands directly through herdr pane run", async () => {
 		const dir = tempDir();
 		const logFile = join(dir, "herdr.log");
 		const scriptPath = join(dir, "launch.sh");
@@ -87,9 +87,8 @@ describe("herdr backend parity with cmux", () => {
 
 		await sendLongCommand("1-2", "echo hello", scriptPath);
 
-		expect(statSync(scriptPath).mode & 0o777).toBe(0o600);
-		expect(readFileSync(scriptPath, "utf8")).toContain("echo hello");
-		expect(readFileSync(logFile, "utf8")).toContain(`pane run 1-2 bash '${scriptPath}'`);
+		expect(existsSync(scriptPath)).toBe(false);
+		expect(readFileSync(logFile, "utf8")).toContain("pane run 1-2 echo hello");
 	});
 
 	it("reads and closes herdr panes with the expected CLI commands", async () => {
