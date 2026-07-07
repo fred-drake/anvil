@@ -18,19 +18,30 @@ Do not write Anvil workflows to Pi's generic workflow locations such as `.pi/wor
 
 ## Interview flow
 
+Guide the user with pickers when Anvil-specific choices are missing. The user may know the desired workflow but not Anvil's required structure, so do not silently guess for ambiguous scope or gate choices.
+
 1. Choose a workflow name (`[a-z0-9-]+`) and a one-sentence goal.
-2. Ask whether the workflow should live at user scope (`~/.pi/agent/anvil/workflows/<name>.ts`) or project scope (`.pi/anvil/workflows/<name>.ts`).
+2. Determine workflow scope.
+   - If the user explicitly says user/global/personal scope, use user scope (`~/.pi/agent/anvil/workflows/<name>.ts`).
+   - If the user explicitly says project/repo/local scope, use project scope (`.pi/anvil/workflows/<name>.ts`).
+   - If they do not specifically name the user or project scope, ask with a picker containing exactly these two choices: user scope or project scope.
 3. Decide workflow delegation defaults: `delegation: { skill: "<skill-name>" }` to prefer a specific skill, `delegation: "auto"` to let the agent choose, or `delegation: "none"` to avoid subagents.
 4. For each step, capture:
    - `id` (stable kebab-case identifier)
    - purpose / prompt
    - optional per-step `delegation` override or `runInMain: true`
-5. For each step, ask whether it needs at least one gating check. Gating checks are recommended but not required; if a step has no check, explicitly ask the user to confirm or clarify.
+5. For each step, determine whether it has gating checks.
+   - If the user explicitly provides one or more checks for the step, capture them.
+   - If the user explicitly says the step has no check / no gate, record no `checks` for that step without asking again.
+   - If they are not explicit about whether there is no gating check for the step, ask with a picker: add a gating check, or no gating check.
+6. For each gating check, determine its type and details.
    - Explain that checks may be deterministic or non-deterministic.
-   - Deterministic checks: a repeatable command or script, optional timeout/cwd. If the user wants a deterministic check but no command exists, offer to write a script they can run.
+   - Deterministic checks: a repeatable command or script, optional timeout/cwd. If the user says that a bash command must run successfully, treat it as implicitly deterministic.
    - Non-deterministic checks: natural-language criteria judged by an agent, optional evaluation subagent.
-6. For failures, choose `stop`, `continue`, or `{ goto, maxLoops, onExhausted, feedback }`.
-7. Confirm a concise summary before writing the file.
+   - If the user is not explicit about whether a check is deterministic and it is not completely obvious, ask with a picker: deterministic command/script check, or non-deterministic agent-judged check.
+   - If the deterministic check does not name a script or command that already exists somewhere, offer to write the script/command for them as part of creating the workflow.
+7. For failures, choose `stop`, `continue`, or `{ goto, maxLoops, onExhausted, feedback }`.
+8. Confirm a concise summary before writing the file.
 
 ## Template
 
