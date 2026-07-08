@@ -3,7 +3,7 @@ import { AnvilAbortError, throwIfAborted } from "../errors.ts";
 
 export const SUBAGENT_SENTINEL_PREFIX = "__ANVIL_SUBAGENT_DONE_";
 const SENTINEL_RE = /__ANVIL_SUBAGENT_DONE_(\d+)__/;
-const MISSING_CWD_PROMPT_RE = /cwd from session file does not exist/i;
+const MISSING_CWD_PROMPT_RE = /cwd from session file does not exist[\s\S]*?continue in current cwd[\s\S]*?(?:^|\n)\s*(?:→\s*)?Continue\b[\s\S]*?(?:^|\n)\s*Cancel\b/im;
 const CONTINUE_CANCEL_PROMPT_RE = /continue in current cwd[\s\S]*?(?:^|\n)\s*(?:→\s*)?Continue\b[\s\S]*?(?:^|\n)\s*Cancel\b/im;
 export const DEFAULT_SUBAGENT_TIMEOUT_MS = 1_800_000;
 export const DEFAULT_READ_SCREEN_FAILURE_LIMIT = 2;

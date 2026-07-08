@@ -52,6 +52,16 @@ Guide the user with pickers when Anvil-specific choices are missing. The user ma
 7. For failures, choose `stop`, `continue`, or `{ goto, maxLoops, onExhausted, feedback }`.
 8. Confirm a concise summary before writing the file.
 
+## Subagent pane command portability
+
+Declarative subagent launches run inside user terminal panes, so generated launch commands must be portable across the user shells that Herdr or cmux may open.
+
+- Do not emit raw `$?` or other bash-only syntax directly into pane commands.
+- Wrap generated subagent launch commands in `bash -lc` when relying on POSIX/bash syntax for setup, exit-status capture, or sentinel output.
+- Include fish-shell parse compatibility in subagent command regression tests when command-generation behavior changes.
+- When adding terminal-screen fallback detection for subagent startup/errors, match the full prompt shape instead of a single phrase that an agent might quote while inspecting issues or logs.
+- Add regression tests for false positives when subagent output contains sentinel-like strings or documented startup error text.
+
 ## Template
 
 Prefer the import form when possible:

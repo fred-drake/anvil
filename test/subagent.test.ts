@@ -20,12 +20,12 @@ describe("buildSubagentLaunchCommand", () => {
 			childExtensionPath: "/ext/child.ts",
 		});
 
-		expect(command).toMatch(/^bash -lc /);
-		expect(command).toContain("cd '\\''/repo'\\'' && ");
-		expect(command).toContain("PI_ANVIL_SUBAGENT_SESSION='\\''/tmp/run/step.jsonl'\\'' ");
-		expect(command).toMatch(/\bpi\b(?=[^;]*\s--session '\\''\/tmp\/run\/step\.jsonl'\\'')(?=[^;]*\s-e '\\''\/ext\/child\.ts'\\'')/);
-		expect(command).toContain("'\\''@/tmp/run/step.task.md'\\''");
-		expect(command).toContain("status=$?; echo '\\''__ANVIL_SUBAGENT_DONE_'\\''\"${status}\"'\\''__'\\''");
+		expect(command).toMatch(/^bash -lc "/);
+		expect(command).toContain("cd '/repo' && ");
+		expect(command).toContain("PI_ANVIL_SUBAGENT_SESSION='/tmp/run/step.jsonl' ");
+		expect(command).toMatch(/\bpi\b(?=[^;]*\s--session '\/tmp\/run\/step\.jsonl')(?=[^;]*\s-e '\/ext\/child\.ts')/);
+		expect(command).toContain("'@/tmp/run/step.task.md'");
+		expect(command).toContain("status=\\$?; echo '__ANVIL_SUBAGENT_DONE_'\\\"\\${status}\\\"'__'");
 		expect(command).not.toContain("echo '__ANVIL_SUBAGENT_DONE_'$?'__'");
 		expect(command).not.toContain("--model");
 		expect(command).not.toContain("--thinking");
@@ -41,8 +41,8 @@ describe("buildSubagentLaunchCommand", () => {
 
 		expect(command).toMatch(/\bpi\b(?=[^;]*\s--approve\b)(?=[^;]*\s--session\s)/);
 		expect(command).not.toMatch(/\s--print\b|\s-p\b/);
-		expect(command).toContain("PI_ANVIL_SUBAGENT_SESSION='\\''/tmp/run/step.jsonl'\\''");
-		expect(command).toContain("status=$?");
+		expect(command).toContain("PI_ANVIL_SUBAGENT_SESSION='/tmp/run/step.jsonl'");
+		expect(command).toContain("status=\\$?");
 		expect(command).not.toContain("echo '__ANVIL_SUBAGENT_DONE_'$?'__'");
 		expect(command).not.toContain("--continue");
 		expect(command).not.toContain("--resume");
@@ -58,8 +58,8 @@ describe("buildSubagentLaunchCommand", () => {
 			thinkingLevel: "high",
 		});
 
-		expect(command).toContain("--model '\\''openai-codex/gpt-5.5'\\''");
-		expect(command).toContain("--thinking '\\''high'\\''");
+		expect(command).toContain("--model 'openai-codex/gpt-5.5'");
+		expect(command).toContain("--thinking 'high'");
 	});
 
 	it("escapes single quotes in paths", () => {
@@ -70,7 +70,7 @@ describe("buildSubagentLaunchCommand", () => {
 			childExtensionPath: "/ext/child.ts",
 		});
 
-		expect(command).toContain("cd '\\''/repo/it'\\''\\'\\'''\\''s here'\\''");
+		expect(command).toContain("cd '/repo/it'\\\\''s here'");
 	});
 });
 
