@@ -34,6 +34,9 @@ class FakeHost implements EngineHost {
 	summaries: RunSummary[] = [];
 	execQueue: EngineExecResult[] = [];
 	modelSelections: Array<StepModelSelection | undefined> = [];
+	activeModelSelection: StepModelSelection | undefined;
+	verdictModelSelections: Array<StepModelSelection | undefined> = [];
+	verdictQueue: Array<Omit<Verdict, "checkId">> = [];
 	modelSelectionError?: Error;
 	onWait?: () => void | Promise<void>;
 	subagentRequests: SubagentStepRunRequest[] = [];
@@ -48,8 +51,9 @@ class FakeHost implements EngineHost {
 	}
 
 	async applyStepModelSelection(selection: StepModelSelection | undefined): Promise<void> {
-		this.modelSelections.push(selection);
+		this.modelSelections.push(cloneSelection(selection));
 		if (this.modelSelectionError) throw this.modelSelectionError;
+		this.activeModelSelection = cloneSelection(selection);
 	}
 
 	sendInstruction(instruction: string): void {
@@ -64,8 +68,10 @@ class FakeHost implements EngineHost {
 		return this.execQueue.shift() ?? { stdout: "", stderr: "", code: 0 };
 	}
 
-	async awaitVerdict(): Promise<Verdict | undefined> {
-		return undefined;
+	async awaitVerdict(checkId: string): Promise<Verdict | undefined> {
+		this.verdictModelSelections.push(cloneSelection(this.activeModelSelection));
+		const verdict = this.verdictQueue.shift();
+		return verdict ? { checkId, ...verdict } : undefined;
 	}
 
 	checkpoint(entry: AnvilCheckpoint): void {
@@ -382,6 +388,92 @@ describe("runWorkflow", () => {
 			expect(request.task).toContain("Do task");
 			expect(request.task).toContain("subagent session executing this workflow step");
 		}
+	});
+
+	it("selects the subagent step model before evaluating its agent checks", async () => {
+		const host = new FakeHost();
+		host.enableSubagents();
+		host.verdictQueue.push({ pass: true, reason: "subagent work looks good" });
+
+		const summary = await runWorkflow({
+			workflow: workflow([
+				{ id: "plan", prompt: "Plan {input}", delegation: "none", model: "cheap/model:minimal" },
+				{
+					id: "implement",
+					prompt: "Implement {input}",
+					delegation: { subagent: "cmux" },
+					model: "grader/model:high",
+					checks: [{ type: "agent", id: "review", prompt: "Review the subagent output" }],
+				},
+			]),
+			input: "task",
+			cwd: "/repo",
+			host,
+			runId: "run-subagent-agent-check-model",
+		});
+
+		expect(summary.state).toBe("succeeded");
+		expect(host.subagentRequests).toHaveLength(1);
+		expect(host.verdictModelSelections).toEqual([{ model: "grader/model", thinkingLevel: "high" }]);
+		expect(host.modelSelections).toEqual([
+			{ model: "cheap/model", thinkingLevel: "minimal" },
+			{ model: "grader/model", thinkingLevel: "high" },
+			undefined,
+		]);
+	});
+
+	it("resets to the workflow default before agent checks on subagent steps without a model", async () => {
+		const host = new FakeHost();
+		host.enableSubagents();
+		host.verdictQueue.push({ pass: true, reason: "default grader passed" });
+
+		const summary = await runWorkflow({
+			workflow: workflow([
+				{ id: "plan", prompt: "Plan {input}", delegation: "none", model: "cheap/model:minimal" },
+				{
+					id: "implement",
+					prompt: "Implement {input}",
+					delegation: { subagent: "cmux" },
+					checks: [{ type: "agent", id: "review", prompt: "Review under the workflow default" }],
+				},
+			]),
+			input: "task",
+			cwd: "/repo",
+			host,
+			runId: "run-subagent-agent-check-default-model",
+		});
+
+		expect(summary.state).toBe("succeeded");
+		expect(host.verdictModelSelections).toEqual([undefined]);
+		expect(host.modelSelections).toEqual([{ model: "cheap/model", thinkingLevel: "minimal" }, undefined, undefined]);
+	});
+
+	it("fails before grading subagent agent checks when their model selection cannot be applied", async () => {
+		const host = new FakeHost();
+		host.enableSubagents();
+		host.modelSelectionError = new Error('model "missing/grader" was not found');
+
+		const summary = await runWorkflow({
+			workflow: workflow([
+				{
+					id: "implement",
+					prompt: "Implement {input}",
+					delegation: { subagent: "cmux" },
+					model: "missing/grader:high",
+					checks: [{ type: "agent", id: "review", prompt: "Review the subagent output" }],
+				},
+			]),
+			input: "task",
+			cwd: "/repo",
+			host,
+			runId: "run-subagent-agent-check-model-error",
+		});
+
+		expect(summary.state).toBe("failed");
+		expect(summary.failureReason).toContain('model "missing/grader" was not found');
+		expect(host.subagentRequests).toHaveLength(1);
+		expect(host.verdictModelSelections).toEqual([]);
+		expect(host.instructions).toHaveLength(0);
 	});
 
 	it("auto-detects HERDR_ENV=1 as herdr subagent delegation", async () => {
@@ -888,6 +980,10 @@ describe("runWorkflow", () => {
 
 function workflow(steps: WorkflowDefinition["steps"]): WorkflowDefinition {
 	return { name: "test-workflow", steps };
+}
+
+function cloneSelection(selection: StepModelSelection | undefined): StepModelSelection | undefined {
+	return selection ? { ...selection } : undefined;
 }
 
 type AutoSubagentEnv = Partial<Record<"HERDR_ENV" | "CMUX_SHELL_INTEGRATION", string>>;

@@ -304,6 +304,16 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<RunSumma
 			}
 
 			const checks = step.checks ?? [];
+			if (delegation.mode === "subagent" && checks.length > 0 && workflowHasModelSelectionOverrides) {
+				try {
+					shouldRestoreModelSelection = true;
+					await options.host.applyStepModelSelection?.(resolveStepModelSelection(step, getCurrentLoopCount(ctx)));
+				} catch (error) {
+					stepState.status = "failed";
+					updateStepUi(options, steps, stepIndex, "failed");
+					throw error;
+				}
+			}
 			let jumpedOrAdvanced = false;
 			for (let checkIndex = 0; checkIndex < checks.length; checkIndex += 1) {
 				throwIfAborted(options.signal);
