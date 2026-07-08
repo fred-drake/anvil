@@ -56,7 +56,8 @@ export function buildSubagentLaunchCommand(args: {
 	parts.push(shellEscape(`@${args.taskFile}`));
 
 	const envPrefix = `PI_ANVIL_SUBAGENT_SESSION=${shellEscape(args.sessionFile)} `;
-	return `cd ${shellEscape(args.cwd)} && ${envPrefix}${parts.join(" ")}; echo '${SUBAGENT_SENTINEL_PREFIX}'$?'__'`;
+	const innerCommand = `cd ${shellEscape(args.cwd)} && ${envPrefix}${parts.join(" ")}; status=$?; echo '${SUBAGENT_SENTINEL_PREFIX}'"\${status}"'__'`;
+	return `bash -lc ${shellEscape(innerCommand)}`;
 }
 
 export function extractLastAssistantText(sessionFile: string): string | undefined {

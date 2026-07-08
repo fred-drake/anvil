@@ -2,7 +2,11 @@
 
 Full-codebase review performed 2026-07-06; re-reviewed and re-run 2026-07-07. Baseline: `npm run check` passes (typecheck clean, 144/144 tests green), so everything below is a latent defect, hardening gap, or maintainability concern — not a broken build.
 
-The originally recorded High (H1) and Medium (M1–M4) issues from the 2026-07-06 pass were fixed and removed. The **M5** item below was newly discovered on 2026-07-07 and is numbered to avoid collision with that history.
+The originally recorded High (H1) and Medium (M1–M4) issues from the 2026-07-06 pass were fixed and removed. The **H6** and **M5** items below were newly discovered on 2026-07-07 and are numbered to avoid collision with that history.
+
+## 🔴 High Priority
+
+- [x] **H6 [TEST/BUILD]** ~~Non-hermetic `pollForExit` test failed on machines with `cmux` installed.~~ Discovered 2026-07-07: `test/subagent.test.ts`'s "bails out when the cmux surface closes…" case drove the real `pollForExit`, which shelled out to the actual `cmux` binary via the un-injected `readScreen`. On CI (no `cmux`, instant `ENOENT`) it passed, but where `cmux` was installed with a down socket each `cmux read-screen` took ~380ms to fail, so `pollForExitWithReadScreen` (`src/subagent/exit.ts:74-84`) hit the `Date.now() >= deadline` branch before `consecutiveReadFailures` reached its limit and threw `Subagent timed out after 100ms` instead of the expected `surface closed before completion` — so `npm run check` failed locally. Fixed by commit `3ff53ae`: the test now injects a stub reader via `pollForExitWithReadScreen(readClosedSurface, …)` and never spawns real `cmux` (`test/subagent.test.ts:163-175`). Verified: 144/144 tests pass. Note (still open, low): because the deadline check precedes the read-failure classification in `src/subagent/exit.ts:74-84`, a genuinely-closed surface with a slow-failing `readScreen` is reported as a timeout rather than "surface closed" — harmless at the default 1,800,000 ms timeout, but worth reordering the checks.
 
 ## 🟡 Medium Priority
 
