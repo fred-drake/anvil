@@ -71,6 +71,8 @@ Requirements:
 			id: "review-code",
 			title: "Review code and record non-blockers",
 			model,
+			// Keep review in the main session so review/check failures can loop back to implementation.
+			runInMain: true,
 			prompt: `Review the changes made for this feature request:
 {input}
 
