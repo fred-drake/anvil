@@ -2,9 +2,9 @@ import { existsSync, readFileSync, rmSync } from "node:fs";
 import { AnvilAbortError, throwIfAborted } from "../errors.ts";
 
 export const SUBAGENT_SENTINEL_PREFIX = "__ANVIL_SUBAGENT_DONE_";
-const SENTINEL_RE = /__ANVIL_SUBAGENT_DONE_(\d+)__/;
-const MISSING_CWD_PROMPT_RE = /cwd from session file does not exist[\s\S]*?continue in current cwd[\s\S]*?(?:^|\n)\s*(?:→\s*)?Continue\b[\s\S]*?(?:^|\n)\s*Cancel\b/im;
-const CONTINUE_CANCEL_PROMPT_RE = /continue in current cwd[\s\S]*?(?:^|\n)\s*(?:→\s*)?Continue\b[\s\S]*?(?:^|\n)\s*Cancel\b/im;
+const LEGACY_SENTINEL_RE = /^__ANVIL_SUBAGENT_DONE_(\d+)__$/m;
+const MISSING_CWD_PROMPT_RE = /^cwd from session file does not exist[\s\S]*?continue in current cwd[\s\S]*?\n\s*(?:→\s*)?Continue\b[\s\S]*?\n\s*Cancel\b/i;
+const CONTINUE_CANCEL_PROMPT_RE = /^continue in current cwd[\s\S]*?\n\s*(?:→\s*)?Continue\b[\s\S]*?\n\s*Cancel\b/i;
 export const DEFAULT_SUBAGENT_TIMEOUT_MS = 1_800_000;
 export const DEFAULT_READ_SCREEN_FAILURE_LIMIT = 2;
 
@@ -54,6 +54,7 @@ export async function pollForExitWithReadScreen(
 	signal?: AbortSignal,
 	intervalMs = 1000,
 	timeoutMs = DEFAULT_SUBAGENT_TIMEOUT_MS,
+	sentinelNonce?: string,
 ): Promise<SubagentExit> {
 	const deadline = Date.now() + timeoutMs;
 	let consecutiveReadFailures = 0;
@@ -67,8 +68,8 @@ export async function pollForExitWithReadScreen(
 		try {
 			const screen = await readScreen(surface, 5);
 			consecutiveReadFailures = 0;
-			const match = screen.match(SENTINEL_RE);
-			if (match) return { reason: "sentinel", exitCode: Number.parseInt(match[1]!, 10) };
+			const sentinelExitCode = detectTerminalSentinel(screen, sentinelNonce);
+			if (sentinelExitCode !== undefined) return { reason: "sentinel", exitCode: sentinelExitCode };
 			const blockingPrompt = detectBlockingPiStartupPrompt(screen);
 			if (blockingPrompt) return { reason: "error", exitCode: 1, errorMessage: blockingPrompt };
 		} catch {
@@ -87,14 +88,26 @@ export async function pollForExitWithReadScreen(
 	}
 }
 
+function detectTerminalSentinel(screen: string, sentinelNonce: string | undefined): number | undefined {
+	const match = sentinelNonce
+		? screen.match(new RegExp(`^${escapeRegExp(SUBAGENT_SENTINEL_PREFIX)}${escapeRegExp(sentinelNonce)}_(\\d+)__$`, "m"))
+		: screen.match(LEGACY_SENTINEL_RE);
+	return match ? Number.parseInt(match[1]!, 10) : undefined;
+}
+
 function detectBlockingPiStartupPrompt(screen: string): string | undefined {
-	if (MISSING_CWD_PROMPT_RE.test(screen)) {
+	const trimmed = screen.trimStart();
+	if (MISSING_CWD_PROMPT_RE.test(trimmed)) {
 		return "Pi startup prompt blocked subagent auto-exit: cwd from session file does not exist.";
 	}
-	if (CONTINUE_CANCEL_PROMPT_RE.test(screen)) {
+	if (CONTINUE_CANCEL_PROMPT_RE.test(trimmed)) {
 		return "Pi startup prompt blocked subagent auto-exit; rerun the step after the session startup prompt is resolved.";
 	}
 	return undefined;
+}
+
+function escapeRegExp(value: string): string {
+	return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {

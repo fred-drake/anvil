@@ -59,6 +59,8 @@ export interface AgentCheck {
 	prompt: Templatable;
 	/** Subagent to delegate evaluation to; omit for main-agent evaluation. */
 	agent?: string;
+	/** Defaults to 300_000. */
+	timeoutMs?: number;
 	onFail?: OnFailPolicy;
 }
 

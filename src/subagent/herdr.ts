@@ -49,12 +49,18 @@ function getPath(record: unknown, path: string[]): unknown {
 	return current;
 }
 
-function parseCreatedPane(output: string, command: string, candidatePaths: string[][]): string {
-	const parsed = parseJsonOutput(output, command);
+function findStringPath(record: unknown, candidatePaths: string[][]): string | undefined {
 	for (const path of candidatePaths) {
-		const value = getPath(parsed, path);
+		const value = getPath(record, path);
 		if (typeof value === "string" && value.trim()) return value;
 	}
+	return undefined;
+}
+
+function parseCreatedPane(output: string, command: string, candidatePaths: string[][]): string {
+	const parsed = parseJsonOutput(output, command);
+	const paneId = findStringPath(parsed, candidatePaths);
+	if (paneId) return paneId;
 	throw new Error(`Unexpected herdr ${command} output: missing pane_id in ${output.trim()}`);
 }
 
@@ -66,15 +72,28 @@ function inferWorkspaceId(paneId: string | undefined): string | undefined {
 
 async function createSplitSurface(name: string): Promise<string> {
 	const stdout = await runHerdr(["pane", "split", "--current", "--direction", "right", "--no-focus"]);
-	const paneId = parseCreatedPane(stdout, "pane split", [
+	const parsed = parseJsonOutput(stdout, "pane split");
+	const paneId = findStringPath(parsed, [
 		["result", "pane", "pane_id"],
 		["result", "root_pane", "pane_id"],
 		["pane", "pane_id"],
 		["pane_id"],
 	]);
+	if (!paneId) throw new Error(`Unexpected herdr pane split output: missing pane_id in ${stdout.trim()}`);
 	await runHerdr(["pane", "rename", paneId, name]);
-	// Empty string means "ask Herdr to use the current workspace" when no stable id is available.
-	subagentWorkspace = process.env.HERDR_WORKSPACE_ID || inferWorkspaceId(process.env.HERDR_PANE_ID) || inferWorkspaceId(paneId) || "";
+	subagentWorkspace =
+		findStringPath(parsed, [
+			["result", "workspace", "workspace_id"],
+			["result", "pane", "workspace_id"],
+			["result", "root_pane", "workspace_id"],
+			["workspace", "workspace_id"],
+			["pane", "workspace_id"],
+			["workspace_id"],
+		]) ??
+		process.env.HERDR_WORKSPACE_ID ??
+		inferWorkspaceId(process.env.HERDR_PANE_ID) ??
+		inferWorkspaceId(paneId) ??
+		null;
 	return paneId;
 }
 
@@ -97,7 +116,13 @@ async function createTabSurface(name: string, workspace: string): Promise<string
  * subsequent calls create labelled tabs in the same workspace.
  */
 export async function createSurface(name: string): Promise<string> {
-	if (subagentWorkspace !== null) return createTabSurface(name, subagentWorkspace);
+	if (subagentWorkspace !== null) {
+		try {
+			return await createTabSurface(name, subagentWorkspace);
+		} catch {
+			subagentWorkspace = null;
+		}
+	}
 	return createSplitSurface(name);
 }
 
@@ -116,9 +141,10 @@ export function pollForExit(
 	signal?: AbortSignal,
 	intervalMs?: number,
 	timeoutMs?: number,
+	sentinelNonce?: string,
 ): Promise<SubagentExit> {
 	const readForPoll = (pane: string, lines = 5) => readScreen(pane, Math.max(lines, 20));
-	return pollForExitWithReadScreen(readForPoll, surface, sessionFile, signal, intervalMs, timeoutMs);
+	return pollForExitWithReadScreen(readForPoll, surface, sessionFile, signal, intervalMs, timeoutMs, sentinelNonce);
 }
 
 export async function closeSurface(surface: string): Promise<void> {

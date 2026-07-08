@@ -48,4 +48,23 @@ describe("index internals", () => {
 		expect(source).toMatch(/runHerdrSubagent/);
 		expect(source).toMatch(/herdr[\s\S]{0,160}runHerdrSubagent|runHerdrSubagent[\s\S]{0,160}herdr/);
 	});
+
+	it("keeps verdict and turn-waiter state scoped to each extension instance", () => {
+		const source = readFileSync(new URL("../src/index.ts", import.meta.url), "utf8");
+		const beforeEntrypoint = source.slice(0, source.indexOf("export default function piAnvil"));
+
+		expect(beforeEntrypoint).not.toMatch(/new\s+VerdictBus\s*\(/);
+		expect(beforeEntrypoint).not.toMatch(/turnWaiters\s*=\s*new\s+Set/);
+	});
+
+	it("uses a single shared run id generator", () => {
+		const indexSource = readFileSync(new URL("../src/index.ts", import.meta.url), "utf8");
+		const engineSource = readFileSync(new URL("../src/engine.ts", import.meta.url), "utf8");
+		const combined = `${indexSource}\n${engineSource}`;
+		const generatorDefinitions = [indexSource, engineSource]
+			.flatMap((source) => source.match(/function\s+newRunId\s*\(/g) ?? []);
+
+		expect(generatorDefinitions).toHaveLength(1);
+		expect(combined).toMatch(/export\s+(?:function\s+newRunId|\{[^}]*newRunId[^}]*\})/);
+	});
 });

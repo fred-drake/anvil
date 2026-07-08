@@ -220,6 +220,7 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<RunSumma
 			}
 
 			stepState.status = "running";
+			stepState.checks = [];
 			updateStepUi(options, steps, stepIndex, "step");
 			const delegation = resolveStepDelegation(options.workflow, step);
 			if (delegation.mode === "subagent") {
@@ -544,6 +545,7 @@ async function executeCheck(args: {
 		ctx: args.ctx,
 		checkId: args.checkId,
 		signal: args.signal,
+		timeoutMs: args.check.timeoutMs,
 	});
 }
 
@@ -594,7 +596,7 @@ function makeRuntimeCheckId(runId: string, stepId: string, checkIndex: number, a
 	return `${runId}:${stepId}:${checkIndex}:${attempt}`;
 }
 
-function newRunId(): string {
+export function newRunId(): string {
 	return `anvil-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
 

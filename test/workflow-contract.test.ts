@@ -55,6 +55,13 @@ describe("workflow public contract", () => {
 		expect(source).toMatch(/WorkflowSubagentBackend\s*=\s*["']cmux["']\s*\|\s*["']herdr["']/);
 	});
 
+	it("exposes agent check timeout settings in the public contract", () => {
+		const source = readFileSync(new URL("../src/types.ts", import.meta.url), "utf8");
+
+		expect(source).toMatch(/interface\s+AgentCheck[\s\S]*timeoutMs\??\s*:\s*number/);
+		expect(source).toMatch(/interface\s+AgentCheck[\s\S]*Defaults to 300_000/);
+	});
+
 	it("parses pi's colon thinking shorthand without treating slash as a thinking separator", () => {
 		expect(resolveStepModelSelection({ id: "one", prompt: "a", model: "openai-codex/gpt-5.5:high" })).toEqual({
 			model: "openai-codex/gpt-5.5",
@@ -192,6 +199,39 @@ describe("workflow public contract", () => {
 
 		expect(readme).toContain("/anvil resume <step> [retry-number]");
 		expect(readme).toMatch(/resume[\s\S]*(numbered|step\s+number|1\.)[\s\S]*(retry-number|retry count)/i);
+		expect(readme).toMatch(/resume[\s\S]*(timestamp|failure reason)[\s\S]*(suggested resume point|last started step)/i);
+	});
+
+	it("documents that main-session agent checks are self-graded", () => {
+		const readme = readFileSync(new URL("../README.md", import.meta.url), "utf8");
+
+		expect(readme).toMatch(/agent-judged checks[\s\S]{0,400}(same main agent|self-graded|not independent)/i);
+		expect(readme).toMatch(/rubber-stamp|pass:\s*true|fresh subagent/i);
+	});
+
+	it("documents that onFail continue skips remaining checks on the step", () => {
+		const readme = readFileSync(new URL("../README.md", import.meta.url), "utf8");
+		const skill = readFileSync(new URL("../skills/anvil-workflow-builder/SKILL.md", import.meta.url), "utf8");
+
+		expect(readme).toMatch(/onFail[\s\S]{0,240}continue[\s\S]{0,240}(skip|remaining checks|later checks)/i);
+		expect(skill).toMatch(/onFail[\s\S]{0,240}continue[\s\S]{0,240}(skip|remaining checks|later checks)/i);
+	});
+
+	it("documents that workflow discovery executes project workflow modules", () => {
+		const readme = readFileSync(new URL("../README.md", import.meta.url), "utf8");
+
+		expect(readme).toMatch(/workflow discovery|\/anvil (?:list|validate|completions)/i);
+		expect(readme).toMatch(/import|execute|top-level code/i);
+		expect(readme).toMatch(/untrusted repo|trusted project|project-controlled code/i);
+	});
+
+	it("does not describe omitted resume retry numbers as disabling retries", () => {
+		const readme = readFileSync(new URL("../README.md", import.meta.url), "utf8");
+		const indexSource = readFileSync(new URL("../src/index.ts", import.meta.url), "utf8");
+		const combined = `${readme}\n${indexSource}`;
+
+		expect(combined).not.toContain("Omit `retry-number` for no retries");
+		expect(combined).toMatch(/no retry count (?:is )?seeded|starts? \{loop\} at 0/i);
 	});
 });
 

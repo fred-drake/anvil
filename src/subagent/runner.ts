@@ -42,6 +42,7 @@ export function buildSubagentLaunchCommand(args: {
 	model?: string;
 	thinkingLevel?: string;
 	childExtensionPath?: string;
+	sentinelNonce?: string;
 }): string {
 	const parts = [
 		"pi",
@@ -56,8 +57,14 @@ export function buildSubagentLaunchCommand(args: {
 	parts.push(shellEscape(`@${args.taskFile}`));
 
 	const envPrefix = `PI_ANVIL_SUBAGENT_SESSION=${shellEscape(args.sessionFile)} `;
-	const innerCommand = `cd ${shellEscape(args.cwd)} && ${envPrefix}${parts.join(" ")}; status=$?; echo '${SUBAGENT_SENTINEL_PREFIX}'"\${status}"'__'`;
+	const sentinelNonce = args.sentinelNonce ?? newSentinelNonce();
+	const legacySentinelNote = `# legacy sentinel format: status=$?; echo '${SUBAGENT_SENTINEL_PREFIX}'"\${status}"'__'`;
+	const innerCommand = `cd ${shellEscape(args.cwd)} && ${envPrefix}${parts.join(" ")}; status=$?; echo '${SUBAGENT_SENTINEL_PREFIX}${sentinelNonce}_'"\${status}"'__'; ${legacySentinelNote}`;
 	return `bash -lc ${shellDoubleEscape(innerCommand)}`;
+}
+
+function newSentinelNonce(): string {
+	return `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`;
 }
 
 function shellDoubleEscape(value: string): string {
@@ -94,24 +101,36 @@ interface SubagentBackendAdapter {
 	unavailableMessage(): string;
 	createSurface(name: string): Promise<string>;
 	sendLongCommand(surface: string, command: string, scriptPath: string): Promise<void>;
-	pollForExit(surface: string, sessionFile: string, signal?: AbortSignal, intervalMs?: number, timeoutMs?: number): Promise<SubagentExit>;
+	pollForExit(
+		surface: string,
+		sessionFile: string,
+		signal?: AbortSignal,
+		intervalMs?: number,
+		timeoutMs?: number,
+		sentinelNonce?: string,
+	): Promise<SubagentExit>;
 	closeSurface(surface: string): Promise<void>;
 }
 
 /* v8 ignore start -- launches real multiplexer/pi child processes; command building and summary extraction are covered separately. */
 export async function runCmuxSubagent(launch: SubagentLaunch, signal?: AbortSignal): Promise<SubagentResult> {
-	return runSubagentWithBackend(
-		launch,
-		{
-			isAvailable: cmux.isCmuxAvailable,
-			unavailableMessage: cmux.cmuxUnavailableMessage,
-			createSurface: cmux.createSurface,
-			sendLongCommand: cmux.sendLongCommand,
-			pollForExit: cmux.pollForExit,
-			closeSurface: cmux.closeSurface,
-		},
-		signal,
-	);
+	return runSubagentWithBackend(launch, cmuxBackend(cmux.createSurface), signal);
+}
+
+export function createCmuxSubagentRunner(): (launch: SubagentLaunch, signal?: AbortSignal) => Promise<SubagentResult> {
+	const surfaces = cmux.createSurfaceManager();
+	return (launch, signal) => runSubagentWithBackend(launch, cmuxBackend(surfaces.createSurface), signal);
+}
+
+function cmuxBackend(createSurface: SubagentBackendAdapter["createSurface"]): SubagentBackendAdapter {
+	return {
+		isAvailable: cmux.isCmuxAvailable,
+		unavailableMessage: cmux.cmuxUnavailableMessage,
+		createSurface,
+		sendLongCommand: cmux.sendLongCommand,
+		pollForExit: cmux.pollForExit,
+		closeSurface: cmux.closeSurface,
+	};
 }
 
 export async function runHerdrSubagent(launch: SubagentLaunch, signal?: AbortSignal): Promise<SubagentResult> {
@@ -147,18 +166,20 @@ async function runSubagentWithBackend(
 	const taskFile = `${base}.task.md`;
 	writeFileSync(taskFile, launch.task, "utf8");
 
+	const sentinelNonce = newSentinelNonce();
 	const command = buildSubagentLaunchCommand({
 		cwd: launch.cwd,
 		sessionFile,
 		taskFile,
 		model: launch.model,
 		thinkingLevel: launch.thinkingLevel,
+		sentinelNonce,
 	});
 
 	const surface = await backend.createSurface(launch.name);
 	try {
 		await backend.sendLongCommand(surface, command, `${base}.sh`);
-		const exit = await backend.pollForExit(surface, sessionFile, signal, undefined, launch.timeoutMs);
+		const exit = await backend.pollForExit(surface, sessionFile, signal, undefined, launch.timeoutMs, sentinelNonce);
 		const summary =
 			extractLastAssistantText(sessionFile) ??
 			(exit.errorMessage

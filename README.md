@@ -27,6 +27,8 @@ Workflows live in:
 - User: `~/.pi/agent/anvil/workflows/*.ts` (also `.js`/`.mjs`)
 - Project: `.pi/anvil/workflows/*.ts` (project workflows win on name collisions)
 
+⚠️ Workflow discovery for `/anvil list`, `/anvil validate`, `/anvil run`, and completions imports workflow modules, so their top-level code executes. Only use Anvil in trusted projects; opening an untrusted repo and touching `/anvil` can run project-controlled code.
+
 ## Commands
 
 ```text
@@ -39,7 +41,7 @@ Workflows live in:
 
 Use `/anvil list` to see available workflows, `/anvil validate` to check that one is ready, and `/anvil run` to start a workflow with whatever task input you want to give it.
 
-Use `/anvil resume` after a failed or aborted run to see a numbered step map, for example `1. Plan`, `2. Implement`, `3. Verify`. Then run `/anvil resume <step> [retry-number]` with the one-based step number to restart from that workflow step using the original task input. Omit `retry-number` for no retries, or pass a retry count to seed `{loop}` on the resumed step.
+Use `/anvil resume` after a failed or aborted run to see a numbered step map, for example `1. Plan`, `2. Implement`, `3. Verify`. The map includes the prior run timestamp and failure reason, and marks the last started step as a suggested resume point when Anvil can infer one. Then run `/anvil resume <step> [retry-number]` with the one-based step number to restart from that workflow step using the original task input. Omit `retry-number` when no retry count is seeded (so `{loop}` starts at 0 for the resumed step); normal workflow retry policies still apply.
 
 ## Declarative subagents
 
@@ -51,7 +53,9 @@ Mux subagents launch a normal interactive `pi` session directly in the spawned p
 
 ⚠️ While skills are supported, be aware that unlike the other options you are at the mercy of the model to get it right. Non-deterministic skills run the risk of it doing the right thing 95% of the time, then misbehaving in that one time out of twenty.
 
-Warnings aside, this is ultimately _your workflow, your rules_. Checks still guard the workflow either way: deterministic checks run commands, while agent-judged checks ask for a clear pass/fail verdict before the workflow moves on.
+Warnings aside, this is ultimately _your workflow, your rules_. Checks still guard the workflow either way: deterministic checks run commands, while agent-judged checks ask for a clear pass/fail verdict before the workflow moves on. Main-session agent-judged checks are self-graded by the same main agent that performed or narrated the step, so they are not an independent review and cannot structurally prevent a rubber-stamp `pass: true`; use declarative subagent steps or a future fresh-subagent review pattern when independence matters.
+
+When a failing check uses `onFail: "continue"`, Anvil continues to the next workflow step immediately and skips any remaining checks on the current step.
 
 ### Retry-based model selection
 

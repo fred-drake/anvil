@@ -46,10 +46,10 @@ Guide the user with pickers when Anvil-specific choices are missing. The user ma
 6. For each gating check, determine its type and details.
    - Explain that checks may be deterministic or non-deterministic.
    - Deterministic checks: a repeatable command or script, optional timeout/cwd. String commands render `{input}` and `{loop}` as quoted shell-variable expansions before running; function commands must quote any context values they interpolate. If the user says that a bash command must run successfully, treat it as implicitly deterministic.
-   - Non-deterministic checks: natural-language criteria judged by an agent, optional evaluation subagent.
+   - Non-deterministic checks: natural-language criteria judged by an agent, optional evaluation subagent, and optional `timeoutMs` (defaults to 300,000ms). Main-session agent checks are self-graded by the same main agent, so they are not independent reviews.
    - If the user is not explicit about whether a check is deterministic and it is not completely obvious, ask with a picker: deterministic command/script check, or non-deterministic agent-judged check.
    - If the deterministic check does not name a script or command that already exists somewhere, offer to write the script/command for them as part of creating the workflow.
-7. For failures, choose `stop`, `continue`, or `{ goto, maxLoops, onExhausted, feedback }`.
+7. For failures, choose `stop`, `continue`, or `{ goto, maxLoops, onExhausted, feedback }`. Make clear that `onFail: "continue"` advances to the next workflow step immediately and skips any remaining checks on the current step.
 8. Confirm a concise summary before writing the file.
 
 ## Subagent pane command portability

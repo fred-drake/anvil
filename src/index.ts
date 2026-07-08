@@ -3,13 +3,13 @@ import { fileURLToPath } from "node:url";
 import { Type, type Api, type Model } from "@earendil-works/pi-ai";
 import { defineTool, type ExtensionAPI, type ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { discoverWorkflows, type DiscoveredWorkflow } from "./discovery.ts";
-import { type AnvilCheckpoint, type EngineHost, runWorkflow, type StepModelSelection } from "./engine.ts";
+import { type AnvilCheckpoint, type EngineHost, newRunId, runWorkflow, type StepModelSelection } from "./engine.ts";
 import { AnvilAbortError } from "./errors.ts";
 import { VerdictBus } from "./gates.ts";
 import { buildSubagentResultMessage, workflowSubagentBackends } from "./prompts.ts";
 import { cmuxUnavailableMessage, isCmuxAvailable } from "./subagent/cmux.ts";
 import { herdrUnavailableMessage, isHerdrAvailable } from "./subagent/herdr.ts";
-import { runCmuxSubagent, runHerdrSubagent } from "./subagent/runner.ts";
+import { createCmuxSubagentRunner, runHerdrSubagent } from "./subagent/runner.ts";
 import type { WorkflowDefinition, WorkflowSubagentBackend } from "./types.ts";
 import { renderSummaryMarkdown } from "./ui.ts";
 
@@ -27,6 +27,10 @@ type ResumableRun = {
 	input: string;
 	finalState: "failed" | "aborted";
 	timestamp: string;
+	lastStepIndex?: number;
+	lastStepStartedAt?: string;
+	lastFailureReason?: string;
+	lastFailureTimestamp?: string;
 };
 
 type AutocompleteItem = {
@@ -63,45 +67,20 @@ type TurnWaiter = {
 	resolve: () => void;
 	reject: (error: Error) => void;
 	timer: NodeJS.Timeout;
+	waiters: Set<TurnWaiter>;
 	signal?: AbortSignal;
 	onAbort?: () => void;
 };
-
-const verdictBus = new VerdictBus();
-const turnWaiters = new Set<TurnWaiter>();
-
-const anvilVerdictTool = defineTool({
-	name: "anvil_verdict",
-	label: "Anvil Verdict",
-	description: "Report the pass/fail verdict for an active anvil agent check.",
-	parameters: Type.Object({
-		check_id: Type.String({ description: "The exact check_id provided by Anvil." }),
-		pass: Type.Boolean({ description: "Whether the check passed." }),
-		reason: Type.String({ description: "Concise reason for the verdict." }),
-	}),
-
-	async execute(_toolCallId, params) {
-		const matched = verdictBus.reportVerdict(params.check_id, params.pass, params.reason);
-		return {
-			content: [
-				{
-					type: "text" as const,
-					text: matched
-						? `Anvil verdict recorded for ${params.check_id}.`
-						: `No active Anvil check is waiting for ${params.check_id}; the verdict was ignored.`,
-				},
-			],
-			details: { matched, check_id: params.check_id, pass: params.pass, reason: params.reason },
-		};
-	},
-});
 
 /* c8 ignore start -- Pi extension registration and command/UI wiring are exercised through integration-style tests; pure internals remain covered directly. */
 /* v8 ignore start -- Pi extension registration and command/UI wiring are exercised through integration-style tests; pure internals remain covered directly. */
 export default function piAnvil(pi: ExtensionAPI) {
 	let activeRun: ActiveRun | undefined;
+	const verdictBus = new VerdictBus();
+	const turnWaiters = new Set<TurnWaiter>();
+	const runCmuxSubagent = createCmuxSubagentRunner();
 
-	pi.registerTool(anvilVerdictTool);
+	pi.registerTool(createAnvilVerdictTool(verdictBus));
 
 	pi.registerMessageRenderer("anvil-summary", () => undefined);
 
@@ -129,7 +108,7 @@ export default function piAnvil(pi: ExtensionAPI) {
 
 	pi.registerCommand("anvil", {
 		description: "Run and manage declarative Anvil workflows.",
-		getArgumentCompletions: async (argumentPrefix) => getAnvilCompletions(argumentPrefix, process.cwd()),
+		getArgumentCompletions: async (argumentPrefix) => getAnvilCompletions(argumentPrefix),
 		handler: async (args, ctx) => {
 			const { subcommand, rest } = parseAnvilArgs(args);
 			try {
@@ -213,7 +192,7 @@ export default function piAnvil(pi: ExtensionAPI) {
 			if (!ctx.isIdle()) await ctx.waitForIdle();
 			if (controller.signal.aborted) return;
 
-			const host = createEngineHost(piApi, ctx, controller);
+			const host = createEngineHost(piApi, ctx, controller, verdictBus, turnWaiters, runCmuxSubagent);
 			launched = true;
 			ctx.ui.notify(`Started Anvil workflow "${workflow.workflow.name}" (${runId}).`, "info");
 
@@ -302,7 +281,7 @@ export default function piAnvil(pi: ExtensionAPI) {
 			if (!ctx.isIdle()) await ctx.waitForIdle();
 			if (controller.signal.aborted) return;
 
-			const host = createEngineHost(piApi, ctx, controller);
+			const host = createEngineHost(piApi, ctx, controller, verdictBus, turnWaiters, runCmuxSubagent);
 			launched = true;
 			ctx.ui.notify(`Resumed Anvil workflow "${workflow.workflow.name}" from step ${parsed.stepNumber} (${runId}).`, "info");
 
@@ -329,7 +308,42 @@ export default function piAnvil(pi: ExtensionAPI) {
 /* v8 ignore stop */
 /* c8 ignore stop */
 
-function createEngineHost(pi: ExtensionAPI, ctx: ExtensionCommandContext, controller: AbortController): EngineHost {
+function createAnvilVerdictTool(verdictBus: VerdictBus) {
+	return defineTool({
+		name: "anvil_verdict",
+		label: "Anvil Verdict",
+		description: "Report the pass/fail verdict for an active anvil agent check.",
+		parameters: Type.Object({
+			check_id: Type.String({ description: "The exact check_id provided by Anvil." }),
+			pass: Type.Boolean({ description: "Whether the check passed." }),
+			reason: Type.String({ description: "Concise reason for the verdict." }),
+		}),
+
+		async execute(_toolCallId, params) {
+			const matched = verdictBus.reportVerdict(params.check_id, params.pass, params.reason);
+			return {
+				content: [
+					{
+						type: "text" as const,
+						text: matched
+							? `Anvil verdict recorded for ${params.check_id}.`
+							: `No active Anvil check is waiting for ${params.check_id}; the verdict was ignored.`,
+					},
+				],
+				details: { matched, check_id: params.check_id, pass: params.pass, reason: params.reason },
+			};
+		},
+	});
+}
+
+function createEngineHost(
+	pi: ExtensionAPI,
+	ctx: ExtensionCommandContext,
+	controller: AbortController,
+	verdictBus: VerdictBus,
+	turnWaiters: Set<TurnWaiter>,
+	runCmuxSubagent: typeof runHerdrSubagent,
+): EngineHost {
 	let pendingTurn: Promise<void> | undefined;
 	const defaultModel = ctx.model;
 	const defaultThinkingLevel = pi.getThinkingLevel();
@@ -393,11 +407,11 @@ function createEngineHost(pi: ExtensionAPI, ctx: ExtensionCommandContext, contro
 			return result;
 		},
 		sendInstruction(instruction) {
-			pendingTurn = waitForTurnCompletion(ctx, controller.signal);
+			pendingTurn = waitForTurnCompletion(ctx, controller.signal, turnWaiters);
 			pi.sendUserMessage(instruction);
 		},
 		async waitForTurnComplete(signal) {
-			const wait = pendingTurn ?? waitForTurnCompletion(ctx, signal);
+			const wait = pendingTurn ?? waitForTurnCompletion(ctx, signal, turnWaiters);
 			pendingTurn = undefined;
 			await wait;
 		},
@@ -526,7 +540,7 @@ function extractAnvilArgumentText(textBeforeCursor: string): string | undefined 
 	return /^\/anvil(?::\d+)?\s+([\s\S]*)$/.exec(textBeforeCursor)?.[1];
 }
 
-export async function getAnvilCompletions(argumentPrefix: string, cwd: string) {
+export async function getAnvilCompletions(argumentPrefix: string, cwd?: string) {
 	const subcommands = ["run", "list", "validate", "abort", "resume"];
 	const trimmedStart = argumentPrefix.trimStart();
 	const parts = trimmedStart.split(/\s+/);
@@ -538,6 +552,7 @@ export async function getAnvilCompletions(argumentPrefix: string, cwd: string) {
 
 	const subcommand = parts[0];
 	if ((subcommand === "run" || subcommand === "validate") && parts.length <= 2) {
+		if (!cwd) return [];
 		const prefix = parts[1] ?? "";
 		const workflows = await discoverWorkflows({ cwd });
 		return workflows
@@ -583,17 +598,32 @@ function getSessionEntries(ctx: ExtensionCommandContext): unknown[] {
 
 function findLatestResumableRun(entries: unknown[]): ResumableRun | undefined {
 	let latest: ResumableRun | undefined;
+	const lastStartedStep = new Map<string, { index: number; timestamp?: string }>();
+	const lastFailure = new Map<string, { reason: string; timestamp?: string }>();
 	for (const entry of entries) {
 		const checkpoint = toAnvilCheckpoint(entry);
-		if (!checkpoint || checkpoint.phase !== "run_end") continue;
+		if (!checkpoint?.runId) continue;
+		if (checkpoint.phase === "step_start" && typeof checkpoint.stepIndex === "number") {
+			lastStartedStep.set(checkpoint.runId, { index: checkpoint.stepIndex, timestamp: checkpoint.timestamp });
+		}
+		if ((checkpoint.phase === "check_result" || checkpoint.phase === "run_end") && checkpoint.reason) {
+			lastFailure.set(checkpoint.runId, { reason: checkpoint.reason, timestamp: checkpoint.timestamp });
+		}
+		if (checkpoint.phase !== "run_end") continue;
 		if (checkpoint.finalState !== "aborted" && checkpoint.finalState !== "failed") continue;
-		if (!checkpoint.runId || !checkpoint.workflowName || checkpoint.input === undefined) continue;
+		if (!checkpoint.workflowName || checkpoint.input === undefined) continue;
+		const startedStep = lastStartedStep.get(checkpoint.runId);
+		const failure = lastFailure.get(checkpoint.runId);
 		latest = {
 			runId: checkpoint.runId,
 			workflowName: checkpoint.workflowName,
 			input: checkpoint.input,
 			finalState: checkpoint.finalState,
 			timestamp: checkpoint.timestamp ?? "",
+			lastStepIndex: startedStep?.index,
+			lastStepStartedAt: startedStep?.timestamp,
+			lastFailureReason: failure?.reason,
+			lastFailureTimestamp: failure?.timestamp,
 		};
 	}
 	return latest;
@@ -608,22 +638,37 @@ function toAnvilCheckpoint(entry: unknown): Partial<AnvilCheckpoint> | undefined
 }
 
 function formatResumeStepMap(run: ResumableRun, workflow: WorkflowDefinition): string {
+	const suggestedStepNumber = run.lastStepIndex !== undefined ? run.lastStepIndex + 1 : undefined;
+	const suggestedStep = suggestedStepNumber !== undefined ? workflow.steps[suggestedStepNumber - 1] : undefined;
 	const lines = [
 		`# Resume Anvil workflow \`${workflow.name}\``,
 		"",
-		`Latest resumable run: \`${run.runId}\` (${run.finalState})`,
+		`Latest resumable run: \`${run.runId}\` (${run.finalState}, ${formatResumeTimestamp(run.timestamp)})`,
 		`Task input: ${run.input || "_(empty)_"}`,
+		`Last started step: ${formatResumeStepReference(suggestedStepNumber, suggestedStep)} at ${formatResumeTimestamp(run.lastStepStartedAt)}`,
+		`Failure reason: ${run.lastFailureReason?.trim() || "_(not recorded)_"}${run.lastFailureTimestamp ? ` (${formatResumeTimestamp(run.lastFailureTimestamp)})` : ""}`,
 		"",
 		"Choose the one-based step number to resume from:",
 		"",
 	];
 	workflow.steps.forEach((step, index) => {
 		const title = step.title ?? step.id;
-		lines.push(`${index + 1}. ${title} (\`${step.id}\`)`);
+		const marker = suggestedStepNumber === index + 1 ? " ← suggested resume point" : "";
+		lines.push(`${index + 1}. ${title} (\`${step.id}\`)${marker}`);
 	});
+	if (suggestedStepNumber) lines.push("", `Suggested command: \`/anvil resume ${suggestedStepNumber}\``);
 	lines.push("", "Run `/anvil resume <step> [retry-number]`.");
-	lines.push("Omit `retry-number` for no retries, or pass the current retry count to seed `{loop}` for the resumed step.");
+	lines.push("Omit `retry-number` when no retry count should be seeded; when no retry count is seeded, normal workflow retry policies still apply.");
 	return lines.join("\n");
+}
+
+function formatResumeStepReference(stepNumber: number | undefined, step: WorkflowDefinition["steps"][number] | undefined): string {
+	if (stepNumber === undefined || !step) return "_(unknown)_";
+	return `${stepNumber}. ${step.title ?? step.id} (\`${step.id}\`)`;
+}
+
+function formatResumeTimestamp(timestamp: string | undefined): string {
+	return timestamp?.trim() || "unknown timestamp";
 }
 
 function formatWorkflowList(workflows: DiscoveredWorkflow[]): string {
@@ -649,17 +694,25 @@ function formatWorkflowErrors(workflow: DiscoveredWorkflow): string {
 	].join("\n");
 }
 
-function waitForTurnCompletion(ctx: ExtensionCommandContext, signal?: AbortSignal): Promise<void> {
-	return waitForOneTurnOrIdle(ctx, signal).then(async () => {
+function waitForTurnCompletion(
+	ctx: ExtensionCommandContext,
+	signal: AbortSignal | undefined,
+	turnWaiters: Set<TurnWaiter>,
+): Promise<void> {
+	return waitForOneTurnOrIdle(ctx, signal, turnWaiters).then(async () => {
 		await ctx.waitForIdle();
 		while (ctx.hasPendingMessages()) {
-			await waitForOneTurnOrIdle(ctx, signal);
+			await waitForOneTurnOrIdle(ctx, signal, turnWaiters);
 			await ctx.waitForIdle();
 		}
 	});
 }
 
-function waitForOneTurnOrIdle(ctx: ExtensionCommandContext, signal?: AbortSignal): Promise<void> {
+function waitForOneTurnOrIdle(
+	ctx: ExtensionCommandContext,
+	signal: AbortSignal | undefined,
+	turnWaiters: Set<TurnWaiter>,
+): Promise<void> {
 	if (signal?.aborted) return Promise.reject(new AnvilAbortError());
 	return new Promise<void>((resolve, reject) => {
 		const waiter: TurnWaiter = {
@@ -669,6 +722,7 @@ function waitForOneTurnOrIdle(ctx: ExtensionCommandContext, signal?: AbortSignal
 			timer: setTimeout(() => {
 				if (!waiter.started && ctx.isIdle()) resolveTurnWaiter(waiter);
 			}, 2_000),
+			waiters: turnWaiters,
 			signal,
 		};
 		waiter.onAbort = () => rejectTurnWaiter(waiter, new AnvilAbortError());
@@ -690,11 +744,8 @@ function rejectTurnWaiter(waiter: TurnWaiter, error: Error): void {
 function cleanupTurnWaiter(waiter: TurnWaiter): void {
 	clearTimeout(waiter.timer);
 	if (waiter.signal && waiter.onAbort) waiter.signal.removeEventListener("abort", waiter.onAbort);
-	turnWaiters.delete(waiter);
+	waiter.waiters.delete(waiter);
 }
 
-function newRunId(): string {
-	return `anvil-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-}
 
 export const __testing__ = { resolveModelReference, parseAnvilArgs, parseRunArgs };

@@ -287,6 +287,31 @@ describe("executeAgentCheck", () => {
 		expect(host.instructions[1]).toContain("Call the `anvil_verdict` tool now");
 	});
 
+	it("cancels stale verdict waiters after giving up on an agent check", async () => {
+		const bus = new VerdictBus();
+		class BusHost extends GateHost {
+			override awaitVerdict(checkId: string, timeoutMs = 0, signal?: AbortSignal): Promise<Verdict | undefined> {
+				return bus.awaitVerdict(checkId, timeoutMs, signal);
+			}
+		}
+		const host = new BusHost();
+
+		const result = await executeAgentCheck({
+			host,
+			workflow: workflow(),
+			step: workflow().steps[0]!,
+			check: { type: "agent", prompt: "criteria" },
+			ctx: ctx(),
+			checkId: "check",
+			timeoutMs: 10_000,
+		});
+
+		expect(result).toMatchObject({ pass: false, reason: "no verdict reported" });
+		const acceptedLateVerdict = bus.reportVerdict("check", true, "late rubber stamp");
+		bus.clear();
+		expect(acceptedLateVerdict).toBe(false);
+	});
+
 	it("re-prompts after a timed-out verdict wait and then accepts a verdict", async () => {
 		const host = new GateHost();
 		host.verdictQueue.push(undefined, { checkId: "ignored", pass: false, reason: "needs work" });

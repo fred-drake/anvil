@@ -63,6 +63,40 @@ describe("/anvil validate command", () => {
 	});
 });
 
+describe("/anvil command completions", () => {
+	it("does not discover workflows from process.cwd for legacy argument completions", async () => {
+		root = await mkdtemp(join(tmpdir(), "anvil-command-"));
+		const processProject = join(root, "process-project");
+		await mkdir(join(processProject, ".pi", "anvil", "workflows"), { recursive: true });
+		await writeFile(
+			join(processProject, ".pi", "anvil", "workflows", "process-only.ts"),
+			`export default { name: "process-only", steps: [{ id: "one", prompt: "wrong cwd" }] };`,
+			"utf8",
+		);
+		const previousCwd = process.cwd();
+		let command: { getArgumentCompletions: (prefix: string) => Promise<any> } | undefined;
+		const pi = {
+			registerTool: vi.fn(),
+			registerMessageRenderer: vi.fn(),
+			on: vi.fn(),
+			registerCommand: vi.fn((_name: string, registered: typeof command) => {
+				command = registered;
+			}),
+			sendMessage: vi.fn(),
+		} as any;
+
+		try {
+			process.chdir(processProject);
+			piAnvil(pi);
+			const completions = await command!.getArgumentCompletions("run ");
+
+			expect(completions).not.toContainEqual(expect.objectContaining({ label: "process-only" }));
+		} finally {
+			process.chdir(previousCwd);
+		}
+	});
+});
+
 describe("/anvil run command", () => {
 	it("reserves the active run slot before async discovery and idle waits", async () => {
 		root = await mkdtemp(join(tmpdir(), "anvil-command-"));
@@ -152,7 +186,14 @@ describe("/anvil resume command", () => {
 			}),
 			expect.objectContaining({ triggerTurn: false }),
 		);
-		expect(pi.sendMessage.mock.calls[0]?.[0].content).toContain("/anvil resume <step> [retry-number]");
+		const content = String(pi.sendMessage.mock.calls[0]?.[0].content);
+		expect(content).toContain("/anvil resume <step> [retry-number]");
+		expect(content).toContain("Latest resumable run: `run-prev` (aborted, 2026-07-07T00:04:00.000Z)");
+		expect(content).toContain("Last started step: 2. Implement (`implement`) at 2026-07-07T00:02:00.000Z");
+		expect(content).toContain("Failure reason: deterministic check failed (2026-07-07T00:03:00.000Z)");
+		expect(content).toMatch(/suggest(?:ed|ion)[\s\S]*\/anvil resume 2/i);
+		expect(content).toContain("Omit `retry-number` when no retry count should be seeded");
+		expect(content).not.toContain("Omit `retry-number` for no retries");
 	});
 
 	it("reserves the active run slot before resume discovery and idle waits", async () => {
@@ -263,10 +304,24 @@ function demoRunEntries(finalState: "aborted" | "failed") {
 	const base = { runId: "run-prev", workflowName: "demo", input: "Resume task", timestamp: "2026-07-07T00:00:00.000Z" };
 	return [
 		{ type: "custom", customType: "anvil-run", data: { ...base, phase: "run_start" } },
-		{ type: "custom", customType: "anvil-run", data: { ...base, phase: "step_start", stepId: "plan", stepIndex: 0 } },
-		{ type: "custom", customType: "anvil-run", data: { ...base, phase: "step_pass", stepId: "plan", stepIndex: 0 } },
-		{ type: "custom", customType: "anvil-run", data: { ...base, phase: "step_start", stepId: "implement", stepIndex: 1 } },
-		{ type: "custom", customType: "anvil-run", data: { ...base, phase: "run_end", finalState } },
+		{ type: "custom", customType: "anvil-run", data: { ...base, phase: "step_start", stepId: "plan", stepIndex: 0, timestamp: "2026-07-07T00:01:00.000Z" } },
+		{ type: "custom", customType: "anvil-run", data: { ...base, phase: "step_pass", stepId: "plan", stepIndex: 0, timestamp: "2026-07-07T00:01:30.000Z" } },
+		{ type: "custom", customType: "anvil-run", data: { ...base, phase: "step_start", stepId: "implement", stepIndex: 1, timestamp: "2026-07-07T00:02:00.000Z" } },
+		{
+			type: "custom",
+			customType: "anvil-run",
+			data: {
+				...base,
+				phase: "check_result",
+				stepId: "implement",
+				stepIndex: 1,
+				checkId: "run-prev:implement:check1:1",
+				pass: false,
+				reason: "deterministic check failed",
+				timestamp: "2026-07-07T00:03:00.000Z",
+			},
+		},
+		{ type: "custom", customType: "anvil-run", data: { ...base, phase: "run_end", finalState, timestamp: "2026-07-07T00:04:00.000Z" } },
 	];
 }
 

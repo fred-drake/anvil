@@ -33,7 +33,7 @@ const STEP_KEYS = new Set([
 	"onFail",
 ]);
 const DETERMINISTIC_CHECK_KEYS = new Set(["type", "id", "name", "command", "cwd", "timeoutMs", "onFail"]);
-const AGENT_CHECK_KEYS = new Set(["type", "id", "name", "prompt", "agent", "onFail"]);
+const AGENT_CHECK_KEYS = new Set(["type", "id", "name", "prompt", "agent", "timeoutMs", "onFail"]);
 const CHECK_KEYS = new Set([...DETERMINISTIC_CHECK_KEYS, ...AGENT_CHECK_KEYS]);
 const ON_FAIL_KEYS = new Set(["goto", "maxLoops", "onExhausted", "feedback"]);
 const RETRY_MODEL_SELECTION_KEYS = new Set(["retry", "model", "thinkingLevel"]);
@@ -68,13 +68,22 @@ export function validateWorkflow(value: unknown): ValidationResult {
 
 	const stepIds = new Set<string>();
 	const duplicateIds = new Set<string>();
+	const checkIds = new Set<string>();
+	const duplicateCheckIds = new Set<string>();
 	for (const step of rawSteps) {
 		if (isRecord(step) && typeof step.id === "string" && step.id.length > 0) {
 			if (stepIds.has(step.id)) duplicateIds.add(step.id);
 			stepIds.add(step.id);
 		}
+		if (!isRecord(step) || !Array.isArray(step.checks)) continue;
+		for (const check of step.checks) {
+			if (!isRecord(check) || typeof check.id !== "string" || check.id.length === 0) continue;
+			if (checkIds.has(check.id)) duplicateCheckIds.add(check.id);
+			checkIds.add(check.id);
+		}
 	}
 	for (const id of duplicateIds) errors.push(`duplicate step id "${id}"`);
+	for (const id of duplicateCheckIds) errors.push(`duplicate check id "${id}"`);
 
 	if (value.defaults !== undefined) validateDefaults(value.defaults, errors, stepIds);
 	rawSteps.forEach((step, index) => validateStep(step, index, stepIds, errors));
@@ -255,6 +264,9 @@ function validateAgentCheck(check: Record<string, unknown>, path: string, errors
 	}
 	if (check.agent !== undefined && typeof check.agent !== "string") {
 		errors.push(`${path}.agent must be a string when provided`);
+	}
+	if (check.timeoutMs !== undefined && !isPositiveInteger(check.timeoutMs)) {
+		errors.push(`${path}.timeoutMs must be a positive integer when provided`);
 	}
 }
 

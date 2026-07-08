@@ -125,11 +125,7 @@ export async function executeAgentCheck(args: {
 	signal?: AbortSignal;
 	timeoutMs?: number;
 }): Promise<GateResult> {
-	let verdictPromise = args.host.awaitVerdict(
-		args.checkId,
-		args.timeoutMs ?? DEFAULT_AGENT_VERDICT_TIMEOUT_MS,
-		args.signal,
-	);
+	const firstWait = startVerdictWait(args);
 	const instruction = await buildAgentCheckInstruction({
 		workflow: args.workflow,
 		step: args.step,
@@ -140,25 +136,23 @@ export async function executeAgentCheck(args: {
 
 	args.host.sendInstruction(instruction);
 	let turnPromise = args.host.waitForTurnComplete(args.signal);
-	const first = await raceVerdictOrTurn(verdictPromise, turnPromise);
+	const first = await raceVerdictOrTurn(firstWait.promise, turnPromise);
 	if (first.kind === "verdict" && first.verdict) {
 		await turnPromise;
 		return verdictToGateResult(args.check, args.checkId, first.verdict);
 	}
+	if (first.kind === "turn") firstWait.cancel();
 
-	verdictPromise = args.host.awaitVerdict(
-		args.checkId,
-		args.timeoutMs ?? DEFAULT_AGENT_VERDICT_TIMEOUT_MS,
-		args.signal,
-	);
+	const secondWait = startVerdictWait(args);
 
 	args.host.sendInstruction(buildVerdictReprompt(args.checkId));
 	turnPromise = args.host.waitForTurnComplete(args.signal);
-	const second = await raceVerdictOrTurn(verdictPromise, turnPromise);
+	const second = await raceVerdictOrTurn(secondWait.promise, turnPromise);
 	if (second.kind === "verdict" && second.verdict) {
 		await turnPromise;
 		return verdictToGateResult(args.check, args.checkId, second.verdict);
 	}
+	secondWait.cancel();
 
 	return {
 		check: args.check,
@@ -167,6 +161,37 @@ export async function executeAgentCheck(args: {
 		pass: false,
 		reason: "no verdict reported",
 	};
+}
+
+function startVerdictWait(args: {
+	host: EngineHost;
+	checkId: string;
+	signal?: AbortSignal;
+	timeoutMs?: number;
+}): { promise: Promise<Verdict | undefined>; cancel: () => void } {
+	const controller = new AbortController();
+	const signal = combineAbortSignals(args.signal, controller.signal);
+	let canceled = false;
+	const promise = args.host
+		.awaitVerdict(args.checkId, args.timeoutMs ?? DEFAULT_AGENT_VERDICT_TIMEOUT_MS, signal)
+		.catch((error) => {
+			if (canceled || controller.signal.aborted) return undefined;
+			throw error;
+		});
+	return {
+		promise,
+		cancel: () => {
+			canceled = true;
+			controller.abort();
+			void promise.catch(() => undefined);
+		},
+	};
+}
+
+function combineAbortSignals(external: AbortSignal | undefined, internal: AbortSignal): AbortSignal {
+	if (!external) return internal;
+	if (external.aborted) return external;
+	return AbortSignal.any([external, internal]);
 }
 
 function verdictToGateResult(check: AgentCheck, checkId: string, verdict: Verdict): GateResult {
@@ -185,7 +210,11 @@ async function raceVerdictOrTurn(
 ): Promise<{ kind: "verdict"; verdict: Verdict | undefined } | { kind: "turn" }> {
 	return Promise.race([
 		verdictPromise.then((verdict) => ({ kind: "verdict" as const, verdict })),
-		turnPromise.then(() => ({ kind: "turn" as const })),
+		turnPromise.then(async () => {
+			// If the agent turn and verdict settle in the same tick, prefer the verdict.
+			await Promise.resolve();
+			return { kind: "turn" as const };
+		}),
 	]);
 }
 

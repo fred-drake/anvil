@@ -72,6 +72,22 @@ describe("buildSubagentLaunchCommand", () => {
 
 		expect(command).toContain("cd '/repo/it'\\\\''s here'");
 	});
+
+	it("adds a per-launch nonce to the terminal sentinel", () => {
+		const request = {
+			cwd: "/repo",
+			sessionFile: "/tmp/run/step.jsonl",
+			taskFile: "/tmp/run/step.task.md",
+			childExtensionPath: "/ext/child.ts",
+		};
+
+		const first = buildSubagentLaunchCommand(request);
+		const second = buildSubagentLaunchCommand(request);
+
+		expect(first).toContain("__ANVIL_SUBAGENT_DONE_");
+		expect(second).toContain("__ANVIL_SUBAGENT_DONE_");
+		expect(first).not.toBe(second);
+	});
 });
 
 describe("extractLastAssistantText", () => {
@@ -175,6 +191,35 @@ describe("pollForExit", () => {
 			pollForExitWithReadScreen(readClosedSurface, "surface:missing", sessionFile, undefined, 1, timeoutMs),
 		).rejects.toThrow(/surface closed before completion/i);
 		expect(Date.now() - startedAt).toBeLessThan(timeoutMs);
+	});
+
+	it("ignores sentinel-like text that was printed by the subagent", async () => {
+		const sessionFile = join(tempDir(), "session.jsonl");
+		const readQuotedSentinel = async () => "reviewing docs: __ANVIL_SUBAGENT_DONE_0__ should not terminate this run";
+
+		await expect(
+			pollForExitWithReadScreen(readQuotedSentinel, "surface:1", sessionFile, undefined, 1, 5),
+		).rejects.toThrow(/timed out/i);
+	});
+
+	it("does not treat quoted Pi startup prompts as blocked subagent startup", async () => {
+		const sessionFile = join(tempDir(), "session.jsonl");
+		const quotedPrompt = [
+			"The agent is reviewing this known Pi prompt text:",
+			"cwd from session file does not exist",
+			"/missing/repo",
+			"",
+			"continue in current cwd",
+			"/fallback/repo",
+			"",
+			"→ Continue",
+			"  Cancel",
+		].join("\n");
+		const readQuotedPrompt = async () => quotedPrompt;
+
+		await expect(
+			pollForExitWithReadScreen(readQuotedPrompt, "surface:1", sessionFile, undefined, 1, 5),
+		).rejects.toThrow(/timed out/i);
 	});
 });
 

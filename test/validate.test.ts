@@ -23,6 +23,42 @@ describe("validateWorkflow", () => {
 		if (!result.ok) expect(result.errors).toContain('duplicate step id "same"');
 	});
 
+	it("rejects duplicate check ids across workflow steps", () => {
+		const result = validateWorkflow({
+			name: "duplicate-checks",
+			steps: [
+				{
+					id: "first",
+					prompt: "a",
+					checks: [{ type: "deterministic", id: "quality", command: "true" }],
+				},
+				{
+					id: "second",
+					prompt: "b",
+					checks: [{ type: "agent", id: "quality", prompt: "review it" }],
+				},
+			],
+		});
+
+		expect(result.ok).toBe(false);
+		if (!result.ok) expect(result.errors).toContain('duplicate check id "quality"');
+	});
+
+	it("accepts agent check timeout settings", () => {
+		const workflow = {
+			name: "agent-timeout",
+			steps: [
+				{
+					id: "review",
+					prompt: "review",
+					checks: [{ type: "agent", prompt: "criteria", timeoutMs: 42 }],
+				},
+			],
+		};
+
+		expect(validateWorkflow(workflow)).toEqual({ ok: true, workflow });
+	});
+
 	it("rejects dangling goto targets", () => {
 		const result = validateWorkflow({
 			name: "dangling",

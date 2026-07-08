@@ -67,6 +67,23 @@ describe("herdr backend parity with cmux", () => {
 		expect(calls[2]).toContain("--no-focus");
 	});
 
+	it("derives the reusable workspace from Herdr JSON responses", async () => {
+		const dir = tempDir();
+		const logFile = join(dir, "herdr.log");
+		installFakeHerdr(dir, logFile, {
+			splitOutput: '{"result":{"pane":{"pane_id":"1-2","workspace_id":"workspace-json"},"workspace":{"workspace_id":"workspace-json"}}}',
+		});
+		process.env.PATH = `${dir}:${ORIGINAL_PATH ?? ""}`;
+		process.env.HERDR_ENV = "1";
+		process.env.HERDR_PANE_ID = "1-1";
+		delete process.env.HERDR_WORKSPACE_ID;
+
+		await createSurface("Anvil: research");
+		await createSurface("Anvil: implement");
+
+		expect(readFileSync(logFile, "utf8")).toContain("tab create --workspace workspace-json --label Anvil: implement --no-focus");
+	});
+
 	it("rejects malformed herdr create responses", async () => {
 		const dir = tempDir();
 		const logFile = join(dir, "herdr.log");
@@ -164,14 +181,14 @@ function missingCwdPrompt(): string {
 	].join("\n");
 }
 
-function installFakeHerdr(dir: string, logFile: string, options: { malformedCreate?: boolean; screenOutput?: string } = {}): void {
+function installFakeHerdr(dir: string, logFile: string, options: { malformedCreate?: boolean; screenOutput?: string; splitOutput?: string } = {}): void {
 	writeFileSync(
 		join(dir, "herdr"),
 		`#!/bin/sh
 set -eu
 printf '%s\\n' "$*" >> ${shellQuote(logFile)}
 if [ "$1 $2" = "pane split" ]; then
-  printf '%s\\n' '${options.malformedCreate ? "{}" : '{"result":{"pane":{"pane_id":"1-2"}}}'}'
+  printf '%s\\n' '${options.malformedCreate ? "{}" : options.splitOutput ?? '{"result":{"pane":{"pane_id":"1-2"}}}'}'
   exit 0
 fi
 if [ "$1 $2" = "tab create" ]; then

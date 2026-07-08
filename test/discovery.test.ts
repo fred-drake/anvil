@@ -32,6 +32,29 @@ describe("discoverWorkflows", () => {
 		expect(workflows[0]?.workflow?.description).toBe("project");
 	});
 
+	it("surfaces same-directory workflow name collisions instead of silently dropping one", async () => {
+		await writeWorkflow(project, "alpha.ts", `export default { name: "collision", description: "alpha", steps: [{ id: "one", prompt: "alpha" }] };`);
+		await writeWorkflow(project, "omega.ts", `export default { name: "collision", description: "omega", steps: [{ id: "one", prompt: "omega" }] };`);
+
+		const workflows = await discoverWorkflows({ homeDir: home, cwd: project, useCache: false });
+
+		expect(workflows.filter((workflow) => workflow.name === "collision")).toHaveLength(2);
+		expect(workflows).toContainEqual(
+			expect.objectContaining({
+				name: "collision",
+				file: expect.stringContaining("alpha.ts"),
+				errors: expect.arrayContaining([expect.stringMatching(/duplicate|collision|shadow/i)]),
+			}),
+		);
+		expect(workflows).toContainEqual(
+			expect.objectContaining({
+				name: "collision",
+				file: expect.stringContaining("omega.ts"),
+				workflow: expect.objectContaining({ description: "omega" }),
+			}),
+		);
+	});
+
 	it("includes load errors in discovery results", async () => {
 		await writeWorkflow(home, "broken.ts", `throw new Error("boom");`);
 

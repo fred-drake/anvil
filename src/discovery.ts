@@ -39,15 +39,11 @@ export async function discoverWorkflows(options: WorkflowDiscoveryOptions = {}):
 	const cached = discoveryCache.get(cacheKey);
 	if (useCache && cached?.signature === signature) return cached.workflows;
 
-	const user = await loadWorkflowDir(dirs.user, "user");
-	const project = await loadWorkflowDir(dirs.project, "project");
+	const user = markSameDirectoryCollisions(await loadWorkflowDir(dirs.user, "user"));
+	const project = markSameDirectoryCollisions(await loadWorkflowDir(dirs.project, "project"));
 
-	const byName = new Map<string, DiscoveredWorkflow>();
-	for (const result of [...user, ...project]) {
-		byName.set(result.name, result);
-	}
-
-	const workflows = [...byName.values()].sort((a, b) => a.name.localeCompare(b.name));
+	const projectNames = new Set(project.map((result) => result.name));
+	const workflows = [...user.filter((result) => !projectNames.has(result.name)), ...project].sort(compareWorkflowResults);
 	discoveryCache.set(cacheKey, { signature, workflows });
 	return workflows;
 }
@@ -110,6 +106,32 @@ async function workflowDirSignature(dir: string): Promise<string> {
 	} catch (error) {
 		return isNodeError(error) && error.code === "ENOENT" ? "missing" : `error:${formatError(error)}`;
 	}
+}
+
+function markSameDirectoryCollisions(workflows: DiscoveredWorkflow[]): DiscoveredWorkflow[] {
+	const byName = new Map<string, DiscoveredWorkflow[]>();
+	for (const workflow of workflows) byName.set(workflow.name, [...(byName.get(workflow.name) ?? []), workflow]);
+
+	return workflows.map((workflow) => {
+		const collisions = byName.get(workflow.name) ?? [];
+		if (collisions.length <= 1 || collisions[collisions.length - 1] === workflow) return workflow;
+		const winner = collisions[collisions.length - 1]!;
+		return {
+			...workflow,
+			errors: [
+				...(workflow.errors ?? []),
+				`duplicate workflow name "${workflow.name}" in ${workflow.source} workflows; shadowed by ${winner.file}`,
+			],
+		};
+	});
+}
+
+function compareWorkflowResults(a: DiscoveredWorkflow, b: DiscoveredWorkflow): number {
+	return (
+		a.name.localeCompare(b.name) ||
+		Number(Boolean(a.errors?.length)) - Number(Boolean(b.errors?.length)) ||
+		a.file.localeCompare(b.file)
+	);
 }
 
 async function loadWorkflowDir(dir: string, source: WorkflowSource): Promise<DiscoveredWorkflow[]> {

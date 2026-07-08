@@ -19,8 +19,12 @@ export {
 
 const execFileAsync = promisify(execFile);
 
-/** Tracked subagent pane — reused across launches so tabs stack instead of splitting. */
-let subagentPane: string | null = null;
+interface CmuxSurfaceState {
+	subagentPane: string | null;
+}
+
+/** Default state for direct backend use; extension sessions create their own manager. */
+const defaultSurfaceState: CmuxSurfaceState = { subagentPane: null };
 
 export { shellEscape };
 
@@ -161,18 +165,27 @@ async function createSurfaceInPane(name: string, pane: string): Promise<string> 
  * Returns a `surface:<n>` identifier.
  */
 export async function createSurface(name: string): Promise<string> {
-	if (subagentPane) {
+	return createSurfaceWithState(defaultSurfaceState, name);
+}
+
+export function createSurfaceManager(): { createSurface: (name: string) => Promise<string> } {
+	const state: CmuxSurfaceState = { subagentPane: null };
+	return { createSurface: (name) => createSurfaceWithState(state, name) };
+}
+
+async function createSurfaceWithState(state: CmuxSurfaceState, name: string): Promise<string> {
+	if (state.subagentPane) {
 		try {
 			const { stdout: tree } = await execFileAsync("cmux", ["tree"], { encoding: "utf8" });
-			if (new RegExp(`(^|\\s)${escapeRegExp(subagentPane)}($|\\s)`).test(tree)) {
-				return createSurfaceInPane(name, subagentPane);
+			if (new RegExp(`(^|\\s)${escapeRegExp(state.subagentPane)}($|\\s)`).test(tree)) {
+				return createSurfaceInPane(name, state.subagentPane);
 			}
 		} catch {}
-		subagentPane = null;
+		state.subagentPane = null;
 	}
 
 	const created = await createSplitSurface(name);
-	subagentPane = created.paneRef ?? null;
+	state.subagentPane = created.paneRef ?? null;
 	return created.surface;
 }
 
@@ -205,8 +218,9 @@ export function pollForExit(
 	signal?: AbortSignal,
 	intervalMs?: number,
 	timeoutMs?: number,
+	sentinelNonce?: string,
 ): Promise<SubagentExit> {
-	return pollForExitWithReadScreen(readScreen, surface, sessionFile, signal, intervalMs, timeoutMs);
+	return pollForExitWithReadScreen(readScreen, surface, sessionFile, signal, intervalMs, timeoutMs, sentinelNonce);
 }
 
 function sleep(ms: number): Promise<void> {

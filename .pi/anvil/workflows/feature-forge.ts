@@ -71,8 +71,8 @@ Requirements:
 			id: "review-code",
 			title: "Review code and record non-blockers",
 			model,
-			// Keep review in the main session so review/check failures can loop back to implementation.
-			runInMain: true,
+			// Run review independently from the implementation context when a subagent backend is available.
+			delegation: "auto",
 			prompt: `Review the changes made for this feature request:
 {input}
 

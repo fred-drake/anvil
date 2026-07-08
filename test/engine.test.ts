@@ -36,6 +36,7 @@ class FakeHost implements EngineHost {
 	modelSelections: Array<StepModelSelection | undefined> = [];
 	activeModelSelection: StepModelSelection | undefined;
 	verdictModelSelections: Array<StepModelSelection | undefined> = [];
+	verdictTimeouts: number[] = [];
 	verdictQueue: Array<Omit<Verdict, "checkId">> = [];
 	modelSelectionError?: Error;
 	onWait?: () => void | Promise<void>;
@@ -68,8 +69,9 @@ class FakeHost implements EngineHost {
 		return this.execQueue.shift() ?? { stdout: "", stderr: "", code: 0 };
 	}
 
-	async awaitVerdict(checkId: string): Promise<Verdict | undefined> {
+	async awaitVerdict(checkId: string, timeoutMs: number): Promise<Verdict | undefined> {
 		this.verdictModelSelections.push(cloneSelection(this.activeModelSelection));
+		this.verdictTimeouts.push(timeoutMs);
 		const verdict = this.verdictQueue.shift();
 		return verdict ? { checkId, ...verdict } : undefined;
 	}
@@ -975,6 +977,61 @@ describe("runWorkflow", () => {
 		expect(host.subagentRequests).toHaveLength(1);
 		expect(host.subagentRequests[0]).toMatchObject({ stepId: "implement", stepIndex: 1, stepCount: 2 });
 		expect(host.subagentRequests[0]?.task).toContain("step 2/2: Implement");
+	});
+
+	it("threads agent check timeout settings from the workflow contract", async () => {
+		const host = new FakeHost();
+		host.verdictQueue.push({ pass: true, reason: "ok" });
+
+		const summary = await runWorkflow({
+			workflow: workflow([
+				{
+					id: "review",
+					prompt: "Review",
+					checks: [{ type: "agent", prompt: "criteria", timeoutMs: 1234 } as any],
+				},
+			]),
+			input: "task",
+			cwd: "/tmp",
+			host,
+			runId: "run-agent-timeout",
+		});
+
+		expect(summary.state).toBe("succeeded");
+		expect(host.verdictTimeouts).toEqual([1234]);
+	});
+
+	it("shows only the latest check attempt in step summaries after a goto retry", async () => {
+		const host = new FakeHost();
+		host.execQueue.push(
+			{ stdout: "", stderr: "first attempt failed", code: 1 },
+			{ stdout: "", stderr: "", code: 0 },
+			{ stdout: "", stderr: "", code: 0 },
+		);
+
+		const summary = await runWorkflow({
+			workflow: workflow([
+				{
+					id: "implement",
+					prompt: "Implement {input}; retry {loop}",
+					checks: [
+						{ type: "deterministic", id: "tests", command: "test", onFail: { goto: "implement", maxLoops: 1 } },
+						{ type: "deterministic", id: "lint", command: "lint" },
+					],
+				},
+			]),
+			input: "task",
+			cwd: "/tmp",
+			host,
+			runId: "run-reset-check-history",
+		});
+
+		expect(summary.state).toBe("succeeded");
+		expect(summary.steps[0]?.checks).toHaveLength(2);
+		expect(summary.steps[0]?.checks.map((check) => [check.name, check.pass])).toEqual([
+			["tests", true],
+			["lint", true],
+		]);
 	});
 });
 
