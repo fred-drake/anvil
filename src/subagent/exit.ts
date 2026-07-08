@@ -74,14 +74,17 @@ export async function pollForExitWithReadScreen(
 			if (blockingPrompt) return { reason: "error", exitCode: 1, errorMessage: blockingPrompt };
 		} catch {
 			// Surface may already be gone — give the child a short grace period to write the sidecar,
-			// then fail fast instead of waiting for the full subagent timeout.
+			// then fail fast instead of waiting for the full subagent timeout. Classify a completed
+			// read-failure streak before timeout so slow failed reads do not mask a closed surface.
+			consecutiveReadFailures += 1;
+			if (consecutiveReadFailures >= DEFAULT_READ_SCREEN_FAILURE_LIMIT) {
+				const lateSidecar = consumeExitSidecar(sessionFile);
+				if (lateSidecar) return lateSidecar;
+				throw new Error(`Subagent surface closed before completion: ${surface}`);
+			}
 			if (Date.now() >= deadline) throw new Error(`Subagent timed out after ${timeoutMs}ms`);
 			const lateSidecar = consumeExitSidecar(sessionFile);
 			if (lateSidecar) return lateSidecar;
-			consecutiveReadFailures += 1;
-			if (consecutiveReadFailures >= DEFAULT_READ_SCREEN_FAILURE_LIMIT) {
-				throw new Error(`Subagent surface closed before completion: ${surface}`);
-			}
 		}
 
 		await sleep(Math.min(intervalMs, Math.max(0, deadline - Date.now())), signal);

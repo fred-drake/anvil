@@ -11,6 +11,10 @@ function tempDir(): string {
 	return mkdtempSync(join(tmpdir(), "anvil-test-"));
 }
 
+function delay(ms: number): Promise<void> {
+	return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 describe("buildSubagentLaunchCommand", () => {
 	it("builds a pi launch command with session, child extension, and sentinel", () => {
 		const command = buildSubagentLaunchCommand({
@@ -168,15 +172,14 @@ describe("pollForExit", () => {
 
 	it("times out when a subagent never writes an exit sidecar or sentinel", async () => {
 		const sessionFile = join(tempDir(), "session.jsonl");
-		const delayedSidecar = setTimeout(() => {
-			writeFileSync(`${sessionFile}.exit`, JSON.stringify({ type: "done" }), "utf8");
-		}, 25);
+		let attempts = 0;
+		const readRunningSurface = async () => {
+			attempts += 1;
+			return "still working";
+		};
 
-		try {
-			await expect(pollForExit("surface:1", sessionFile, undefined, 1, 5)).rejects.toThrow(/timed out/i);
-		} finally {
-			clearTimeout(delayedSidecar);
-		}
+		await expect(pollForExitWithReadScreen(readRunningSurface, "surface:1", sessionFile, undefined, 1, 5)).rejects.toThrow(/timed out/i);
+		expect(attempts).toBeGreaterThan(0);
 	});
 
 	it("bails out when the cmux surface closes before an exit sidecar is written", async () => {
@@ -191,6 +194,56 @@ describe("pollForExit", () => {
 			pollForExitWithReadScreen(readClosedSurface, "surface:missing", sessionFile, undefined, 1, timeoutMs),
 		).rejects.toThrow(/surface closed before completion/i);
 		expect(Date.now() - startedAt).toBeLessThan(timeoutMs);
+	});
+
+	it("reports a closed surface when the final read failure crosses the timeout deadline", async () => {
+		const sessionFile = join(tempDir(), "session.jsonl");
+		let attempts = 0;
+		const readClosedSurfaceSlowly = async () => {
+			attempts += 1;
+			if (attempts > 1) await delay(60);
+			throw new Error("surface closed");
+		};
+
+		await expect(
+			pollForExitWithReadScreen(readClosedSurfaceSlowly, "surface:missing", sessionFile, undefined, 1, 50),
+		).rejects.toThrow(/surface closed before completion/i);
+		expect(attempts).toBe(2);
+	});
+
+	it("prefers a sidecar written before closed-surface classification even after the timeout deadline", async () => {
+		const sessionFile = join(tempDir(), "session.jsonl");
+		const writeLateSidecar = setTimeout(() => {
+			writeFileSync(`${sessionFile}.exit`, JSON.stringify({ type: "done" }), "utf8");
+		}, 55);
+		let attempts = 0;
+		const readClosedSurfaceSlowly = async () => {
+			attempts += 1;
+			if (attempts > 1) await delay(60);
+			throw new Error("surface closed");
+		};
+
+		try {
+			await expect(
+				pollForExitWithReadScreen(readClosedSurfaceSlowly, "surface:missing", sessionFile, undefined, 1, 50),
+			).resolves.toEqual({ reason: "done", exitCode: 0 });
+			expect(attempts).toBe(2);
+		} finally {
+			clearTimeout(writeLateSidecar);
+		}
+	});
+
+	it("keeps timing out when a single slow read failure crosses the deadline without a closed-surface streak", async () => {
+		const sessionFile = join(tempDir(), "session.jsonl");
+		let attempts = 0;
+		const readScreen = async () => {
+			attempts += 1;
+			await delay(30);
+			throw new Error("transient read failure");
+		};
+
+		await expect(pollForExitWithReadScreen(readScreen, "surface:flaky", sessionFile, undefined, 1, 20)).rejects.toThrow(/timed out/i);
+		expect(attempts).toBe(1);
 	});
 
 	it("ignores sentinel-like text that was printed by the subagent", async () => {
