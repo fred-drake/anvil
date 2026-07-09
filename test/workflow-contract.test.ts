@@ -55,6 +55,13 @@ describe("workflow public contract", () => {
 		expect(source).toMatch(/WorkflowSubagentBackend\s*=\s*["']cmux["']\s*\|\s*["']herdr["']/);
 	});
 
+	it("exposes step outputs and deterministic output capture in the public contract", () => {
+		const source = readFileSync(new URL("../src/types.ts", import.meta.url), "utf8");
+
+		expect(source).toMatch(/interface\s+WorkflowContext[\s\S]*outputs\s*:\s*Record<string, string>/);
+		expect(source).toMatch(/interface\s+WorkflowStep[\s\S]*outputFrom\??\s*:\s*string/);
+	});
+
 	it("exposes agent check timeout settings in the public contract", () => {
 		const source = readFileSync(new URL("../src/types.ts", import.meta.url), "utf8");
 

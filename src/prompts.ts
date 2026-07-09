@@ -33,10 +33,20 @@ export function renderTemplateString(template: string, ctx: WorkflowContext): st
 }
 
 export function renderCommandTemplateString(template: string, ctx: WorkflowContext): string {
-	return renderCommandPlaceholders(template, [
+	const placeholders: CommandPlaceholder[] = [
 		{ token: "{input}", variable: "__ANVIL_INPUT", value: ctx.input },
 		{ token: "{loop}", variable: "__ANVIL_LOOP", value: String(getCurrentLoopCount(ctx)) },
-	]);
+	];
+	let outputIndex = 0;
+	for (const stepId of referencedOutputIds(template)) {
+		placeholders.push({
+			token: `{outputs.${stepId}}`,
+			variable: `__ANVIL_OUTPUT_${outputIndex}`,
+			value: ctx.outputs[stepId] ?? "",
+		});
+		outputIndex += 1;
+	}
+	return renderCommandPlaceholders(template, placeholders);
 }
 
 function replaceTemplatePlaceholders(
@@ -44,9 +54,20 @@ function replaceTemplatePlaceholders(
 	ctx: WorkflowContext,
 	escapeValue: (value: string) => string,
 ): string {
-	return template
-		.replaceAll("{input}", escapeValue(ctx.input))
-		.replaceAll("{loop}", escapeValue(String(getCurrentLoopCount(ctx))));
+	// Single pass over the original template: `String.prototype.replace` never rescans
+	// substituted text, so a value carrying a `{outputs.x}` (e.g. free-form task input)
+	// cannot trigger a further expansion.
+	return template.replace(/\{input\}|\{loop\}|\{outputs\.([^}]+)\}/g, (match, outputId?: string) => {
+		if (match === "{input}") return escapeValue(ctx.input);
+		if (match === "{loop}") return escapeValue(String(getCurrentLoopCount(ctx)));
+		return escapeValue(ctx.outputs[outputId!] ?? "");
+	});
+}
+
+function referencedOutputIds(template: string): string[] {
+	const ids = new Set<string>();
+	for (const match of template.matchAll(/\{outputs\.([^}]+)\}/g)) ids.add(match[1]!);
+	return [...ids];
 }
 
 type ShellQuote = "single" | "double" | undefined;

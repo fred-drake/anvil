@@ -77,10 +77,12 @@ type TurnWaiter = {
 export default function piAnvil(pi: ExtensionAPI) {
 	let activeRun: ActiveRun | undefined;
 	const verdictBus = new VerdictBus();
+	const outputBus = new OutputBus();
 	const turnWaiters = new Set<TurnWaiter>();
 	const runCmuxSubagent = createCmuxSubagentRunner();
 
 	pi.registerTool(createAnvilVerdictTool(verdictBus));
+	pi.registerTool(createAnvilOutputTool(outputBus));
 
 	pi.registerMessageRenderer("anvil-summary", () => undefined);
 
@@ -102,6 +104,7 @@ export default function piAnvil(pi: ExtensionAPI) {
 		activeRun?.controller.abort();
 		activeRun = undefined;
 		verdictBus.clear();
+		outputBus.clear();
 		ctx.ui.setStatus("anvil", undefined);
 		ctx.ui.setWidget("anvil-steps", undefined);
 	});
@@ -192,7 +195,7 @@ export default function piAnvil(pi: ExtensionAPI) {
 			if (!ctx.isIdle()) await ctx.waitForIdle();
 			if (controller.signal.aborted) return;
 
-			const host = createEngineHost(piApi, ctx, controller, verdictBus, turnWaiters, runCmuxSubagent);
+			const host = createEngineHost(piApi, ctx, controller, verdictBus, outputBus, turnWaiters, runCmuxSubagent);
 			launched = true;
 			ctx.ui.notify(`Started Anvil workflow "${workflow.workflow.name}" (${runId}).`, "info");
 
@@ -281,7 +284,7 @@ export default function piAnvil(pi: ExtensionAPI) {
 			if (!ctx.isIdle()) await ctx.waitForIdle();
 			if (controller.signal.aborted) return;
 
-			const host = createEngineHost(piApi, ctx, controller, verdictBus, turnWaiters, runCmuxSubagent);
+			const host = createEngineHost(piApi, ctx, controller, verdictBus, outputBus, turnWaiters, runCmuxSubagent);
 			launched = true;
 			ctx.ui.notify(`Resumed Anvil workflow "${workflow.workflow.name}" from step ${parsed.stepNumber} (${runId}).`, "info");
 
@@ -307,6 +310,34 @@ export default function piAnvil(pi: ExtensionAPI) {
 }
 /* v8 ignore stop */
 /* c8 ignore stop */
+
+class OutputBus {
+	private activeStepId: string | undefined;
+	private output: string | undefined;
+
+	begin(stepId: string): void {
+		this.activeStepId = stepId;
+		this.output = undefined;
+	}
+
+	record(stepId: string, output: string): boolean {
+		if (this.activeStepId !== stepId) return false;
+		this.output = output;
+		return true;
+	}
+
+	end(stepId: string): string | undefined {
+		if (this.activeStepId !== stepId) return undefined;
+		const output = this.output;
+		this.clear();
+		return output;
+	}
+
+	clear(): void {
+		this.activeStepId = undefined;
+		this.output = undefined;
+	}
+}
 
 function createAnvilVerdictTool(verdictBus: VerdictBus) {
 	return defineTool({
@@ -336,11 +367,39 @@ function createAnvilVerdictTool(verdictBus: VerdictBus) {
 	});
 }
 
+function createAnvilOutputTool(outputBus: OutputBus) {
+	return defineTool({
+		name: "anvil_output",
+		label: "Anvil Output",
+		description: "Record the textual output for the current Anvil workflow step.",
+		parameters: Type.Object({
+			step_id: Type.String({ description: "The exact step id currently being executed by Anvil." }),
+			output: Type.String({ description: "Text to expose to later workflow steps as ctx.outputs[step_id]." }),
+		}),
+
+		async execute(_toolCallId, params) {
+			const matched = outputBus.record(params.step_id, params.output);
+			return {
+				content: [
+					{
+						type: "text" as const,
+						text: matched
+							? `Anvil output recorded for step ${params.step_id}.`
+							: `No active Anvil step is waiting for output from ${params.step_id}; the output was ignored.`,
+					},
+				],
+				details: { matched, step_id: params.step_id },
+			};
+		},
+	});
+}
+
 function createEngineHost(
 	pi: ExtensionAPI,
 	ctx: ExtensionCommandContext,
 	controller: AbortController,
 	verdictBus: VerdictBus,
+	outputBus: OutputBus,
 	turnWaiters: Set<TurnWaiter>,
 	runCmuxSubagent: typeof runHerdrSubagent,
 ): EngineHost {
@@ -424,6 +483,12 @@ function createEngineHost(
 		},
 		awaitVerdict(checkId, timeoutMs, signal) {
 			return verdictBus.awaitVerdict(checkId, timeoutMs, signal);
+		},
+		beginStepOutputCapture(stepId) {
+			outputBus.begin(stepId);
+		},
+		endStepOutputCapture(stepId) {
+			return outputBus.end(stepId);
 		},
 		checkpoint(entry) {
 			pi.appendEntry("anvil-run", entry);

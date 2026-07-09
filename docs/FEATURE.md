@@ -274,6 +274,46 @@ handling and records a distinct failure reason.
 
 ---
 
+## 10. Per-item fan-out (`forEach` steps)
+
+📄 **Detailed plan:** [`features/10-per-item-fanout.md`](features/10-per-item-fanout.md)
+
+**Why:** A step is one prompt executed by one agent session, so a step's scope must fit
+one context window. That breaks down on small local models: "write test stubs for this
+feature" exceeds what a 27B model can hold, and prompting the model to split the work
+itself hands orchestration to the least reliable component. Engine-driven fan-out runs
+a step's prompt once per item (typically per file) in a fresh subagent session each —
+deterministic decomposition, bounded context per session, and per-item retry/feedback
+and model escalation.
+
+**Current state:** The run loop executes exactly one prompt per step
+(`src/engine.ts`), and retry state (`loopCounts`, `feedbackByStep`) is keyed per step,
+not per item. The cmux runner already manages multiple surfaces, so the spawning
+infrastructure exists.
+
+**Design sketch:**
+- Add `forEach` to `WorkflowStep`: an item source (a function over `ctx` — typically
+  parsing a prior step's output from feature #3 — or a deterministic command whose
+  stdout becomes the item list), plus `concurrency` (default 1), `maxItems`, and
+  `onItemExhausted`.
+- New `{item}` / `{itemIndex}` / `{itemCount}` template placeholders in prompts and
+  (shell-safely) in check commands, so checks can gate each item individually
+  (`npx vitest run {item}`).
+- Per-item retry keys for loop counts and feedback; `onFail.goto` inside a `forEach`
+  step may only target the step itself ("retry this item") in v1.
+- Step output (feature #3) becomes a per-item digest; resume re-runs the whole step.
+
+**Files:** `src/types.ts`, `src/validate.ts`, `src/engine.ts` (includes extracting a
+single-attempt helper from the run loop first), `src/prompts.ts`, `src/ui.ts`,
+`skills/anvil-workflow-builder/SKILL.md`, `README.md`, examples, broad tests.
+
+**Risks:** The engine refactor touches the most intricate code in the project — land
+it as a pure-move commit first. Item-qualified retry keys must not disturb existing
+step-keyed behavior. Ship sequential-only first; parallel surfaces are proven for cmux
+but not herdr.
+
+---
+
 ## Suggested sequencing
 
 - **Land first, independently:** #1 (independent review) and #2 (history) — both are
@@ -281,6 +321,9 @@ handling and records a distinct failure reason.
 - **Plan as a deliberate contract change:** #3 (step outputs), then #5 (params). These
   reshape `WorkflowContext`/`WorkflowDefinition` and unlock #8.
 - **Quality-of-life, any time:** #4 (dry-run), #6 (hooks), #7 (status), #9 (budget).
+- **After #3:** #10 (per-item fan-out) — item sources typically parse a prior step's
+  captured output, and the per-item digest lands as a step output. This is the
+  highest-value follow-up to #3 for small-context local models.
 - **After #3/#5:** #8 (composition), which depends on outputs and params to be useful.
 
 Every contract change must keep the synchronized-update discipline in `AGENTS.md`:

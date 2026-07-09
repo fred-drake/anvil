@@ -5,6 +5,8 @@ export interface WorkflowContext {
 	/** "<checkId>-><stepId>" -> count. */
 	loopCounts: Record<string, number>;
 	cwd: string;
+	/** Captured textual outputs of prior steps, keyed by step id. */
+	outputs: Record<string, string>;
 }
 
 export type Templatable = string | ((ctx: WorkflowContext) => string | Promise<string>);
@@ -98,6 +100,8 @@ export interface WorkflowStep {
 	runInMain?: boolean;
 	skipIf?: (ctx: WorkflowContext) => boolean | Promise<boolean>;
 	checks?: Check[];
+	/** Capture this step's output from a named check's stdout/stderr text. */
+	outputFrom?: string;
 	/** Default for this step's checks. */
 	onFail?: OnFailPolicy;
 }

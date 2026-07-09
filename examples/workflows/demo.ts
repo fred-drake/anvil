@@ -21,6 +21,7 @@ export default defineWorkflow({
 			// model: "cheap/model:minimal",
 			// retryModelSelections: [{ retry: 1, model: "strong/model", thinkingLevel: "high" }],
 			prompt: "Complete this file task: {input}",
+			outputFrom: "file-exists",
 			checks: [
 				{
 					type: "deterministic",
@@ -29,7 +30,7 @@ export default defineWorkflow({
 					command: (ctx) => {
 						const match = /(?:create|write)\s+(\S+)/i.exec(ctx.input);
 						const file = match?.[1] ?? "/tmp/anvil-demo.txt";
-						return `test -f ${shellEscape(file)}`;
+						return `test -f ${shellEscape(file)} && printf '%s' ${shellEscape(file)}`;
 					},
 					onFail: { goto: "create-file", maxLoops: 2, feedback: true },
 				},
@@ -39,7 +40,7 @@ export default defineWorkflow({
 			id: "summarize",
 			title: "Summarize the result",
 			runInMain: true,
-			prompt: "Summarize what was done for: {input}",
+			prompt: "Summarize what was done for: {input}\n\nThe verified file path from the previous step is: {outputs.create-file}",
 			checks: [
 				{
 					type: "agent",

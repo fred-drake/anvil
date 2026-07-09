@@ -39,13 +39,14 @@ Guide the user with pickers when Anvil-specific choices are missing. The user ma
    - optional `retryModelSelections` when the user wants retry-aware model or thinking changes. `retry: 0` is the first attempt; `retry: 1` is the first retry. The highest retry less than or equal to the current retry count wins, and omitted fields fall back to the step's regular model/thinking. These selections affect main-session steps and declarative subagent launches.
    - optional `subagentTimeoutMs` on workflow defaults or individual steps that use declarative subagent delegation (defaults to 1,800,000ms).
    - optional per-step `delegation` override or `runInMain: true`
+   - whether the step should pass text to later steps. Later templates can reference prior outputs as `{outputs.<step-id>}` or `ctx.outputs["<step-id>"]`; missing outputs are empty, resume-skipped steps have no outputs, and retry loops overwrite with the latest attempt. Declarative subagent steps capture their final summary automatically. Main-session steps only capture output if the agent calls `anvil_output`. For deterministic capture, set `outputFrom: "<check-id>"` on the step so that check's command output becomes the step output (truncated to the last 8 KiB).
 5. For each step, determine whether it has gating checks.
    - If the user explicitly provides one or more checks for the step, capture them.
    - If the user explicitly says the step has no check / no gate, record no `checks` for that step without asking again.
    - If they are not explicit about whether there is no gating check for the step, ask with a picker: add a gating check, or no gating check.
 6. For each gating check, determine its type and details.
    - Explain that checks may be deterministic or non-deterministic.
-   - Deterministic checks: a repeatable command or script, optional timeout/cwd. String commands render `{input}` and `{loop}` as quoted shell-variable expansions before running; function commands must quote any context values they interpolate. If the user says that a bash command must run successfully, treat it as implicitly deterministic.
+   - Deterministic checks: a repeatable command or script, optional timeout/cwd. String commands render `{input}`, `{loop}`, and `{outputs.<step-id>}` as quoted shell-variable expansions before running; function commands must quote any context values they interpolate. If the user says that a bash command must run successfully, treat it as implicitly deterministic.
    - Non-deterministic checks: natural-language criteria judged by an agent, optional evaluation subagent, and optional `timeoutMs` (defaults to 300,000ms). Main-session agent checks are self-graded by the same main agent, so they are not independent reviews.
    - If the user is not explicit about whether a check is deterministic and it is not completely obvious, ask with a picker: deterministic command/script check, or non-deterministic agent-judged check.
    - If the deterministic check does not name a script or command that already exists somewhere, offer to write the script/command for them as part of creating the workflow.
@@ -87,6 +88,7 @@ export default defineWorkflow({
 				{ retry: 1, model: "openai-codex/gpt-5.5", thinkingLevel: "high" },
 			],
 			prompt: "Implement this request: {input}",
+			outputFrom: "tests", // optional: expose this check's output as {outputs.implement}
 			checks: [
 				{
 					type: "deterministic",

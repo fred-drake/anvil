@@ -30,6 +30,7 @@ const STEP_KEYS = new Set([
 	"runInMain",
 	"skipIf",
 	"checks",
+	"outputFrom",
 	"onFail",
 ]);
 const DETERMINISTIC_CHECK_KEYS = new Set(["type", "id", "name", "command", "cwd", "timeoutMs", "onFail"]);
@@ -164,6 +165,9 @@ function validateStep(step: unknown, index: number, stepIds: Set<string>, errors
 		validateOnFailPolicy(step.onFail, `${path}.onFail`, stepIds, errors);
 	}
 
+	if (step.outputFrom !== undefined && (typeof step.outputFrom !== "string" || step.outputFrom.length === 0)) {
+		errors.push(`${path}.outputFrom must be a non-empty string when provided`);
+	}
 	if (step.checks !== undefined) {
 		if (!Array.isArray(step.checks)) {
 			errors.push(`${path}.checks must be an array when provided`);
@@ -171,7 +175,17 @@ function validateStep(step: unknown, index: number, stepIds: Set<string>, errors
 			step.checks.forEach((check, checkIndex) =>
 				validateCheck(check, `${path}.checks[${checkIndex}]`, stepIds, errors),
 			);
+			if (typeof step.outputFrom === "string") {
+				const target = step.checks.find((check) => isRecord(check) && check.id === step.outputFrom);
+				if (!target) {
+					errors.push(`${path}.outputFrom must reference a check id on the same step`);
+				} else if (isRecord(target) && target.type !== "deterministic") {
+					errors.push(`${path}.outputFrom must reference a deterministic check`);
+				}
+			}
 		}
+	} else if (step.outputFrom !== undefined) {
+		errors.push(`${path}.outputFrom requires checks`);
 	}
 }
 

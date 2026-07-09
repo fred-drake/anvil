@@ -247,6 +247,34 @@ describe("executeDeterministicCheck", () => {
 	it("keeps normal prompt templating unescaped", () => {
 		expect(renderTemplateString("Do {input}", ctx("a && b"))).toBe("Do a && b");
 	});
+
+	it("renders prior step outputs in prompt templates and leaves missing outputs empty", () => {
+		expect(renderTemplateString("Plan: {outputs.plan}; Missing: {outputs.missing}", ctx("task", {}, { plan: "use the cache" }))).toBe(
+			"Plan: use the cache; Missing: ",
+		);
+	});
+
+	it("does not re-expand output placeholders that appear inside a substituted value", () => {
+		expect(
+			renderTemplateString("Task: {input}; Plan: {outputs.plan}", ctx("{outputs.plan}", {}, { plan: "secret" })),
+		).toBe("Task: {outputs.plan}; Plan: secret");
+	});
+
+	it("renders output placeholders in command templates through shell variables", async () => {
+		const host = new GateHost();
+		const output = "two words; $(echo not-run) 'quote'";
+
+		await executeDeterministicCheck({
+			host,
+			check: { type: "deterministic", command: "printf '%s' '{outputs.plan}' && printf '%s' {outputs.missing}" },
+			ctx: ctx("task", {}, { plan: output }),
+			checkId: "check",
+		});
+
+		expect(host.execCalls[0]?.args[1]).toContain(String.raw`__ANVIL_OUTPUT_0='two words; $(echo not-run) '\''quote'\'''`);
+		expect(host.execCalls[0]?.args[1]).toContain("${__ANVIL_OUTPUT_0}");
+		expect(host.execCalls[0]?.args[1]).toContain("__ANVIL_OUTPUT_1=''");
+	});
 });
 
 describe("executeAgentCheck", () => {
@@ -353,6 +381,6 @@ function workflow(): WorkflowDefinition {
 	return { name: "test", steps: [{ id: "one", prompt: "do it" }] };
 }
 
-function ctx(input = "task", loopCounts: Record<string, number> = {}) {
-	return { input, step: { id: "one", index: 0 }, loopCounts, cwd: "/tmp" };
+function ctx(input = "task", loopCounts: Record<string, number> = {}, outputs: Record<string, string> = {}) {
+	return { input, step: { id: "one", index: 0 }, loopCounts, cwd: "/tmp", outputs };
 }

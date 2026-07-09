@@ -93,6 +93,56 @@ describe("validateWorkflow", () => {
 		if (!result.ok) expect(result.errors.join("\n")).toContain("command must be a string or function");
 	});
 
+	it("accepts outputFrom when it references a check on the same step", () => {
+		const workflow = {
+			name: "output-from",
+			steps: [
+				{
+					id: "build",
+					prompt: "build",
+					checks: [{ type: "deterministic", id: "artifact", command: "echo dist/app.js" }],
+					outputFrom: "artifact",
+				},
+			],
+		};
+
+		expect(validateWorkflow(workflow)).toEqual({ ok: true, workflow });
+	});
+
+	it("rejects outputFrom when it does not reference a same-step check id", () => {
+		const result = validateWorkflow({
+			name: "bad-output-from",
+			steps: [
+				{
+					id: "build",
+					prompt: "build",
+					checks: [{ type: "deterministic", id: "artifact", command: "echo dist/app.js" }],
+					outputFrom: "missing",
+				},
+			],
+		});
+
+		expect(result.ok).toBe(false);
+		if (!result.ok) expect(result.errors.join("\n")).toContain("workflow.steps[0].outputFrom must reference a check id on the same step");
+	});
+
+	it("rejects outputFrom when it references a non-deterministic check", () => {
+		const result = validateWorkflow({
+			name: "agent-output-from",
+			steps: [
+				{
+					id: "build",
+					prompt: "build",
+					checks: [{ type: "agent", id: "review", prompt: "looks good?" }],
+					outputFrom: "review",
+				},
+			],
+		});
+
+		expect(result.ok).toBe(false);
+		if (!result.ok) expect(result.errors.join("\n")).toContain("workflow.steps[0].outputFrom must reference a deterministic check");
+	});
+
 	it("rejects invalid workflow names", () => {
 		const result = validateWorkflow({ name: "Bad Name", steps: [{ id: "one", prompt: "a" }] });
 		expect(result.ok).toBe(false);

@@ -362,6 +362,80 @@ describe("runWorkflow", () => {
 		expect(host.instructions[0]).toContain('Prefer agent/skill "implementer"');
 	});
 
+	it("captures a subagent summary for later step templates", async () => {
+		const host = new FakeHost();
+		host.enableSubagents();
+		host.subagentQueue.push({ summary: "PLAN: edit src/engine.ts", sessionFile: "/tmp/child.jsonl", exitCode: 0 });
+
+		const summary = await runWorkflow({
+			workflow: workflow([
+				{ id: "plan", prompt: "Plan {input}", delegation: { subagent: "cmux" } },
+				{ id: "implement", prompt: "Implement from prior output: {outputs.plan}", delegation: "none" },
+			]),
+			input: "feature",
+			cwd: "/repo",
+			host,
+			runId: "run-step-output-subagent",
+		});
+
+		expect(summary.state).toBe("succeeded");
+		expect(host.instructions[0]).toContain("Implement from prior output: PLAN: edit src/engine.ts");
+	});
+
+	it("captures deterministic check stdout when outputFrom references that check", async () => {
+		const host = new FakeHost();
+		host.execQueue.push({ stdout: "artifact=dist/app.js\n", stderr: "", code: 0 });
+
+		const summary = await runWorkflow({
+			workflow: workflow([
+				{
+					id: "build",
+					prompt: "Build {input}",
+					checks: [{ type: "deterministic", id: "artifact", command: "npm run build" }],
+					outputFrom: "artifact",
+				} as any,
+				{ id: "verify", prompt: "Verify {outputs.build}", delegation: "none" },
+			]),
+			input: "feature",
+			cwd: "/repo",
+			host,
+			runId: "run-step-output-check",
+		});
+
+		expect(summary.state).toBe("succeeded");
+		expect(host.instructions[1]).toContain("Verify artifact=dist/app.js");
+	});
+
+	it("overwrites a step output when retry loops rerun the producing step", async () => {
+		const host = new FakeHost();
+		host.enableSubagents();
+		host.subagentQueue.push(
+			{ summary: "first plan", sessionFile: "/tmp/one.jsonl", exitCode: 0 },
+			{ summary: "revised plan", sessionFile: "/tmp/two.jsonl", exitCode: 0 },
+		);
+		host.execQueue.push({ stdout: "", stderr: "fail", code: 1 }, { stdout: "", stderr: "", code: 0 });
+
+		const summary = await runWorkflow({
+			workflow: workflow([
+				{ id: "plan", prompt: "Plan {input}", delegation: { subagent: "cmux" } },
+				{
+					id: "verify-plan",
+					prompt: "Verify plan",
+					checks: [{ type: "deterministic", id: "check", command: "test", onFail: { goto: "plan", maxLoops: 1 } }],
+				},
+				{ id: "implement", prompt: "Use {outputs.plan}", delegation: "none" },
+			]),
+			input: "feature",
+			cwd: "/repo",
+			host,
+			runId: "run-step-output-retry",
+		});
+
+		expect(summary.state).toBe("succeeded");
+		expect(host.instructions.at(-1)).toContain("Use revised plan");
+		expect(host.instructions.at(-1)).not.toContain("first plan");
+	});
+
 	it("runs subagent-delegated steps through host.runSubagent instead of the main session", async () => {
 		for (const backend of ["cmux", "herdr"] as const) {
 			const host = new FakeHost();
@@ -872,6 +946,25 @@ describe("runWorkflow", () => {
 
 		expect(summary.state).toBe("failed");
 		expect(summary.failureReason).toBe("request aborted by upstream provider");
+	});
+
+	it("leaves outputs from skipped resume steps empty", async () => {
+		const host = new FakeHost();
+		const summary = await runWorkflow({
+			workflow: workflow([
+				{ id: "plan", prompt: "Plan {input}" },
+				{ id: "implement", prompt: "Implement from [{outputs.plan}]" },
+			]),
+			input: "resume feature",
+			cwd: "/tmp",
+			host,
+			runId: "run-resume-step-outputs",
+			resume: { stepNumber: 2 },
+		} as Parameters<typeof runWorkflow>[0] & { resume: { stepNumber: number } });
+
+		expect(summary.state).toBe("succeeded");
+		expect(host.instructions).toHaveLength(1);
+		expect(host.instructions[0]).toContain("Implement from []");
 	});
 
 	it("resumes from a one-based step number without rerunning earlier steps", async () => {

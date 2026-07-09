@@ -31,6 +31,7 @@ export interface StepModelSelection {
 }
 
 const THINKING_LEVELS = new Set<WorkflowThinkingLevel>(["off", "minimal", "low", "medium", "high", "xhigh"]);
+const MAX_STEP_OUTPUT_CHARS = 8 * 1024;
 
 export interface SubagentStepRunRequest {
 	runId: string;
@@ -63,6 +64,8 @@ export interface EngineHost {
 	waitForTurnComplete(signal?: AbortSignal): Promise<void>;
 	exec(command: string, args: string[], options?: EngineExecOptions): Promise<EngineExecResult>;
 	awaitVerdict(checkId: string, timeoutMs: number, signal?: AbortSignal): Promise<Verdict | undefined>;
+	beginStepOutputCapture?(stepId: string): void;
+	endStepOutputCapture?(stepId: string): string | undefined;
 	checkpoint(entry: AnvilCheckpoint): void;
 	notify(message: string, type?: "info" | "warning" | "error"): void;
 	setStatus(text: string | undefined): void;
@@ -144,6 +147,7 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<RunSumma
 	const runId = options.runId ?? newRunId();
 	const startedAt = new Date().toISOString();
 	const loopCounts: Record<string, number> = {};
+	const outputs: Record<string, string> = {};
 	const feedbackByStep = new Map<string, string>();
 	const attempts = new Map<string, number>();
 	const workflowHasModelSelectionOverrides = hasWorkflowModelSelectionOverrides(options.workflow);
@@ -209,7 +213,7 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<RunSumma
 			throwIfAborted(options.signal);
 			const step = options.workflow.steps[stepIndex]!;
 			const stepState = steps[stepIndex]!;
-			const ctx = makeWorkflowContext(options.input, step, stepIndex, loopCounts, options.cwd);
+			const ctx = makeWorkflowContext(options.input, step, stepIndex, loopCounts, options.cwd, outputs);
 
 			if (step.skipIf && (await step.skipIf(ctx))) {
 				stepState.status = "skipped";
@@ -277,6 +281,7 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<RunSumma
 						result.errorMessage ?? `subagent for step "${step.id}" exited with code ${result.exitCode}`,
 					);
 				}
+				outputs[step.id] = truncateStepOutput(result.summary);
 			} else {
 				if (workflowHasModelSelectionOverrides) {
 					try {
@@ -299,8 +304,11 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<RunSumma
 				feedbackByStep.delete(step.id);
 
 				checkpoint({ phase: "step_start", stepId: step.id, stepIndex });
+				options.host.beginStepOutputCapture?.(step.id);
 				options.host.sendInstruction(instruction);
 				await options.host.waitForTurnComplete(options.signal);
+				const capturedOutput = options.host.endStepOutputCapture?.(step.id);
+				if (capturedOutput !== undefined) outputs[step.id] = truncateStepOutput(capturedOutput);
 				throwIfAborted(options.signal);
 			}
 
@@ -346,6 +354,9 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<RunSumma
 					pass: result.pass,
 					reason: result.reason,
 				});
+				if (result.pass && step.outputFrom && checkMatchesOutputFrom(check, step.outputFrom, checkIndex)) {
+					outputs[step.id] = truncateStepOutput(result.output ?? "");
+				}
 
 				if (result.pass) continue;
 
@@ -580,13 +591,23 @@ function makeWorkflowContext(
 	stepIndex: number,
 	loopCounts: Record<string, number>,
 	cwd: string,
+	outputs: Record<string, string>,
 ): WorkflowContext {
 	return {
 		input,
 		step: { id: step.id, index: stepIndex },
 		loopCounts: { ...loopCounts },
 		cwd,
+		outputs: { ...outputs },
 	};
+}
+
+function checkMatchesOutputFrom(check: Check, outputFrom: string, checkIndex: number): boolean {
+	return (check.id ?? `check-${checkIndex + 1}`) === outputFrom;
+}
+
+function truncateStepOutput(output: string): string {
+	return output.length <= MAX_STEP_OUTPUT_CHARS ? output : output.slice(-MAX_STEP_OUTPUT_CHARS);
 }
 
 function makeRuntimeCheckId(runId: string, stepId: string, checkIndex: number, attempts: Map<string, number>): string {

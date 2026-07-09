@@ -15,6 +15,7 @@ Anvil is for those Pi tasks where you keep thinking, “I want the agent to do t
 - Define subagent behavior based on how you have configured Pi. cmux and herdr compatibility come out of the box, you can choose a custom skill that you wrote for handling subagent processing, or no subagent at all if you wish.
 - Optionally define the number of times a step has to be retried before bailing.
 - Optionally define a different model and thinking level for each step, including retry-based upgrades.
+- Pass captured text from earlier steps into later prompts and checks with `{outputs.<step-id>}`.
 
 ## Build workflows by talking to Pi
 
@@ -56,6 +57,12 @@ Mux subagents launch a normal interactive `pi` session directly in the spawned p
 Warnings aside, this is ultimately _your workflow, your rules_. Checks still guard the workflow either way: deterministic checks run commands, while agent-judged checks ask for a clear pass/fail verdict before the workflow moves on. Main-session agent-judged checks are self-graded by the same main agent that performed or narrated the step, so they are not an independent review and cannot structurally prevent a rubber-stamp `pass: true`; use declarative subagent steps or a future fresh-subagent review pattern when independence matters.
 
 When a failing check uses `onFail: "continue"`, Anvil continues to the next workflow step immediately and skips any remaining checks on the current step.
+
+### Step outputs
+
+Each step has an optional captured textual output that later steps can read as `ctx.outputs["step-id"]` in function templates or `{outputs.step-id}` in string prompt/check templates. Missing outputs render as an empty string. Outputs are in-memory for the current run; if you `/anvil resume` from a later step, skipped earlier steps have no outputs. If a retry loop reruns a step, the latest successful attempt overwrites that step's output.
+
+Declarative subagent steps capture the subagent's final summary automatically. Main-session steps only capture an output when the agent explicitly calls the `anvil_output` tool for the current step. For deterministic capture, set `outputFrom: "check-id"` on a step; when that check passes, its command output becomes the step output. Captured outputs are truncated to the last 8 KiB before being exposed to later prompts/commands.
 
 ### Retry-based model selection
 
