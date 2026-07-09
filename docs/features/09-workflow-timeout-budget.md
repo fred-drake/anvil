@@ -50,7 +50,7 @@ export interface WorkflowDefinition {
 Both optional; absent means unlimited (today's behavior). A top-level `limits` key is
 preferred over `defaults` because every existing `defaults` field is a
 per-step-overridable setting, while these are run-scoped ceilings nothing can override
-(the same reasoning as Feature 6's top-level `hooks`).
+(the same reasoning as Feature 8's top-level `hooks`).
 
 ### Enforcement (`src/engine.ts`)
 

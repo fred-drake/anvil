@@ -1,6 +1,6 @@
-# Feature 7 — `/anvil status`
+# Feature 4 — `/anvil status`
 
-Back to [Feature backlog](../FEATURE.md#7-anvil-status).
+Back to [Feature backlog](../FEATURE.md#4-anvil-status).
 
 ## Summary
 

@@ -1,6 +1,6 @@
-# Feature 5 — Named input parameters
+# Feature 6 — Named input parameters
 
-Back to [Feature backlog](../FEATURE.md#5-named-input-parameters).
+Back to [Feature backlog](../FEATURE.md#6-named-input-parameters).
 
 ## Summary
 

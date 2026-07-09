@@ -1,6 +1,6 @@
-# Feature 4 — `/anvil plan` (dry-run resolution)
+# Feature 5 — `/anvil plan` (dry-run resolution)
 
-Back to [Feature backlog](../FEATURE.md#4-anvil-plan-dry-run-resolution).
+Back to [Feature backlog](../FEATURE.md#5-anvil-plan-dry-run-resolution).
 
 ## Summary
 

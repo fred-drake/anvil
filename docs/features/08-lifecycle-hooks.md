@@ -1,6 +1,6 @@
-# Feature 6 — Lifecycle hooks and completion notifications
+# Feature 8 — Lifecycle hooks and completion notifications
 
-Back to [Feature backlog](../FEATURE.md#6-lifecycle-hooks-and-completion-notifications).
+Back to [Feature backlog](../FEATURE.md#8-lifecycle-hooks-and-completion-notifications).
 
 ## Summary
 
@@ -72,8 +72,8 @@ A per-step `onStepEnd` override is conceivable but deferred; start workflow-leve
 Hooks are `Templatable`, so they receive a `WorkflowContext`. For `onStepEnd`, the
 context is the just-finished step's. For `onComplete` / `onFail` there is no "current
 step", but `WorkflowContext.step` is required (`src/types.ts:4`) — define this
-explicitly: build the context from the last step that ran (final `loopCounts`, and —
-once Feature 3 lands — `outputs`) and document that `step` refers to the last executed
+explicitly: build the context from the last step that ran (final `loopCounts`, and the
+shipped `outputs`) and document that `step` refers to the last executed
 step. Command templating reuses the safe placeholder machinery
 (`renderCommandTemplatable`, `src/prompts.ts:26`).
 

@@ -1,6 +1,9 @@
-# Feature 3 — Step outputs / data passing between steps
+# Step outputs / data passing between steps (shipped)
 
-Back to [Feature backlog](../FEATURE.md#3-step-outputs--data-passing-between-steps).
+> **Status: shipped** in `8efa1b7`. This plan is retained as a design record; see
+> [Shipped](../FEATURE.md#shipped) in the backlog.
+
+Back to [Feature backlog](../FEATURE.md#shipped).
 
 ## Summary
 

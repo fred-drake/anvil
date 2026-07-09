@@ -1,6 +1,6 @@
-# Feature 10 — Per-item fan-out (`forEach` steps)
+# Feature 7 — Per-item fan-out (`forEach` steps)
 
-Back to [Feature backlog](../FEATURE.md#10-per-item-fan-out-foreach-steps).
+Back to [Feature backlog](../FEATURE.md#7-per-item-fan-out-foreach-steps).
 
 ## Summary
 
@@ -28,11 +28,11 @@ stubborn file can escalate to a stronger model while the rest stay cheap.
 
 ## Dependencies
 
-- **Feature 3 (step outputs)** — the natural item source is a prior enumeration step's
+- **Step outputs (shipped)** — the natural item source is a prior enumeration step's
   captured output (`(ctx) => JSON.parse(ctx.outputs["plan"]).files`). The command item
-  source (below) keeps `forEach` usable without it, but sequence this after Feature 3.
-- Independent of Features 5/8. `forEach` is data-driven repetition of one step;
-  Feature 8's `uses` is reuse of a workflow. A later enhancement may allow combining
+  source (below) keeps `forEach` usable without it.
+- Independent of Features 6/10. `forEach` is data-driven repetition of one step;
+  Feature 10's `uses` is reuse of a workflow. A later enhancement may allow combining
   them ("run sub-workflow per item"), but that is explicitly out of scope here.
 
 ## Current state (grounding)
@@ -93,7 +93,7 @@ Items are **strings** in v1. A function source returning anything other than an 
 of strings fails the step with a clear reason (do not coerce). Authors who need
 structured items can `JSON.stringify` each one and say so in the prompt.
 
-`WorkflowContext` gains optional item fields (additive, like Feature 3's `outputs`):
+`WorkflowContext` gains optional item fields (additive, like the shipped `outputs`):
 
 ```ts
 export interface WorkflowContext {
@@ -108,8 +108,8 @@ export interface WorkflowContext {
 ### Item sources
 
 1. **Function form** — `(ctx) => JSON.parse(ctx.outputs["research-and-plan"]).files`.
-   Runs in-process; pair naturally with Feature 3. A throw fails the step with the
-   error message as the reason.
+   Runs in-process; pairs naturally with the shipped step outputs. A throw fails the step
+   with the error message as the reason.
 2. **Command form** — `{ command: "git diff --name-only master", parse: "lines" }`.
    Rendered through `renderCommandTemplatable` (never raw interpolation, per
    `AGENTS.md`), executed via `host.exec` like deterministic checks
@@ -206,7 +206,7 @@ settle.
   and must not be touched from concurrent item workers; subagent model selection
   already travels per-request (`src/engine.ts:260`), which is safe.
 
-### Output capture (Feature 3 interaction)
+### Output capture (step-outputs interaction)
 
 The step's captured output is a per-item digest, built from each item's subagent
 summary (or check outcome for main-session items):
@@ -216,8 +216,8 @@ summary (or check outcome for main-session items):
 [2/12] src/bar.ts — FAILED after 3 retries: <reason>
 ```
 
-Truncate with the same `tail`-style cap Feature 3 defines. Retry loops overwrite per
-item; re-running the whole step rebuilds the digest.
+Truncate with the same `tail`-style cap the shipped step outputs defines. Retry loops
+overwrite per item; re-running the whole step rebuilds the digest.
 
 ### Checkpoints, resume, UI
 
@@ -225,7 +225,7 @@ item; re-running the whole step rebuilds the digest.
   emit `step_start` and `check_result` per item. Do **not** put item text in
   checkpoints (size/secrets); the index is enough for attribution.
 - **Resume re-runs the whole `forEach` step.** Item-level resume is deliberately out
-  of scope (same simplification Feature 8 chose for sub-runs). `resolveResumeState`
+  of scope (same simplification Feature 10 chose for sub-runs). `resolveResumeState`
   (`src/engine.ts:402`) needs no change beyond documentation; Feature 2's history
   reader should fold per-item checkpoints under their step.
 - UI: `formatStatus` / `formatStepWidget` (`src/ui.ts`) gain an item counter, e.g.
@@ -272,7 +272,7 @@ All deterministic per `AGENTS.md`: fake host, no real subagents, no real shell.
   exceeded fails; item failure retries only that item with only its own feedback;
   `onItemExhausted: "continue"` records and proceeds, fails step only when all items
   fail; per-item retry count drives `resolveStepModelSelection`; digest lands as the
-  step output (with Feature 3); checkpoints carry `itemIndex`; resume re-runs the
+  step output (shipped); checkpoints carry `itemIndex`; resume re-runs the
   whole step.
 - `test/prompts.test.ts` / `test/gates.test.ts`: `{item}` renders in prompts and is
   shell-safely injected into commands (hostile item strings: quotes, `$()`,
@@ -311,7 +311,7 @@ backlog cross-links (Features 3, 8).
   cmux, unverified for herdr; ship sequential first, gate parallel per backend.
 - **Partial-failure semantics** (`onItemExhausted: "continue"`) put failure
   information in the output digest rather than the run state. If real usage wants
-  structured per-item results, that is Feature 3 follow-up territory (structured
+  structured per-item results, that is step-outputs follow-up territory (structured
   outputs), not more engine state.
-- **Open question:** should `forEach` compose with Feature 8's `uses` (sub-workflow
+- **Open question:** should `forEach` compose with Feature 10's `uses` (sub-workflow
   per item)? Deferred; revisit once both exist.

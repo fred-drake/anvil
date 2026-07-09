@@ -1,12 +1,13 @@
-# Feature 8 — Workflow composition (sub-workflows)
+# Feature 10 — Workflow composition (sub-workflows)
 
-Back to [Feature backlog](../FEATURE.md#8-workflow-composition-sub-workflows).
+Back to [Feature backlog](../FEATURE.md#10-workflow-composition-sub-workflows).
 
 ## Summary
 
 Let a step invoke another discovered workflow as a sub-run, forwarding input (or named
-params from Feature 5) and surfacing the sub-run's outcome as a step output (Feature 3).
-This lets common sequences (setup, verify, release) be factored out and reused.
+params from Feature 6) and surfacing the sub-run's outcome as a step output (the shipped
+step outputs). This lets common sequences (setup, verify, release) be factored out and
+reused.
 
 ## Motivation
 
@@ -16,10 +17,10 @@ removes that duplication and lets small, well-tested workflows become building b
 
 ## Dependencies
 
-- **Feature 3 (step outputs)** — a sub-run's result is only useful if the parent can read
+- **Step outputs (shipped)** — a sub-run's result is only useful if the parent can read
   it; that is exactly `ctx.outputs`.
-- **Feature 5 (named params)** — forwarding structured values into a sub-workflow is far
-  cleaner than concatenating strings. Composition is worth building *after* these two.
+- **Feature 6 (named params)** — forwarding structured values into a sub-workflow is far
+  cleaner than concatenating strings. Composition is worth building *after* params lands.
 
 ## Current state (grounding)
 
@@ -54,7 +55,7 @@ export interface WorkflowStep {
     uses?: {
         workflow: string;               // sub-workflow name (project shadows user)
         input?: Templatable;            // defaults to parent's {input}
-        params?: Record<string, Templatable>;  // when Feature 5 is present
+        params?: Record<string, Templatable>;  // when Feature 6 is present
         /** Cap sub-run loop budget etc. Inherit parent defaults if omitted. */
     };
     // ...existing fields (checks still gate the sub-run's result)...
@@ -85,7 +86,8 @@ Validation must enforce exactly one of `prompt` / `uses`.
   - swallow `postSummary` and instead hand the child's `RunSummary` back to the parent
     engine, which records it as the step's captured output.
 - The sub-run's `RunSummary` (`src/engine.ts:107`) becomes the step's captured output
-  (Feature 3): use `summary.failureReason` or a rendered digest. A failed sub-run fails the
+  (the shipped step outputs): use `summary.failureReason` or a rendered digest. A failed
+  sub-run fails the
   parent step (then normal `onFail` policy applies), matching how a failed subagent step is
   handled (`src/engine.ts:272`).
 
@@ -111,7 +113,7 @@ resuming into the middle of a sub-run.
 
 - Add `"uses"` to `STEP_KEYS` (`src/validate.ts:20`); require exactly one of
   `prompt`/`uses`; validate `uses.workflow` is a non-empty string and, when resolvable,
-  exists; validate `params` keys against the sub-workflow's declared params (Feature 5).
+  exists; validate `params` keys against the sub-workflow's declared params (Feature 6).
 - Cross-workflow existence/cycle checks may need a discovery-aware validation pass, since
   `validateWorkflow` (`src/validate.ts:41`) is currently pure/single-workflow. Consider a
   separate `validateWorkflowGraph(discovered[])` step invoked by `handleValidate` /
