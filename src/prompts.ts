@@ -37,6 +37,13 @@ export function renderCommandTemplateString(template: string, ctx: WorkflowConte
 		{ token: "{input}", variable: "__ANVIL_INPUT", value: ctx.input },
 		{ token: "{loop}", variable: "__ANVIL_LOOP", value: String(getCurrentLoopCount(ctx)) },
 	];
+	if (template.includes("{item}")) placeholders.push({ token: "{item}", variable: "__ANVIL_ITEM", value: ctx.item ?? "" });
+	if (template.includes("{itemIndex}")) {
+		placeholders.push({ token: "{itemIndex}", variable: "__ANVIL_ITEM_INDEX", value: ctx.itemIndex === undefined ? "" : String(ctx.itemIndex) });
+	}
+	if (template.includes("{itemCount}")) {
+		placeholders.push({ token: "{itemCount}", variable: "__ANVIL_ITEM_COUNT", value: ctx.itemCount === undefined ? "" : String(ctx.itemCount) });
+	}
 	let outputIndex = 0;
 	for (const stepId of referencedOutputIds(template)) {
 		placeholders.push({
@@ -57,11 +64,17 @@ function replaceTemplatePlaceholders(
 	// Single pass over the original template: `String.prototype.replace` never rescans
 	// substituted text, so a value carrying a `{outputs.x}` (e.g. free-form task input)
 	// cannot trigger a further expansion.
-	return template.replace(/\{input\}|\{loop\}|\{outputs\.([^}]+)\}/g, (match, outputId?: string) => {
-		if (match === "{input}") return escapeValue(ctx.input);
-		if (match === "{loop}") return escapeValue(String(getCurrentLoopCount(ctx)));
-		return escapeValue(ctx.outputs[outputId!] ?? "");
-	});
+	return template.replace(
+		/\{input\}|\{loop\}|\{item\}|\{itemIndex\}|\{itemCount\}|\{outputs\.([^}]+)\}/g,
+		(match, outputId?: string) => {
+			if (match === "{input}") return escapeValue(ctx.input);
+			if (match === "{loop}") return escapeValue(String(getCurrentLoopCount(ctx)));
+			if (match === "{item}") return escapeValue(ctx.item ?? "");
+			if (match === "{itemIndex}") return escapeValue(ctx.itemIndex === undefined ? "" : String(ctx.itemIndex));
+			if (match === "{itemCount}") return escapeValue(ctx.itemCount === undefined ? "" : String(ctx.itemCount));
+			return escapeValue(ctx.outputs[outputId!] ?? "");
+		},
+	);
 }
 
 function referencedOutputIds(template: string): string[] {
@@ -266,7 +279,7 @@ export function workflowUsesSubagentDelegation(workflow: WorkflowDefinition): bo
 
 export function getCurrentLoopCount(ctx: WorkflowContext): number {
 	let count = 0;
-	const suffix = `->${ctx.step.id}`;
+	const suffix = ctx.itemIndex === undefined ? `->${ctx.step.id}` : `->${ctx.step.id}#${ctx.itemIndex}`;
 	for (const [key, value] of Object.entries(ctx.loopCounts)) {
 		if (key.endsWith(suffix) && value > count) count = value;
 	}

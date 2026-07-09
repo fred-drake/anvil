@@ -63,6 +63,19 @@ Declarative subagent launches run inside user terminal panes, so generated launc
 - When adding terminal-screen fallback detection for subagent startup/errors, match the full prompt shape instead of a single phrase that an agent might quote while inspecting issues or logs.
 - Add regression tests for false positives when subagent output contains sentinel-like strings or documented startup error text.
 
+## Per-item fan-out (`forEach`)
+
+When a step's work is really "do this same thing to each of N items" — especially for small or local models that cannot hold a whole feature at once — propose a `forEach` step instead of asking the model to spawn its own subagents. The engine loops over the items deterministically; a small model choking on self-orchestration is the failure mode this avoids.
+
+- Source the items deterministically when you can. The strongest pattern is a prior plan step gated by a deterministic check that its emitted list parses, then `items: { command: "cat <list-file>", parse: "lines" }`. A function source (`items: (ctx) => JSON.parse(ctx.outputs["plan"]).files`) pairs with step outputs; it must return an array of strings.
+- Keep each per-item prompt single-outcome. Write the prompt for one item ("write test stubs for `{item}`"), not for the batch. Use `{item}`, `{itemIndex}` (zero-based), and `{itemCount}`; these are empty outside a `forEach` step.
+- Prefer subagent delegation on fan-out steps so each item runs in a fresh session. Main-session/skill delegation runs items sequentially in the shared main session and defeats the point.
+- Scope checks to the item (`command: "npx vitest run {item}"`). A check's `onFail: { goto }` must target the step itself — that retries just that item with its own feedback. Do not `goto` another step from inside a `forEach`; validation rejects it.
+- Use `onItemExhausted: "continue"` when the user wants a best-effort sweep that reports failures rather than stopping at the first bad item; the step still fails if every item fails. `maxItems` caps enumeration. `outputFrom` is not available on a `forEach` step (its output is an automatic per-item digest).
+- Concurrency is sequential today; do not promise parallel fan-out.
+
+See `examples/workflows/fan-out.ts` for the full plan → gate → fan-out shape.
+
 ## Template
 
 Prefer the import form when possible:

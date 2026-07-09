@@ -16,6 +16,7 @@ Anvil is for those Pi tasks where you keep thinking, “I want the agent to do t
 - Optionally define the number of times a step has to be retried before bailing.
 - Optionally define a different model and thinking level for each step, including retry-based upgrades.
 - Pass captured text from earlier steps into later prompts and checks with `{outputs.<step-id>}`.
+- Fan a step out over a list of items with `forEach`, running its prompt once per item (each in its own subagent session) so small local models get one bite-sized task at a time.
 
 ## Build workflows by talking to Pi
 
@@ -71,6 +72,23 @@ When you ask Pi to build a workflow, you can tell it to use different models or 
 This is useful when most runs should stay fast and inexpensive, but difficult cases deserve more reasoning instead of repeating the same attempt with the same settings. By default, Anvil keeps the same model and thinking level for every attempt, so nothing changes unless you ask for retry-based escalation.
 
 You do not need to know the workflow syntax for this feature. Describe the escalation you want in plain language, and the `anvil-workflow-builder` skill will capture it while building the workflow.
+
+### Per-item fan-out (`forEach`)
+
+A step can declare a list of items and have Anvil run the step's prompt once per item instead of once for the whole step. Add `forEach` to a step, and the engine loops over the items deterministically — decomposition lives in `src/engine.ts`, not in the model. This is the key unlock for small local models: each item becomes one small, self-contained task ("write test stubs for `{item}`") rather than one monolithic task ("write test stubs for the feature").
+
+Items come from one of two sources:
+
+- A function: `items: (ctx) => JSON.parse(ctx.outputs["plan"]).files` — pairs naturally with step outputs. It must return an array of strings.
+- A command: `items: { command: "git diff --name-only master", parse: "lines" }` — the command is rendered with the same shell-safe templating as deterministic checks and run like a check. `parse` defaults to `"lines"` (non-empty, trimmed); `"json"` expects a JSON array of strings.
+
+The recommended pattern for local models is to gate a plan step with a deterministic check that its emitted file list parses, then let `forEach` enumerate that list mechanically — no model judgment in the decomposition path. See `examples/workflows/fan-out.ts`.
+
+Inside a `forEach` step the prompt and checks can use `{item}`, `{itemIndex}` (zero-based), and `{itemCount}`; outside a `forEach` step those placeholders expand to an empty string. Each item runs with its own retry budget and its own `onFail` feedback, so one file failing and retrying never leaks feedback into another file's prompt, and `retryModelSelections` escalation applies per item. A check's `onFail: { goto }` inside a `forEach` step must target the step itself ("retry this item"); jumping to another step from within a fan-out is rejected at validation.
+
+Subagent delegation is the intended mode — each item gets a fresh session so context never accumulates across items. Main-session and skill delegation still work but run items as sequential instructions in the main session, which defeats the context isolation that makes fan-out worthwhile for local models.
+
+Other knobs: `maxItems` caps enumeration (default 100; exceeding it fails the step), an empty list passes the step trivially, and `onItemExhausted` decides what happens when an item exhausts its retries — `"stop"` (default) fails the step naming the item, while `"continue"` records the failure and moves on, failing the step only if every item failed. The step's captured output is a per-item digest of each item's outcome. Concurrency is sequential today; `concurrency > 1` is accepted but currently degrades to sequential with a warning.
 
 ## Develop
 

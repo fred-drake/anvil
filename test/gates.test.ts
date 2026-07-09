@@ -6,7 +6,7 @@ import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
 import type { EngineHost, EngineExecOptions, EngineExecResult, RunSummary, AnvilCheckpoint } from "../src/engine.ts";
 import { executeAgentCheck, executeDeterministicCheck, VerdictBus, type Verdict } from "../src/gates.ts";
-import { renderTemplateString } from "../src/prompts.ts";
+import { renderCommandTemplateString, renderTemplateString } from "../src/prompts.ts";
 import type { WorkflowDefinition } from "../src/types.ts";
 
 const execFileAsync = promisify(execFile);
@@ -274,6 +274,35 @@ describe("executeDeterministicCheck", () => {
 		expect(host.execCalls[0]?.args[1]).toContain(String.raw`__ANVIL_OUTPUT_0='two words; $(echo not-run) '\''quote'\'''`);
 		expect(host.execCalls[0]?.args[1]).toContain("${__ANVIL_OUTPUT_0}");
 		expect(host.execCalls[0]?.args[1]).toContain("__ANVIL_OUTPUT_1=''");
+	});
+
+	it("renders forEach item placeholders in prompt templates", () => {
+		const itemCtx = { ...ctx("task"), item: "src/foo.ts", itemIndex: 2, itemCount: 5 };
+		expect(renderTemplateString("stub {item} ({itemIndex}/{itemCount}) for {input}", itemCtx)).toBe(
+			"stub src/foo.ts (2/5) for task",
+		);
+	});
+
+	it("expands forEach item placeholders to empty strings outside a forEach step", () => {
+		expect(renderTemplateString("[{item}] index={itemIndex} count={itemCount}", ctx("task"))).toBe(
+			"[] index= count=",
+		);
+	});
+
+	it("injects a hostile item string into a command through a shell variable, not raw interpolation", () => {
+		const hostile = "foo.ts; touch /tmp/pwned $(echo x) 'q'\nsecond";
+		const itemCtx = { ...ctx("task"), item: hostile, itemIndex: 0, itemCount: 1 };
+		const rendered = renderCommandTemplateString("npx vitest run {item}", itemCtx);
+
+		expect(rendered).toContain('__ANVIL_ITEM=');
+		expect(rendered).toContain('npx vitest run "${__ANVIL_ITEM}"');
+		// The literal payload appears only inside the quoted assignment, never as bare shell text.
+		expect(rendered).not.toContain("touch /tmp/pwned $(echo x) 'q'\nsecond npx");
+	});
+
+	it("reflects the current item's loop count in {loop} inside a forEach step", () => {
+		const itemCtx = { ...ctx("task", { "tests->fanout#3": 2 }), item: "x", itemIndex: 3, itemCount: 4, step: { id: "fanout", index: 0 } };
+		expect(renderCommandTemplateString("echo loop={loop}", itemCtx)).toContain("__ANVIL_LOOP='2'");
 	});
 });
 

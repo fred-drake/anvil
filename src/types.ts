@@ -2,14 +2,43 @@ export interface WorkflowContext {
 	/** Free-form text from `/anvil run <name> ...`. */
 	input: string;
 	step: { id: string; index: number };
-	/** "<checkId>-><stepId>" -> count. */
+	/** "<checkId>-><stepId>" (or "<checkId>-><stepId>#<itemIndex>" in forEach) -> count. */
 	loopCounts: Record<string, number>;
 	cwd: string;
 	/** Captured textual outputs of prior steps, keyed by step id. */
 	outputs: Record<string, string>;
+	/** Present only inside a forEach step; the string placeholders expand to "" elsewhere. */
+	item?: string;
+	itemIndex?: number;
+	itemCount?: number;
 }
 
 export type Templatable = string | ((ctx: WorkflowContext) => string | Promise<string>);
+
+export type ForEachItemSource =
+	| ((ctx: WorkflowContext) => string[] | Promise<string[]>)
+	| {
+			/** Executed with the same shell-safe templating as deterministic checks. */
+			command: Templatable;
+			/** How to turn stdout into items. Defaults to "lines" (non-empty, trimmed). */
+			parse?: "lines" | "json";
+	  };
+
+export interface WorkflowForEach {
+	items: ForEachItemSource;
+	/**
+	 * Intended max concurrent item sessions. Defaults to 1 (sequential). Parallel fan-out is not
+	 * yet implemented: values > 1 are accepted but currently degrade to sequential with a warning.
+	 */
+	concurrency?: number;
+	/** Safety cap on enumeration. Defaults to 100; exceeding it fails the step. */
+	maxItems?: number;
+	/**
+	 * After an item exhausts its retries: fail the step naming the item ("stop", default), or
+	 * record the failure and move on ("continue"), failing the step only if every item failed.
+	 */
+	onItemExhausted?: "stop" | "continue";
+}
 
 export type WorkflowThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
 
@@ -99,6 +128,8 @@ export interface WorkflowStep {
 	/** Main agent does the work itself. */
 	runInMain?: boolean;
 	skipIf?: (ctx: WorkflowContext) => boolean | Promise<boolean>;
+	/** Run this step's prompt once per item. */
+	forEach?: WorkflowForEach;
 	checks?: Check[];
 	/** Capture this step's output from a named check's stdout/stderr text. */
 	outputFrom?: string;

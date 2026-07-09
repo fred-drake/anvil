@@ -27,6 +27,29 @@ describe("formatStatus", () => {
 			"anvil: 1/1 Retry — retrying",
 		);
 	});
+
+	it("includes a forEach item counter in step, check, and loop phases", () => {
+		expect(
+			formatStatus({ workflowName: "wf", phase: "step", stepIndex: 1, stepTotal: 4, stepTitle: "Stubs", itemIndex: 2, itemCount: 12 }),
+		).toBe("anvil: 2/4 Stubs — item 3/12");
+		expect(
+			formatStatus({
+				workflowName: "wf",
+				phase: "check",
+				stepIndex: 1,
+				stepTotal: 4,
+				stepTitle: "Stubs",
+				itemIndex: 2,
+				itemCount: 12,
+				checkIndex: 0,
+				checkTotal: 1,
+				checkName: "tests",
+			}),
+		).toBe("anvil: 2/4 Stubs — item 3/12 — check 1/1 (tests)");
+		expect(
+			formatStatus({ workflowName: "wf", phase: "loop", stepIndex: 1, stepTotal: 4, stepTitle: "Stubs", itemIndex: 0, itemCount: 3 }),
+		).toBe("anvil: 2/4 Stubs — item 1/3 — retrying");
+	});
 });
 
 describe("formatStepWidget", () => {
@@ -48,6 +71,18 @@ describe("formatStepWidget", () => {
 			"✖ failed [0/1 checks]",
 			"↷ skipped",
 			"⚠ continued",
+		]);
+	});
+
+	it("appends a forEach item counter to the current running step only", () => {
+		const steps: StepRunState[] = [
+			{ id: "before", status: "passed", loops: 0, checks: [] },
+			{ id: "fanout", title: "Stubs", status: "running", loops: 0, checks: [] },
+		];
+
+		expect(formatStepWidget(steps, "fanout", { index: 2, count: 5 })).toEqual([
+			"✔ before",
+			"▶ fanout — Stubs — item 3/5",
 		]);
 	});
 });

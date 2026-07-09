@@ -1,10 +1,8 @@
 import type {
 	AgentCheck,
-	Check,
 	DeterministicCheck,
 	Templatable,
 	WorkflowDefinition,
-	WorkflowStep,
 	WorkflowThinkingLevel,
 } from "./types.ts";
 
@@ -29,6 +27,7 @@ const STEP_KEYS = new Set([
 	"agent",
 	"runInMain",
 	"skipIf",
+	"forEach",
 	"checks",
 	"outputFrom",
 	"onFail",
@@ -38,6 +37,8 @@ const AGENT_CHECK_KEYS = new Set(["type", "id", "name", "prompt", "agent", "time
 const CHECK_KEYS = new Set([...DETERMINISTIC_CHECK_KEYS, ...AGENT_CHECK_KEYS]);
 const ON_FAIL_KEYS = new Set(["goto", "maxLoops", "onExhausted", "feedback"]);
 const RETRY_MODEL_SELECTION_KEYS = new Set(["retry", "model", "thinkingLevel"]);
+const FOR_EACH_KEYS = new Set(["items", "concurrency", "maxItems", "onItemExhausted"]);
+const FOR_EACH_ITEM_SOURCE_KEYS = new Set(["command", "parse"]);
 
 export function validateWorkflow(value: unknown): ValidationResult {
 	const errors: string[] = [];
@@ -87,7 +88,8 @@ export function validateWorkflow(value: unknown): ValidationResult {
 	for (const id of duplicateCheckIds) errors.push(`duplicate check id "${id}"`);
 
 	if (value.defaults !== undefined) validateDefaults(value.defaults, errors, stepIds);
-	rawSteps.forEach((step, index) => validateStep(step, index, stepIds, errors));
+	const workflowDefaults = isRecord(value.defaults) ? value.defaults : undefined;
+	rawSteps.forEach((step, index) => validateStep(step, index, stepIds, errors, workflowDefaults));
 
 	return errors.length === 0
 		? { ok: true, workflow: value as unknown as WorkflowDefinition }
@@ -117,7 +119,13 @@ function validateDefaults(defaults: unknown, errors: string[], stepIds?: Set<str
 	}
 }
 
-function validateStep(step: unknown, index: number, stepIds: Set<string>, errors: string[]): void {
+function validateStep(
+	step: unknown,
+	index: number,
+	stepIds: Set<string>,
+	errors: string[],
+	workflowDefaults?: Record<string, unknown>,
+): void {
 	const path = `workflow.steps[${index}]`;
 	if (!isRecord(step)) {
 		errors.push(`${path} must be an object`);
@@ -161,6 +169,22 @@ function validateStep(step: unknown, index: number, stepIds: Set<string>, errors
 	if (step.skipIf !== undefined && typeof step.skipIf !== "function") {
 		errors.push(`${path}.skipIf must be a function when provided`);
 	}
+	if (step.forEach !== undefined) validateForEach(step.forEach, `${path}.forEach`, errors);
+	if (isRecord(step.forEach)) {
+		if (step.forEach.concurrency !== undefined && (step.forEach.concurrency as number) > 1) {
+			const delegation = step.delegation ?? workflowDefaults?.delegation;
+			if (step.runInMain || delegation === "none" || (isRecord(delegation) && "skill" in delegation)) {
+				errors.push(`${path}.forEach.concurrency > 1 requires subagent delegation`);
+			}
+		}
+		if (step.outputFrom !== undefined) {
+			errors.push(`${path}.outputFrom is not supported on a forEach step (its output is a per-item digest)`);
+		}
+		// A goto out of a half-finished fan-out cannot be represented; step- and workflow-level
+		// defaults that would apply to an item's checks must target the forEach step itself.
+		validateForEachOnFailTarget(step, path, step.id, errors);
+		if (workflowDefaults) validateForEachOnFailTarget(workflowDefaults, "workflow.defaults", step.id, errors);
+	}
 	if (step.onFail !== undefined) {
 		validateOnFailPolicy(step.onFail, `${path}.onFail`, stepIds, errors);
 	}
@@ -172,9 +196,10 @@ function validateStep(step: unknown, index: number, stepIds: Set<string>, errors
 		if (!Array.isArray(step.checks)) {
 			errors.push(`${path}.checks must be an array when provided`);
 		} else {
-			step.checks.forEach((check, checkIndex) =>
-				validateCheck(check, `${path}.checks[${checkIndex}]`, stepIds, errors),
-			);
+			step.checks.forEach((check, checkIndex) => {
+				validateCheck(check, `${path}.checks[${checkIndex}]`, stepIds, errors);
+				if (isRecord(step.forEach)) validateForEachOnFailTarget(check, `${path}.checks[${checkIndex}]`, step.id, errors);
+			});
 			if (typeof step.outputFrom === "string") {
 				const target = step.checks.find((check) => isRecord(check) && check.id === step.outputFrom);
 				if (!target) {
@@ -187,6 +212,39 @@ function validateStep(step: unknown, index: number, stepIds: Set<string>, errors
 	} else if (step.outputFrom !== undefined) {
 		errors.push(`${path}.outputFrom requires checks`);
 	}
+}
+
+function validateForEach(value: unknown, path: string, errors: string[]): void {
+	if (!isRecord(value)) {
+		errors.push(`${path} must be an object when provided`);
+		return;
+	}
+	validateKnownKeys(value, path, FOR_EACH_KEYS, errors);
+	if (typeof value.items === "function") {
+		// ok
+	} else if (isRecord(value.items)) {
+		validateKnownKeys(value.items, `${path}.items`, FOR_EACH_ITEM_SOURCE_KEYS, errors);
+		if (!isTemplatable(value.items.command)) errors.push(`${path}.items.command must be a string or function`);
+		if (value.items.parse !== undefined && value.items.parse !== "lines" && value.items.parse !== "json") {
+			errors.push(`${path}.items.parse must be "lines" or "json" when provided`);
+		}
+	} else {
+		errors.push(`${path}.items must be a function or command object`);
+	}
+	if (value.concurrency !== undefined && !isPositiveInteger(value.concurrency)) {
+		errors.push(`${path}.concurrency must be a positive integer when provided`);
+	}
+	if (value.maxItems !== undefined && !isPositiveInteger(value.maxItems)) {
+		errors.push(`${path}.maxItems must be a positive integer when provided`);
+	}
+	if (value.onItemExhausted !== undefined && value.onItemExhausted !== "stop" && value.onItemExhausted !== "continue") {
+		errors.push(`${path}.onItemExhausted must be "stop" or "continue" when provided`);
+	}
+}
+
+function validateForEachOnFailTarget(check: unknown, path: string, stepId: unknown, errors: string[]): void {
+	if (!isRecord(check) || !isRecord(check.onFail) || typeof check.onFail.goto !== "string") return;
+	if (check.onFail.goto !== stepId) errors.push(`${path}.onFail.goto must target the containing forEach step`);
 }
 
 function validateRetryModelSelections(selections: unknown, path: string, errors: string[]): void {

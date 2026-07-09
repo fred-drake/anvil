@@ -114,6 +114,283 @@ describe("runWorkflow", () => {
 		]);
 	});
 
+	it("runs forEach function items with item prompt context", async () => {
+		const host = new FakeHost();
+		const summary = await runWorkflow({
+			workflow: workflow([
+				{
+					id: "fanout",
+					prompt: "work {item} ({itemIndex}/{itemCount})",
+					forEach: { items: () => ["a.ts", "b.ts"] },
+				},
+			]),
+			input: "task",
+			cwd: "/tmp",
+			host,
+			runId: "run",
+		});
+
+		expect(summary.state).toBe("succeeded");
+		expect(host.instructions).toHaveLength(2);
+		expect(host.instructions[0]).toContain("work a.ts (0/2)");
+		expect(host.instructions[1]).toContain("work b.ts (1/2)");
+		expect(host.checkpoints.filter((entry) => entry.phase === "step_start").map((entry) => entry.itemIndex)).toEqual([0, 1]);
+	});
+
+	it("enumerates forEach command items and passes empty lists", async () => {
+		const host = new FakeHost();
+		host.execQueue.push({ stdout: "one\n\ntwo\n", stderr: "", code: 0 });
+		const summary = await runWorkflow({
+			workflow: workflow([{ id: "fanout", prompt: "work {item}", forEach: { items: { command: "printf items" } } }]),
+			input: "task",
+			cwd: "/tmp",
+			host,
+			runId: "run",
+		});
+
+		expect(summary.state).toBe("succeeded");
+		expect(host.instructions.map((instruction) => instruction.includes("work one") || instruction.includes("work two"))).toEqual([true, true]);
+	});
+
+	it("fails a forEach step when maxItems is exceeded", async () => {
+		const host = new FakeHost();
+		const summary = await runWorkflow({
+			workflow: workflow([{ id: "fanout", prompt: "work", forEach: { items: () => ["a", "b"], maxItems: 1 } }]),
+			input: "task",
+			cwd: "/tmp",
+			host,
+			runId: "run",
+		});
+
+		expect(summary.state).toBe("failed");
+		expect(summary.failureReason).toContain("exceeding maxItems 1");
+	});
+
+	it("passes an empty forEach step with a notify and a 0-items checkpoint reason", async () => {
+		const host = new FakeHost();
+		const summary = await runWorkflow({
+			workflow: workflow([{ id: "fanout", prompt: "work {item}", forEach: { items: () => [] } }]),
+			input: "task",
+			cwd: "/tmp",
+			host,
+			runId: "run",
+		});
+
+		expect(summary.state).toBe("succeeded");
+		expect(host.instructions).toHaveLength(0);
+		expect(host.notifications).toContain('forEach step "fanout" has 0 items');
+		expect(host.checkpoints.find((entry) => entry.phase === "step_pass")?.reason).toBe("forEach: 0 items");
+	});
+
+	it("enumerates forEach command items parsed as JSON and rejects malformed JSON", async () => {
+		const host = new FakeHost();
+		host.execQueue.push({ stdout: '["x.ts", "y.ts"]', stderr: "", code: 0 });
+		const ok = await runWorkflow({
+			workflow: workflow([
+				{ id: "fanout", prompt: "work {item}", forEach: { items: { command: "emit", parse: "json" } } },
+			]),
+			input: "task",
+			cwd: "/tmp",
+			host,
+			runId: "run",
+		});
+		expect(ok.state).toBe("succeeded");
+		expect(host.instructions.map((i) => i.includes("work x.ts") || i.includes("work y.ts"))).toEqual([true, true]);
+
+		const badHost = new FakeHost();
+		badHost.execQueue.push({ stdout: "not json", stderr: "", code: 0 });
+		const bad = await runWorkflow({
+			workflow: workflow([
+				{ id: "fanout", prompt: "work {item}", forEach: { items: { command: "emit", parse: "json" } } },
+			]),
+			input: "task",
+			cwd: "/tmp",
+			host: badHost,
+			runId: "run",
+		});
+		expect(bad.state).toBe("failed");
+		expect(bad.failureReason).toContain("did not output valid JSON");
+	});
+
+	it("fails a forEach step when the item command exits non-zero", async () => {
+		const host = new FakeHost();
+		host.execQueue.push({ stdout: "", stderr: "boom", code: 2 });
+		const summary = await runWorkflow({
+			workflow: workflow([{ id: "fanout", prompt: "work {item}", forEach: { items: { command: "emit" } } }]),
+			input: "task",
+			cwd: "/tmp",
+			host,
+			runId: "run",
+		});
+
+		expect(summary.state).toBe("failed");
+		expect(summary.failureReason).toContain('forEach item command for step "fanout" exited 2');
+	});
+
+	it("fails a forEach step when a function source returns non-string items", async () => {
+		const host = new FakeHost();
+		const summary = await runWorkflow({
+			workflow: workflow([{ id: "fanout", prompt: "work", forEach: { items: () => [1, 2] as unknown as string[] } }]),
+			input: "task",
+			cwd: "/tmp",
+			host,
+			runId: "run",
+		});
+
+		expect(summary.state).toBe("failed");
+		expect(summary.failureReason).toContain("must be an array of strings");
+	});
+
+	it("retries only the failing item with its own feedback and keeps loop counts per item", async () => {
+		const host = new FakeHost();
+		// item a: check fails then passes on retry; item b: passes first try.
+		host.execQueue.push(
+			{ stdout: "", stderr: "a is broken", code: 1 },
+			{ stdout: "ok", stderr: "", code: 0 },
+			{ stdout: "ok", stderr: "", code: 0 },
+		);
+		const summary = await runWorkflow({
+			workflow: workflow([
+				{
+					id: "fanout",
+					prompt: "work {item}",
+					delegation: "none",
+					forEach: { items: () => ["a", "b"] },
+					checks: [{ type: "deterministic", id: "tests", command: "test", onFail: { goto: "fanout", maxLoops: 1 } }],
+				},
+			]),
+			input: "task",
+			cwd: "/tmp",
+			host,
+			runId: "run",
+		});
+
+		expect(summary.state).toBe("succeeded");
+		expect(host.instructions).toHaveLength(3);
+		expect(host.instructions[0]).toContain("work a");
+		expect(host.instructions[0]).not.toContain("Feedback");
+		expect(host.instructions[1]).toContain("work a");
+		expect(host.instructions[1]).toContain("a is broken");
+		expect(host.instructions[2]).toContain("work b");
+		expect(host.instructions[2]).not.toContain("a is broken");
+		expect(summary.loopCounts["tests->fanout#0"]).toBe(1);
+		expect(summary.loopCounts["tests->fanout#1"]).toBeUndefined();
+		expect(
+			host.checkpoints.filter((e) => e.phase === "check_result").map((e) => e.itemIndex),
+		).toEqual([0, 0, 1]);
+	});
+
+	it("continues past an exhausted item and captures a per-item digest when onItemExhausted is continue", async () => {
+		const host = new FakeHost();
+		// item a exhausts immediately (maxLoops 0), item b passes.
+		host.execQueue.push({ stdout: "", stderr: "a bad", code: 1 }, { stdout: "ok", stderr: "", code: 0 });
+		const summary = await runWorkflow({
+			workflow: workflow([
+				{
+					id: "fanout",
+					prompt: "work {item}",
+					delegation: "none",
+					forEach: { items: () => ["a", "b"], onItemExhausted: "continue" },
+					checks: [{ type: "deterministic", id: "tests", command: "test", onFail: { goto: "fanout", maxLoops: 0 } }],
+				},
+				{ id: "report", prompt: "digest: {outputs.fanout}", delegation: "none" },
+			]),
+			input: "task",
+			cwd: "/tmp",
+			host,
+			runId: "run",
+		});
+
+		expect(summary.state).toBe("succeeded");
+		const reportInstruction = host.instructions.at(-1) ?? "";
+		expect(reportInstruction).toContain("[1/2] a — FAILED");
+		expect(reportInstruction).toContain("[2/2] b — ok");
+	});
+
+	it("fails a forEach step when every item fails under onItemExhausted continue", async () => {
+		const host = new FakeHost();
+		host.execQueue.push({ stdout: "", stderr: "a bad", code: 1 }, { stdout: "", stderr: "b bad", code: 1 });
+		const summary = await runWorkflow({
+			workflow: workflow([
+				{
+					id: "fanout",
+					prompt: "work {item}",
+					delegation: "none",
+					forEach: { items: () => ["a", "b"], onItemExhausted: "continue" },
+					checks: [{ type: "deterministic", command: "test", onFail: { goto: "fanout", maxLoops: 0 } }],
+				},
+			]),
+			input: "task",
+			cwd: "/tmp",
+			host,
+			runId: "run",
+		});
+
+		expect(summary.state).toBe("failed");
+		expect(summary.failureReason).toContain('item 1/2 "a" failed');
+	});
+
+	it("runs forEach items in fresh subagent sessions and escalates the model per item", async () => {
+		const host = new FakeHost();
+		host.enableSubagents();
+		// item a: check fails then passes; item b: passes first try.
+		host.execQueue.push(
+			{ stdout: "", stderr: "retry a", code: 1 },
+			{ stdout: "ok", stderr: "", code: 0 },
+			{ stdout: "ok", stderr: "", code: 0 },
+		);
+		const summary = await runWorkflow({
+			workflow: workflow([
+				{
+					id: "fanout",
+					prompt: "work {item}",
+					delegation: { subagent: "cmux" },
+					model: "cheap/model:minimal",
+					retryModelSelections: [{ retry: 1, model: "strong/model", thinkingLevel: "high" }],
+					forEach: { items: () => ["a", "b"] },
+					checks: [{ type: "deterministic", id: "tests", command: "test", onFail: { goto: "fanout", maxLoops: 1 } }],
+				},
+			]),
+			input: "task",
+			cwd: "/repo",
+			host,
+			runId: "run",
+		});
+
+		expect(summary.state).toBe("succeeded");
+		expect(host.subagentRequests.map(({ model, thinkingLevel }) => ({ model, thinkingLevel }))).toEqual([
+			{ model: "cheap/model", thinkingLevel: "minimal" },
+			{ model: "strong/model", thinkingLevel: "high" },
+			{ model: "cheap/model", thinkingLevel: "minimal" },
+		]);
+	});
+
+	it("re-runs the whole forEach step on resume without applying the resume retry seed to items", async () => {
+		const host = new FakeHost();
+		host.enableSubagents();
+		const summary = await runWorkflow({
+			workflow: workflow([
+				{
+					id: "fanout",
+					prompt: "work {item}",
+					delegation: { subagent: "herdr" },
+					model: "cheap/model:low",
+					retryModelSelections: [{ retry: 2, model: "strong/model:high" }],
+					forEach: { items: () => ["a"] },
+				},
+			]),
+			input: "task",
+			cwd: "/repo",
+			host,
+			runId: "run",
+			resume: { stepNumber: 1, retryCount: 2 },
+		});
+
+		expect(summary.state).toBe("succeeded");
+		// The resume seed would pick strong/model at retry 2; items start fresh, so it stays cheap.
+		expect(host.subagentRequests[0]).toMatchObject({ model: "cheap/model", thinkingLevel: "low" });
+	});
+
 	it("applies per-step model selections and restores the default for unspecified steps", async () => {
 		const host = new FakeHost();
 		const summary = await runWorkflow({

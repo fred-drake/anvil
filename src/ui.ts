@@ -9,6 +9,8 @@ export interface StatusInfo {
 	checkIndex?: number;
 	checkTotal?: number;
 	checkName?: string;
+	itemIndex?: number;
+	itemCount?: number;
 }
 
 export function formatStatus(info: StatusInfo): string | undefined {
@@ -22,25 +24,31 @@ export function formatStatus(info: StatusInfo): string | undefined {
 			? `${info.stepIndex + 1}/${info.stepTotal}`
 			: "?/?";
 	const title = info.stepTitle ?? "step";
+	const item = info.itemIndex !== undefined && info.itemCount !== undefined ? ` — item ${info.itemIndex + 1}/${info.itemCount}` : "";
 	if (info.phase === "check") {
 		const check =
 			info.checkIndex !== undefined && info.checkTotal !== undefined
 				? ` — check ${info.checkIndex + 1}/${info.checkTotal}`
 				: " — check";
-		return `anvil: ${step} ${title}${check}${info.checkName ? ` (${info.checkName})` : ""}`;
+		return `anvil: ${step} ${title}${item}${check}${info.checkName ? ` (${info.checkName})` : ""}`;
 	}
-	if (info.phase === "loop") return `anvil: ${step} ${title} — retrying`;
-	return `anvil: ${step} ${title}`;
+	if (info.phase === "loop") return `anvil: ${step} ${title}${item} — retrying`;
+	return `anvil: ${step} ${title}${item}`;
 }
 
-export function formatStepWidget(steps: StepRunState[], currentStepId?: string): string[] | undefined {
+export function formatStepWidget(
+	steps: StepRunState[],
+	currentStepId?: string,
+	item?: { index: number; count: number },
+): string[] | undefined {
 	if (steps.length === 0) return undefined;
 	return steps.map((step) => {
 		const icon = iconForStep(step, currentStepId);
 		const loopSuffix = step.loops > 0 ? ` ↻(${step.loops})` : "";
 		const title = step.title ? ` — ${step.title}` : "";
 		const checkSummary = step.checks.length > 0 ? ` [${step.checks.filter((c) => c.pass).length}/${step.checks.length} checks]` : "";
-		return `${icon} ${step.id}${title}${loopSuffix}${checkSummary}`;
+		const itemSuffix = item && step.id === currentStepId ? ` — item ${item.index + 1}/${item.count}` : "";
+		return `${icon} ${step.id}${title}${loopSuffix}${checkSummary}${itemSuffix}`;
 	});
 }
 

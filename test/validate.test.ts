@@ -387,4 +387,152 @@ describe("validateWorkflow", () => {
 			expect(result.errors).toContain('workflow.steps[0].checks[2].type must be "deterministic" or "agent"');
 		}
 	});
+
+	describe("forEach", () => {
+		it("accepts function and command item sources", () => {
+			const workflow = {
+				name: "fanout",
+				steps: [
+					{ id: "a", prompt: "work {item}", forEach: { items: () => ["x"] } },
+					{
+						id: "b",
+						prompt: "work {item}",
+						forEach: { items: { command: "git diff --name-only", parse: "lines" }, maxItems: 5, onItemExhausted: "continue" },
+					},
+				],
+			};
+			expect(validateWorkflow(workflow)).toEqual({ ok: true, workflow });
+		});
+
+		it("rejects malformed forEach schema and unknown keys", () => {
+			const result = validateWorkflow({
+				name: "bad-foreach",
+				steps: [
+					{
+						id: "a",
+						prompt: "work",
+						forEach: { items: { command: 5, parse: "xml" }, concurrency: 0, maxItems: -1, onItemExhausted: "sometimes", extra: true },
+					},
+				],
+			});
+			expect(result.ok).toBe(false);
+			if (!result.ok) {
+				expect(result.errors).toContain("workflow.steps[0].forEach.extra is not recognized");
+				expect(result.errors).toContain("workflow.steps[0].forEach.items.command must be a string or function");
+				expect(result.errors).toContain('workflow.steps[0].forEach.items.parse must be "lines" or "json" when provided');
+				expect(result.errors).toContain("workflow.steps[0].forEach.concurrency must be a positive integer when provided");
+				expect(result.errors).toContain("workflow.steps[0].forEach.maxItems must be a positive integer when provided");
+				expect(result.errors).toContain('workflow.steps[0].forEach.onItemExhausted must be "stop" or "continue" when provided');
+			}
+		});
+
+		it("rejects a items source that is neither a function nor a command object", () => {
+			const result = validateWorkflow({
+				name: "bad-items",
+				steps: [{ id: "a", prompt: "work", forEach: { items: "x" } }],
+			});
+			expect(result.ok).toBe(false);
+			if (!result.ok) expect(result.errors).toContain("workflow.steps[0].forEach.items must be a function or command object");
+		});
+
+		it("rejects a check onFail.goto that leaves the forEach step", () => {
+			const result = validateWorkflow({
+				name: "goto-out",
+				steps: [
+					{
+						id: "fanout",
+						prompt: "work {item}",
+						forEach: { items: () => ["x"] },
+						checks: [{ type: "deterministic", command: "test", onFail: { goto: "other" } }],
+					},
+					{ id: "other", prompt: "b" },
+				],
+			});
+			expect(result.ok).toBe(false);
+			if (!result.ok) {
+				expect(result.errors).toContain("workflow.steps[0].checks[0].onFail.goto must target the containing forEach step");
+			}
+		});
+
+		it("rejects step- and workflow-level onFail.goto defaults that leave a forEach step", () => {
+			const result = validateWorkflow({
+				name: "goto-out-defaults",
+				defaults: { onFail: { goto: "other" } },
+				steps: [
+					{
+						id: "fanout",
+						prompt: "work {item}",
+						forEach: { items: () => ["x"] },
+						onFail: { goto: "other" },
+						checks: [{ type: "deterministic", command: "test" }],
+					},
+					{ id: "other", prompt: "b" },
+				],
+			});
+			expect(result.ok).toBe(false);
+			if (!result.ok) {
+				expect(result.errors).toContain("workflow.steps[0].onFail.goto must target the containing forEach step");
+				expect(result.errors).toContain("workflow.defaults.onFail.goto must target the containing forEach step");
+			}
+		});
+
+		it("allows a self-targeting check onFail.goto inside a forEach step", () => {
+			const workflow = {
+				name: "goto-self",
+				steps: [
+					{
+						id: "fanout",
+						prompt: "work {item}",
+						forEach: { items: () => ["x"] },
+						checks: [{ type: "deterministic", command: "test", onFail: { goto: "fanout", maxLoops: 1 } }],
+					},
+				],
+			};
+			expect(validateWorkflow(workflow)).toEqual({ ok: true, workflow });
+		});
+
+		it("rejects concurrency > 1 when delegation resolves to non-subagent, including workflow defaults", () => {
+			const stepLevel = validateWorkflow({
+				name: "conc-step",
+				steps: [{ id: "a", prompt: "work", delegation: "none", forEach: { items: () => ["x"], concurrency: 2 } }],
+			});
+			expect(stepLevel.ok).toBe(false);
+			if (!stepLevel.ok) expect(stepLevel.errors).toContain("workflow.steps[0].forEach.concurrency > 1 requires subagent delegation");
+
+			const defaultLevel = validateWorkflow({
+				name: "conc-default",
+				defaults: { delegation: { skill: "builder" } },
+				steps: [{ id: "a", prompt: "work", forEach: { items: () => ["x"], concurrency: 2 } }],
+			});
+			expect(defaultLevel.ok).toBe(false);
+			if (!defaultLevel.ok) expect(defaultLevel.errors).toContain("workflow.steps[0].forEach.concurrency > 1 requires subagent delegation");
+		});
+
+		it("accepts concurrency > 1 with subagent delegation", () => {
+			const workflow = {
+				name: "conc-ok",
+				steps: [{ id: "a", prompt: "work", delegation: { subagent: "cmux" }, forEach: { items: () => ["x"], concurrency: 4 } }],
+			};
+			expect(validateWorkflow(workflow)).toEqual({ ok: true, workflow });
+		});
+
+		it("rejects outputFrom on a forEach step", () => {
+			const result = validateWorkflow({
+				name: "foreach-outputfrom",
+				steps: [
+					{
+						id: "a",
+						prompt: "work {item}",
+						forEach: { items: () => ["x"] },
+						outputFrom: "cap",
+						checks: [{ type: "deterministic", id: "cap", command: "test" }],
+					},
+				],
+			});
+			expect(result.ok).toBe(false);
+			if (!result.ok) {
+				expect(result.errors.join("\n")).toContain("workflow.steps[0].outputFrom is not supported on a forEach step");
+			}
+		});
+	});
 });
