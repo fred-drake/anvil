@@ -1,14 +1,14 @@
 import { defineWorkflow } from "anvil";
 
-const model = "openai-codex/gpt-5.5:low";
+const model = "ollama/qwen3.6-27b-temp06";
 
 export default defineWorkflow({
-	name: "feature-forge",
+	name: "feature-forge-local",
 	description: "Research-backed, test-first feature implementation with verification, coverage, review, and issue capture.",
 	defaults: {
 		delegation: "auto",
 		onFail: "stop",
-		maxLoops: 3,
+		maxLoops: 10,
 	},
 	steps: [
 		{
@@ -62,8 +62,8 @@ Requirements:
 					id: "tests-and-coverage",
 					name: "All tests pass with >=85% coverage",
 					command: "npm run check && npx vitest run --coverage",
-					timeoutMs: 1_800_000,
-					onFail: { goto: "implement-feature", maxLoops: 3, onExhausted: "stop", feedback: true },
+					timeoutMs: 18_000_000,
+					onFail: { goto: "implement-feature", maxLoops: 10, onExhausted: "stop", feedback: true },
 				},
 			],
 		},
@@ -96,7 +96,7 @@ Pass only if all of the following are true:
 - The implementation still satisfies the feature request and repository conventions.
 
 Fail if there are unresolved blocking findings, missing required issue documentation for non-blockers, or evidence that tests/coverage should be rerun.`,
-					onFail: { goto: "implement-feature", maxLoops: 3, onExhausted: "stop", feedback: true },
+					onFail: { goto: "implement-feature", maxLoops: 10, onExhausted: "stop", feedback: true },
 				},
 			],
 		},
