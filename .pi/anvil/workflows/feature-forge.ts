@@ -1,6 +1,6 @@
 import { defineWorkflow } from "anvil";
 
-const model = "openai-codex/gpt-5.5:high";
+const model = "openai-codex/gpt-5.6-terra:medium";
 
 export default defineWorkflow({
 	name: "feature-forge",
@@ -46,7 +46,13 @@ Requirements:
 		{
 			id: "implement-feature",
 			title: "Implement feature and satisfy tests",
-			model,
+			model: "openai-codex/gpt-5.6-terra:medium",
+			retryModelSelections: [
+				{ retry: 1, model: "openai-codex/gpt-5.6-terra:high" },
+				{ retry: 2, model: "openai-codex/gpt-5.6-terra:xhigh" },
+				{ retry: 3, model: "openai-codex/gpt-5.6-sol:medium" },
+				{ retry: 4, model: "openai-codex/gpt-5.6-sol:high" },
+			],
 			prompt: `Using the prior research and plan, implement this feature request and complete/fill in the unit test stubs:
 {input}
 
@@ -71,6 +77,10 @@ Requirements:
 			id: "review-correctness-contracts",
 			title: "Review correctness and contracts",
 			model,
+			retryModelSelections: [
+				{ retry: 1, model: "openai-codex/gpt-5.6-sol:medium" },
+				{ retry: 2, model: "openai-codex/gpt-5.6-sol:high" },
+			],
 			// Run each specialist review independently when a subagent backend is available.
 			delegation: "auto",
 			onFail: { goto: "implement-feature", maxLoops: 10, onExhausted: "stop", feedback: true },
@@ -107,6 +117,10 @@ Fail if the review found any blocking finding requiring remediation before shipp
 			id: "review-security-privacy",
 			title: "Review security and privacy",
 			model,
+			retryModelSelections: [
+				{ retry: 1, model: "openai-codex/gpt-5.6-sol:medium" },
+				{ retry: 2, model: "openai-codex/gpt-5.6-sol:high" },
+			],
 			delegation: "auto",
 			onFail: { goto: "implement-feature", maxLoops: 10, onExhausted: "stop", feedback: true },
 			prompt: `Review the changes made for this feature request:
@@ -142,6 +156,10 @@ Fail if the review found any blocking finding requiring remediation before shipp
 			id: "review-performance-reliability",
 			title: "Review performance and reliability",
 			model,
+			retryModelSelections: [
+				{ retry: 1, model: "openai-codex/gpt-5.6-sol:medium" },
+				{ retry: 2, model: "openai-codex/gpt-5.6-sol:high" },
+			],
 			delegation: "auto",
 			onFail: { goto: "implement-feature", maxLoops: 10, onExhausted: "stop", feedback: true },
 			prompt: `Review the changes made for this feature request:
@@ -177,6 +195,10 @@ Fail if the review found any blocking finding requiring remediation before shipp
 			id: "review-tests-maintainability-docs",
 			title: "Review tests, maintainability, and docs",
 			model,
+			retryModelSelections: [
+				{ retry: 1, model: "openai-codex/gpt-5.6-sol:medium" },
+				{ retry: 2, model: "openai-codex/gpt-5.6-sol:high" },
+			],
 			delegation: "auto",
 			onFail: { goto: "implement-feature", maxLoops: 10, onExhausted: "stop", feedback: true },
 			prompt: `Review the changes made for this feature request:
@@ -212,7 +234,10 @@ Fail if the review found any blocking finding requiring remediation before shipp
 		{
 			id: "aggregate-review",
 			title: "Aggregate reviews and record non-blockers",
-			model,
+			retryModelSelections: [
+				{ retry: 1, model: "openai-codex/gpt-5.6-sol:medium" },
+				{ retry: 2, model: "openai-codex/gpt-5.6-sol:high" },
+			],
 			delegation: "auto",
 			prompt: `Aggregate the specialist reviews for this feature request:
 {input}
