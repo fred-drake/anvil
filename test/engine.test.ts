@@ -4,12 +4,17 @@ import {
 	type AnvilCheckpoint,
 	type EngineHost,
 	type EngineExecResult,
+	type ReviewSubagentRunRequest,
+	type ReviewSubagentRunResult,
 	type RunSummary,
 	type StepModelSelection,
+	type WorkspaceState,
 	type SubagentStepRunRequest,
 	type SubagentStepRunResult,
 } from "../src/engine.ts";
+import { ReviewSubagentUnavailableError } from "../src/errors.ts";
 import type { Verdict } from "../src/gates.ts";
+import { INDEPENDENT_REVIEW_FAIL_REASON } from "../src/subagent/child.ts";
 import type { WorkflowDefinition } from "../src/types.ts";
 
 const ORIGINAL_HERDR_ENV = process.env.HERDR_ENV;
@@ -33,6 +38,7 @@ class FakeHost implements EngineHost {
 	widgets: Array<string[] | undefined> = [];
 	summaries: RunSummary[] = [];
 	execQueue: EngineExecResult[] = [];
+	workspaceStates: Array<WorkspaceState | undefined> = [];
 	modelSelections: Array<StepModelSelection | undefined> = [];
 	activeModelSelection: StepModelSelection | undefined;
 	verdictModelSelections: Array<StepModelSelection | undefined> = [];
@@ -43,6 +49,8 @@ class FakeHost implements EngineHost {
 	subagentRequests: SubagentStepRunRequest[] = [];
 	subagentQueue: SubagentStepRunResult[] = [];
 	runSubagent?: (request: SubagentStepRunRequest, signal?: AbortSignal) => Promise<SubagentStepRunResult>;
+	reviewRequests: ReviewSubagentRunRequest[] = [];
+	runReviewSubagent?: (request: ReviewSubagentRunRequest, signal?: AbortSignal) => Promise<ReviewSubagentRunResult>;
 
 	enableSubagents(): void {
 		this.runSubagent = async (request) => {
@@ -67,6 +75,10 @@ class FakeHost implements EngineHost {
 
 	async exec(): Promise<EngineExecResult> {
 		return this.execQueue.shift() ?? { stdout: "", stderr: "", code: 0 };
+	}
+
+	async captureWorkspaceState(): Promise<WorkspaceState | undefined> {
+		return this.workspaceStates.shift();
 	}
 
 	async awaitVerdict(checkId: string, timeoutMs: number): Promise<Verdict | undefined> {
@@ -112,6 +124,36 @@ describe("runWorkflow", () => {
 			"step_pass",
 			"run_end",
 		]);
+	});
+
+	it("fails an approval when the workspace changed after deterministic verification", async () => {
+		const host = new FakeHost();
+		const verified = { head: "abc", fingerprint: "verified", changedFiles: ["src/a.ts"], changedFileCount: 1 };
+		const changed = { head: "abc", fingerprint: "changed", changedFiles: ["src/a.ts"], changedFileCount: 1 };
+		host.workspaceStates.push(verified, verified, changed, changed);
+		host.verdictQueue.push({ pass: true, reason: "approved" });
+
+		const summary = await runWorkflow({
+			workflow: workflow([
+				{
+					id: "verify",
+					prompt: "verify",
+					checks: [
+						{ type: "deterministic", id: "tests", command: "npm test" },
+						{ type: "agent", id: "approval", prompt: "approve" },
+					],
+				},
+			]),
+			input: "task",
+			cwd: "/tmp",
+			host,
+			runId: "run",
+		});
+
+		expect(summary.state).toBe("failed");
+		expect(summary.failureReason).toBe("workspace changed after the latest successful deterministic verification");
+		expect(summary.evidence.lastVerification).toEqual(verified);
+		expect(summary.steps[0]?.checks[1]).toMatchObject({ pass: false, type: "agent", workspaceState: changed });
 	});
 
 	it("runs forEach function items with item prompt context", async () => {
@@ -500,6 +542,7 @@ describe("runWorkflow", () => {
 		expect(summary.state).toBe("failed");
 		expect(summary.steps[0]?.status).toBe("failed");
 		expect(summary.failureReason).toContain("nope");
+		expect(host.widgets.at(-1)).toEqual(["✖ Step failed: nope", "✖ one [0/1 checks]"]);
 	});
 
 	it("loops with feedback on goto and then passes", async () => {
@@ -711,6 +754,50 @@ describe("runWorkflow", () => {
 		expect(summary.state).toBe("succeeded");
 		expect(host.instructions.at(-1)).toContain("Use revised plan");
 		expect(host.instructions.at(-1)).not.toContain("first plan");
+	});
+
+	it("evaluates only the latest review output after a goto retry", async () => {
+		const host = new FakeHost();
+		host.enableSubagents();
+		host.subagentQueue.push(
+			{ summary: "implementation attempt one", exitCode: 0 },
+			{ summary: "BLOCKING: stale defect", exitCode: 0 },
+			{ summary: "implementation attempt two", exitCode: 0 },
+			{ summary: "No blocking findings.", exitCode: 0 },
+		);
+		host.verdictQueue.push(
+			{ pass: false, reason: "stale defect needs remediation" },
+			{ pass: true, reason: "latest review is clean" },
+		);
+
+		const summary = await runWorkflow({
+			workflow: workflow([
+				{ id: "implement", prompt: "Implement", delegation: { subagent: "cmux" } },
+				{
+					id: "review",
+					prompt: "Review",
+					delegation: { subagent: "cmux" },
+					checks: [
+						{
+							type: "agent",
+							id: "review-blockers",
+							prompt: "Evaluate only this review:\n{outputs.review}",
+							onFail: { goto: "implement", maxLoops: 1 },
+						},
+					],
+				},
+			]),
+			input: "feature",
+			cwd: "/repo",
+			host,
+			runId: "run-latest-review-output",
+		});
+
+		expect(summary.state).toBe("succeeded");
+		expect(host.instructions).toHaveLength(2);
+		expect(host.instructions[0]).toContain("BLOCKING: stale defect");
+		expect(host.instructions[1]).toContain("No blocking findings.");
+		expect(host.instructions[1]).not.toContain("BLOCKING: stale defect");
 	});
 
 	it("runs subagent-delegated steps through host.runSubagent instead of the main session", async () => {
@@ -1349,6 +1436,154 @@ describe("runWorkflow", () => {
 		expect(host.subagentRequests[0]?.task).toContain("step 2/2: Implement");
 	});
 
+	it("wires reviewed checks without propagating reviewer prose through workflow state", async () => {
+		const host = new FakeHost();
+		const secret = "unmarked-reviewer-secret-value";
+		host.runReviewSubagent = async (request) => {
+			host.reviewRequests.push(request);
+			return { pass: false, reason: `reviewer found ${secret}`, sessionFile: "/tmp/review.jsonl", exitCode: 0 };
+		};
+		const summary = await runWorkflow({
+			workflow: workflow([
+				{
+					id: "implement",
+					prompt: "Implement {input}",
+					model: "reviewer/model:high",
+					checks: [
+						{
+							type: "agent",
+							id: "quality",
+							prompt: "Verify only the checked-in artifacts for {input}",
+							timeoutMs: 1234,
+							review: { subagent: "cmux" },
+							onFail: { goto: "implement", maxLoops: 0 },
+						},
+					],
+				},
+			]),
+			input: "task",
+			cwd: "/repo",
+			host,
+			runId: "run-independent-review",
+		});
+
+		expect(host.reviewRequests).toEqual([
+			expect.objectContaining({
+				checkId: "run-independent-review:implement:0:0",
+				backend: "cmux",
+				cwd: "/repo",
+				model: "reviewer/model",
+				thinkingLevel: "high",
+				timeoutMs: 1234,
+			}),
+		]);
+		expect(host.reviewRequests[0]?.task).toContain("Verify only the checked-in artifacts for task");
+		expect(host.reviewRequests[0]?.task).not.toContain("Implement task");
+		expect(host.instructions).toHaveLength(1);
+		expect(summary.steps[0]?.checks[0]).toMatchObject({
+			id: "run-independent-review:implement:0:0",
+			pass: false,
+			reason: INDEPENDENT_REVIEW_FAIL_REASON,
+		});
+		expect(summary.evidence?.subagentSessions).toContain("/tmp/review.jsonl");
+		expect(host.checkpoints.find((entry) => entry.phase === "check_result")).toMatchObject({
+			checkId: "run-independent-review:implement:0:0",
+			reason: INDEPENDENT_REVIEW_FAIL_REASON,
+			sessionFile: "/tmp/review.jsonl",
+		});
+		expect(JSON.stringify({ summary, checkpoints: host.checkpoints, instructions: host.instructions })).not.toContain(secret);
+	});
+
+	it("checkpoints unavailable independent review and applies check-level onFail", async () => {
+		const host = new FakeHost();
+		const summary = await runWorkflow({
+			workflow: workflow([
+				{
+					id: "implement",
+					prompt: "Implement",
+					checks: [
+						{
+							type: "agent",
+							prompt: "Review",
+							review: { subagent: "cmux" },
+							onFail: "continue",
+						},
+					],
+				},
+				{ id: "publish", prompt: "Publish" },
+			]),
+			input: "task",
+			cwd: "/repo",
+			host,
+			runId: "run-unavailable-review",
+		});
+
+		expect(summary.state).toBe("succeeded");
+		expect(summary.failureReason).toBeUndefined();
+		expect(summary.steps[0]).toMatchObject({
+			status: "continued",
+			checks: [{
+				id: "run-unavailable-review:implement:0:0",
+				pass: false,
+				reason: 'Independent review backend "cmux" is unavailable.',
+				timeoutMs: 1_800_000,
+			}],
+		});
+		expect(host.instructions).toHaveLength(2);
+		expect(host.checkpoints).toContainEqual(expect.objectContaining({
+			phase: "check_result",
+			checkId: "run-unavailable-review:implement:0:0",
+			pass: false,
+			reason: 'Independent review backend "cmux" is unavailable.',
+		}));
+		expect(host.checkpoints).toContainEqual(expect.objectContaining({
+			phase: "step_pass",
+			stepId: "implement",
+			reason: 'Independent review backend "cmux" is unavailable.',
+		}));
+	});
+
+	it("uses main-session grading when an explicitly optional review backend disappears at launch", async () => {
+		const host = new FakeHost();
+		host.verdictQueue.push({ pass: true, reason: "main fallback passed" });
+		host.runReviewSubagent = async (request) => {
+			host.reviewRequests.push(request);
+			throw new ReviewSubagentUnavailableError();
+		};
+
+		const summary = await runWorkflow({
+			workflow: workflow([
+				{
+					id: "implement",
+					prompt: "Implement",
+					checks: [
+						{
+							type: "agent",
+							id: "quality",
+							prompt: "Review",
+							review: { subagent: "cmux" },
+							reviewFallback: "main",
+						},
+					],
+				},
+			]),
+			input: "task",
+			cwd: "/repo",
+			host,
+			runId: "run-runtime-review-fallback",
+		});
+
+		expect(summary.state).toBe("succeeded");
+		expect(host.reviewRequests).toHaveLength(1);
+		expect(host.instructions).toHaveLength(2);
+		expect(summary.steps[0]?.checks[0]).toMatchObject({ pass: true, reason: "main fallback passed" });
+		expect(host.checkpoints).toContainEqual(expect.objectContaining({
+			phase: "check_result",
+			checkId: "run-runtime-review-fallback:implement:0:0",
+			pass: true,
+		}));
+	});
+
 	it("threads agent check timeout settings from the workflow contract", async () => {
 		const host = new FakeHost();
 		host.verdictQueue.push({ pass: true, reason: "ok" });
@@ -1358,7 +1593,7 @@ describe("runWorkflow", () => {
 				{
 					id: "review",
 					prompt: "Review",
-					checks: [{ type: "agent", prompt: "criteria", timeoutMs: 1234 } as any],
+					checks: [{ type: "agent", prompt: "criteria", timeoutMs: 1234 }],
 				},
 			]),
 			input: "task",

@@ -60,6 +60,13 @@ describe("getAnvilCompletions", () => {
 		const completions = await getAnvilCompletions("val", project);
 
 		expect(completions).toEqual([{ value: "validate", label: "validate" }]);
+		expect(await getAnvilCompletions("hist", project)).toEqual([{ value: "history", label: "history" }]);
+	});
+
+	it("completes workflow names for history", async () => {
+		const completions = await getAnvilCompletions("history feature", project);
+
+		expect(completions).toContainEqual(expect.objectContaining({ value: "history feature-forge", label: "feature-forge" }));
 	});
 
 	it("does not re-import workflow modules on repeated completion keystrokes without file changes", async () => {

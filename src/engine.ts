@@ -61,13 +61,56 @@ export interface SubagentStepRunResult {
 	errorMessage?: string;
 }
 
+export interface ReviewSubagentRunRequest {
+	runId: string;
+	workflowName: string;
+	stepId: string;
+	checkId: string;
+	backend: WorkflowSubagentBackend;
+	/** Complete review-only task prompt. */
+	task: string;
+	cwd: string;
+	model?: string;
+	thinkingLevel?: WorkflowThinkingLevel;
+	timeoutMs?: number;
+}
+
+export interface ReviewSubagentRunResult {
+	pass: boolean;
+	reason: string;
+	sessionFile?: string;
+	exitCode: number;
+}
+
+export interface WorkspaceState {
+	/** Git commit at capture time, when the workflow cwd is a Git worktree. */
+	head: string;
+	/** Bounded fingerprint of the Git working-tree state. */
+	fingerprint: string;
+	changedFiles: string[];
+	changedFileCount: number;
+}
+
+export interface RunEvidence {
+	workspaceStart?: WorkspaceState;
+	lastVerification?: WorkspaceState;
+	workspaceEnd?: WorkspaceState;
+	subagentSessions: string[];
+}
+
 export interface EngineHost {
 	applyStepModelSelection?(selection: StepModelSelection | undefined): void | Promise<void>;
 	/** Run a subagent-delegated step to completion. Required for workflows using delegation: { subagent }. */
 	runSubagent?(request: SubagentStepRunRequest, signal?: AbortSignal): Promise<SubagentStepRunResult>;
+	/** Run an agent check in a fresh review-only child session. */
+	runReviewSubagent?(request: ReviewSubagentRunRequest, signal?: AbortSignal): Promise<ReviewSubagentRunResult>;
+	/** Optional runtime availability probe used to honor reviewFallback before launch. */
+	isReviewSubagentAvailable?(backend: WorkflowSubagentBackend): boolean;
 	sendInstruction(instruction: string): void;
 	waitForTurnComplete(signal?: AbortSignal): Promise<void>;
 	exec(command: string, args: string[], options?: EngineExecOptions): Promise<EngineExecResult>;
+	/** Returns a bounded Git workspace snapshot, or undefined outside a worktree. */
+	captureWorkspaceState?(cwd: string, signal?: AbortSignal): Promise<WorkspaceState | undefined>;
 	awaitVerdict(checkId: string, timeoutMs: number, signal?: AbortSignal): Promise<Verdict | undefined>;
 	beginStepOutputCapture?(stepId: string): void;
 	endStepOutputCapture?(stepId: string): string | undefined;
@@ -100,8 +143,12 @@ export type StepRunStatus = "pending" | "running" | "passed" | "failed" | "skipp
 export interface CheckRunState {
 	id: string;
 	name: string;
+	type?: Check["type"];
 	pass: boolean;
 	reason: string;
+	command?: string;
+	timeoutMs?: number;
+	workspaceState?: WorkspaceState;
 }
 
 export interface StepRunState {
@@ -121,6 +168,7 @@ export interface RunSummary {
 	endedAt: string;
 	steps: StepRunState[];
 	loopCounts: Record<string, number>;
+	evidence?: RunEvidence;
 	failureReason?: string;
 }
 
@@ -140,6 +188,12 @@ export interface AnvilCheckpoint {
 	itemCount?: number;
 	pass?: boolean;
 	reason?: string;
+	checkType?: Check["type"];
+	command?: string;
+	timeoutMs?: number;
+	sessionFile?: string;
+	sessionFiles?: string[];
+	workspaceState?: WorkspaceState;
 	loopCounts?: Record<string, number>;
 	finalState?: RunSummary["state"];
 }
@@ -160,6 +214,8 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<RunSumma
 	const feedbackByStep = new Map<string, string>();
 	const attempts = new Map<string, number>();
 	const workflowHasModelSelectionOverrides = hasWorkflowModelSelectionOverrides(options.workflow);
+	const evidence: RunEvidence = { subagentSessions: [] };
+	const freshness: { lastVerificationWorkspace?: WorkspaceState } = {};
 	let shouldRestoreModelSelection = false;
 	const steps = options.workflow.steps.map<StepRunState>((step) => ({
 		id: step.id,
@@ -192,6 +248,8 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<RunSumma
 				);
 			}
 		}
+		evidence.lastVerification = freshness.lastVerificationWorkspace;
+		evidence.workspaceEnd = await captureWorkspaceState(options);
 		const summary: RunSummary = {
 			runId,
 			workflowName: options.workflow.name,
@@ -201,11 +259,18 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<RunSumma
 			endedAt: new Date().toISOString(),
 			steps,
 			loopCounts: { ...loopCounts },
+			evidence,
 			failureReason,
 		};
-		checkpoint({ phase: "run_end", finalState: state, reason: failureReason });
+		checkpoint({
+			phase: "run_end",
+			finalState: state,
+			reason: failureReason,
+			workspaceState: evidence.workspaceEnd,
+			sessionFiles: evidence.subagentSessions,
+		});
 		options.host.setStatus(formatStatus({ workflowName: options.workflow.name, phase: state === "succeeded" ? "done" : state }));
-		options.host.setWidget(formatStepWidget(steps));
+		options.host.setWidget(formatStepWidget(steps, undefined, undefined, state === "failed" ? failureReason : undefined));
 		await options.host.postSummary(summary);
 		return summary;
 	};
@@ -214,7 +279,8 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<RunSumma
 		throwIfAborted(options.signal);
 		options.host.setStatus(formatStatus({ workflowName: options.workflow.name, phase: "starting" }));
 		options.host.setWidget(formatStepWidget(steps));
-		checkpoint({ phase: "run_start" });
+		evidence.workspaceStart = await captureWorkspaceState(options);
+		checkpoint({ phase: "run_start", workspaceState: evidence.workspaceStart });
 		if (resume.error) return finish("failed", resume.error);
 
 		let stepIndex = resume.startIndex;
@@ -222,6 +288,8 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<RunSumma
 			throwIfAborted(options.signal);
 			const step = options.workflow.steps[stepIndex]!;
 			const stepState = steps[stepIndex]!;
+			// A rerun must not expose this step's previous attempt through {outputs.<step-id>}.
+			delete outputs[step.id];
 			const ctx = makeWorkflowContext(options.input, step, stepIndex, loopCounts, options.cwd, outputs);
 
 			if (step.skipIf && (await step.skipIf(ctx))) {
@@ -281,6 +349,8 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<RunSumma
 						feedbackByStep,
 						attempts,
 						checkpoint,
+						evidence,
+						freshness,
 					});
 					const label = `[${itemIndex + 1}/${items.length}] ${firstLine(item)}`;
 					if (itemResult.ok) {
@@ -307,6 +377,7 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<RunSumma
 			}
 
 			const delegation = resolveStepDelegation(options.workflow, step);
+			let subagentSessionFile: string | undefined;
 			if (delegation.mode === "subagent") {
 				if (!options.host.runSubagent) {
 					stepState.status = "failed";
@@ -362,6 +433,10 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<RunSumma
 					);
 				}
 				outputs[step.id] = truncateStepOutput(result.summary);
+				subagentSessionFile = result.sessionFile;
+				if (subagentSessionFile && !evidence.subagentSessions.includes(subagentSessionFile)) {
+					evidence.subagentSessions.push(subagentSessionFile);
+				}
 			} else {
 				if (workflowHasModelSelectionOverrides) {
 					try {
@@ -410,20 +485,39 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<RunSumma
 				const displayName = check.name ?? check.id ?? `check ${checkIndex + 1}`;
 				updateStepUi(options, steps, stepIndex, "check", checkIndex, checks.length, displayName);
 				const checkId = makeRuntimeCheckId(runId, step.id, checkIndex, attempts);
-				const result = await executeCheck({
+				// Step execution may have replaced outputs after the attempt context was created.
+				// Snapshot again so each check evaluates only the latest attempt output.
+				const checkCtx = makeWorkflowContext(options.input, step, stepIndex, loopCounts, options.cwd, outputs);
+				let result = await executeCheck({
 					host: options.host,
 					workflow: options.workflow,
 					step,
 					check,
-					ctx,
+					ctx: checkCtx,
 					checkId,
+					runId,
+					modelSelection: resolveStepModelSelection(step, getCurrentLoopCount(checkCtx)),
 					signal: options.signal,
 				});
+				if (result.sessionFile && !evidence.subagentSessions.includes(result.sessionFile)) {
+					evidence.subagentSessions.push(result.sessionFile);
+				}
+				const workspaceState = await captureWorkspaceState(options);
+				if (check.type === "deterministic" && result.pass) {
+					freshness.lastVerificationWorkspace = workspaceState;
+					evidence.lastVerification = workspaceState;
+				} else if (check.type === "agent" && result.pass && workspaceChanged(freshness.lastVerificationWorkspace, workspaceState)) {
+					result = { ...result, pass: false, reason: "workspace changed after the latest successful deterministic verification" };
+				}
 				const checkState: CheckRunState = {
 					id: checkId,
 					name: displayName,
+					type: check.type,
 					pass: result.pass,
 					reason: result.reason,
+					command: result.command,
+					timeoutMs: result.timeoutMs,
+					workspaceState,
 				};
 				stepState.checks.push(checkState);
 				checkpoint({
@@ -433,6 +527,11 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<RunSumma
 					checkId,
 					pass: result.pass,
 					reason: result.reason,
+					checkType: check.type,
+					command: result.command,
+					timeoutMs: result.timeoutMs,
+					sessionFile: result.sessionFile,
+					workspaceState,
 				});
 				if (result.pass && step.outputFrom && checkMatchesOutputFrom(check, step.outputFrom, checkIndex)) {
 					outputs[step.id] = truncateStepOutput(result.output ?? "");
@@ -468,6 +567,7 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<RunSumma
 
 				stepState.status = "pending";
 				updateStepUi(options, steps, stepIndex, "loop");
+				clearOutputsFromStep(options.workflow, outputs, decision.targetIndex!);
 				stepIndex = decision.targetIndex!;
 				jumpedOrAdvanced = true;
 				break;
@@ -476,7 +576,7 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<RunSumma
 			if (jumpedOrAdvanced) continue;
 
 			stepState.status = "passed";
-			checkpoint({ phase: "step_pass", stepId: step.id, stepIndex });
+			checkpoint({ phase: "step_pass", stepId: step.id, stepIndex, sessionFile: subagentSessionFile });
 			updateStepUi(options, steps, stepIndex, "step");
 			stepIndex += 1;
 		}
@@ -488,6 +588,19 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<RunSumma
 		}
 		return finish("failed", error instanceof Error ? error.message : String(error));
 	}
+}
+
+async function captureWorkspaceState(options: RunWorkflowOptions): Promise<WorkspaceState | undefined> {
+	try {
+		return await options.host.captureWorkspaceState?.(options.cwd, options.signal);
+	} catch (error) {
+		options.host.notify(`Unable to capture Git workspace state: ${error instanceof Error ? error.message : String(error)}`, "warning");
+		return undefined;
+	}
+}
+
+function workspaceChanged(baseline: WorkspaceState | undefined, current: WorkspaceState | undefined): boolean {
+	return baseline !== undefined && current !== undefined && (baseline.head !== current.head || baseline.fingerprint !== current.fingerprint);
 }
 
 function resolveResumeState(
@@ -598,6 +711,8 @@ interface ForEachItemArgs {
 	feedbackByStep: Map<string, string>;
 	attempts: Map<string, number>;
 	checkpoint: CheckpointFn;
+	evidence: RunEvidence;
+	freshness: { lastVerificationWorkspace?: WorkspaceState };
 }
 
 type ForEachItemResult = { ok: true; summary: string } | { ok: false; reason: string; retries: number };
@@ -636,9 +751,61 @@ async function executeForEachItem(args: ForEachItemArgs): Promise<ForEachItemRes
 			const displayName = check.name ?? check.id ?? `check ${checkIndex + 1}`;
 			updateStepUi(options, args.steps, stepIndex, "check", checkIndex, checks.length, displayName, itemIndex, itemCount);
 			const checkId = makeRuntimeCheckId(args.runId, step.id, checkIndex, args.attempts, itemIndex);
-			const result = await executeCheck({ host: options.host, workflow: options.workflow, step, check, ctx, checkId, signal: options.signal });
-			args.stepState.checks.push({ id: checkId, name: displayName, pass: result.pass, reason: result.reason });
-			args.checkpoint({ phase: "check_result", stepId: step.id, stepIndex, checkId, itemIndex, itemCount, pass: result.pass, reason: result.reason });
+			const checkCtx = makeWorkflowContext(
+				options.input,
+				step,
+				stepIndex,
+				args.loopCounts,
+				options.cwd,
+				{ ...args.outputs, [step.id]: truncateStepOutput(attempt.summary) },
+				{ item: args.item, itemIndex, itemCount },
+			);
+			let result = await executeCheck({
+				host: options.host,
+				workflow: options.workflow,
+				step,
+				check,
+				ctx: checkCtx,
+				checkId,
+				runId: args.runId,
+				modelSelection: resolveStepModelSelection(step, getCurrentLoopCount(checkCtx)),
+				signal: options.signal,
+			});
+			if (result.sessionFile && !args.evidence.subagentSessions.includes(result.sessionFile)) {
+				args.evidence.subagentSessions.push(result.sessionFile);
+			}
+			const workspaceState = await captureWorkspaceState(options);
+			if (check.type === "deterministic" && result.pass) {
+				args.freshness.lastVerificationWorkspace = workspaceState;
+				args.evidence.lastVerification = workspaceState;
+			} else if (check.type === "agent" && result.pass && workspaceChanged(args.freshness.lastVerificationWorkspace, workspaceState)) {
+				result = { ...result, pass: false, reason: "workspace changed after the latest successful deterministic verification" };
+			}
+			args.stepState.checks.push({
+				id: checkId,
+				name: displayName,
+				type: check.type,
+				pass: result.pass,
+				reason: result.reason,
+				command: result.command,
+				timeoutMs: result.timeoutMs,
+				workspaceState,
+			});
+			args.checkpoint({
+				phase: "check_result",
+				stepId: step.id,
+				stepIndex,
+				checkId,
+				itemIndex,
+				itemCount,
+				pass: result.pass,
+				reason: result.reason,
+				checkType: check.type,
+				command: result.command,
+				timeoutMs: result.timeoutMs,
+				sessionFile: result.sessionFile,
+				workspaceState,
+			});
 			if (result.pass) continue;
 
 			decision = resolveFailure({
@@ -710,6 +877,9 @@ async function runItemDelegation(args: ForEachItemArgs & { ctx: WorkflowContext 
 		throwIfAborted(options.signal);
 		if (result.errorMessage || result.exitCode !== 0) {
 			return { ok: false, reason: result.errorMessage ?? `subagent for step "${step.id}" exited with code ${result.exitCode}` };
+		}
+		if (result.sessionFile && !args.evidence.subagentSessions.includes(result.sessionFile)) {
+			args.evidence.subagentSessions.push(result.sessionFile);
 		}
 		return { ok: true, summary: result.summary };
 	}
@@ -802,6 +972,8 @@ async function executeCheck(args: {
 	check: Check;
 	ctx: WorkflowContext;
 	checkId: string;
+	runId: string;
+	modelSelection?: StepModelSelection;
 	signal?: AbortSignal;
 }): Promise<GateResult> {
 	if (args.check.type === "deterministic") {
@@ -820,6 +992,9 @@ async function executeCheck(args: {
 		check: args.check,
 		ctx: args.ctx,
 		checkId: args.checkId,
+		runId: args.runId,
+		model: args.modelSelection?.model,
+		thinkingLevel: args.modelSelection?.thinkingLevel,
 		signal: args.signal,
 		timeoutMs: args.check.timeoutMs,
 	});
@@ -872,6 +1047,10 @@ function makeWorkflowContext(
 		outputs: { ...outputs },
 		...item,
 	};
+}
+
+function clearOutputsFromStep(workflow: WorkflowDefinition, outputs: Record<string, string>, targetIndex: number): void {
+	for (let index = targetIndex; index < workflow.steps.length; index += 1) delete outputs[workflow.steps[index]!.id];
 }
 
 function checkMatchesOutputFrom(check: Check, outputFrom: string, checkIndex: number): boolean {

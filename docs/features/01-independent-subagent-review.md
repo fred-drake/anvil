@@ -121,11 +121,10 @@ reasoning — that is the independence guarantee.
 - Add `review` and `reviewFallback` to `AGENT_CHECK_KEYS` (`src/validate.ts:36`).
 - In `validateAgentCheck` (`src/validate.ts:260`): validate `review` is
   `{ subagent: "cmux" | "herdr" | "auto" }` and `reviewFallback` is `"main"` | `"fail"`.
-- In `handleRun` / `handleResume` (`src/index.ts`), extend the existing
-  `workflowSubagentBackends` availability pre-check (`src/prompts.ts:233`) to also account
-  for review backends when `reviewFallback === "fail"`, so a workflow that structurally
-  cannot produce an independent verdict is reported before it starts (mirrors the current
-  `unavailableBackend` guard at `src/index.ts:183`).
+- Keep delegation availability preflight unchanged. Review backend availability is evaluated
+  when the check runs so `reviewFallback: "fail"` can produce a normal failed `GateResult`,
+  checkpoint the result, and apply the check's `onFail` policy. Only explicit
+  `reviewFallback: "main"` degrades to main-session grading.
 
 ## Implementation steps
 
@@ -141,7 +140,7 @@ reasoning — that is the independence guarantee.
 6. `src/engine.ts`: add `runReviewSubagent?` to `EngineHost`; thread review requests.
 7. `src/gates.ts`: branch `executeAgentCheck` on `check.review`.
 8. `src/index.ts`: implement `runReviewSubagent` on the host (reusing
-   `runHerdrSubagent` / `createCmuxSubagentRunner`); extend the availability pre-check.
+   `runHerdrSubagent` / `createCmuxSubagentRunner`); expose runtime backend availability to gates.
 9. Docs + skill + example.
 
 ## Testing
@@ -175,11 +174,20 @@ reasoning — that is the independence guarantee.
   subagents on non-trivial steps.
 - **Backend requirement.** Independent review needs cmux or herdr. Decide whether a
   future in-process "sub-session" backend (no multiplexer) is worth it; out of scope here.
-- **Reviewer write access.** Child sessions launch with `pi --approve`
-  (`buildSubagentLaunchCommand`, `src/subagent/runner.ts:38`), so the reviewer can
-  mutate the working tree. The reviewer prompt must instruct read-only inspection, and
-  the docs should be honest that this is a prompt-level convention, not a structural
-  guarantee like the context isolation is.
+- **Reviewer tool access.** Review sessions use the dedicated no-approval launcher,
+  disable discovered resources and shell/mutation tools, and override `read`, `grep`,
+  `find`, and `ls` with bounded implementations confined to the realpath-resolved
+  workflow cwd. Symlink escapes and secret-like paths are denied. The launcher also
+  creates an ephemeral home and Pi agent directory containing only the selected model
+  provider's auth/model configuration; unrelated provider and cloud credentials are
+  neither inherited nor copied, and the identity directory is removed after the child
+  exits. These controls structurally constrain reviewer-invoked tools, but they are not
+  a general-purpose OS sandbox for the Pi process.
+- **Verdict reason privacy.** Reviewer prose is untrusted and may quote secrets from an
+  artifact or provider response. Anvil validates the bounded `reason` field as part of
+  the sidecar protocol but replaces it with a fixed pass/fail reason before writing or
+  consuming the sidecar. Reviewer-controlled prose therefore cannot reach checkpoints,
+  UI, retry feedback, reports, or resume prompts.
 - **Timeout semantics.** `check.timeoutMs` defaults to 300_000 (`src/gates.ts:22`),
   tuned for a main-session verdict wait — but an independent review spawns a whole
   session that must start up and inspect the tree, closer in cost to a subagent step

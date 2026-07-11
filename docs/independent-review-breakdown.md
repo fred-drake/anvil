@@ -72,6 +72,8 @@ Tests:
 
 Goal: make the independent reviewer structurally constrained enough for untrusted criteria and observable output.
 
+Implementation note: the Phase 3 security review required the dedicated no-approval launcher, environment/startup isolation, realpath cwd confinement, symlink-escape denial, secret-like path filtering, and bounded custom read-only tools to land early. Phase 5 therefore retains those guarantees and owns additional defense-in-depth or OS-level sandboxing rather than deferring these trust-boundary basics.
+
 Scope:
 - Disable auto-loaded extensions, skills, themes, prompt templates, and context files for review sessions.
 - Use no approval / constrained tool access for review sessions.

@@ -2,7 +2,7 @@ import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { closeSurface, createSurface, herdrUnavailableMessage, isHerdrAvailable, pollForExit, readScreen, sendLongCommand, __testing__ } from "../src/subagent/herdr.ts";
+import { closeSurface, createSurface, herdrUnavailableMessage, isHerdrAvailable, pollForExit, readScreen, sendInput, sendLongCommand, __testing__ } from "../src/subagent/herdr.ts";
 
 const ORIGINAL_PATH = process.env.PATH;
 const ORIGINAL_HERDR_ENV = process.env.HERDR_ENV;
@@ -108,6 +108,21 @@ describe("herdr backend parity with cmux", () => {
 		expect(readFileSync(logFile, "utf8")).toContain("pane run 1-2 echo hello");
 	});
 
+	it("accepts and submits readiness-gated task input through Herdr", async () => {
+		const dir = tempDir();
+		const logFile = join(dir, "herdr.log");
+		installFakeHerdr(dir, logFile);
+		process.env.PATH = `${dir}:${ORIGINAL_PATH ?? ""}`;
+
+		await sendInput("1-2", "@/tmp/task.md");
+
+		expect(readFileSync(logFile, "utf8").trim().split("\n")).toEqual([
+			"pane send-text 1-2 @/tmp/task.md",
+			"pane send-keys 1-2 ENTER",
+			"pane send-keys 1-2 ENTER",
+		]);
+	});
+
 	it("reads and closes herdr panes with the expected CLI commands", async () => {
 		const dir = tempDir();
 		const logFile = join(dir, "herdr.log");
@@ -132,14 +147,28 @@ describe("herdr backend parity with cmux", () => {
 		});
 		process.env.PATH = `${dir}:${ORIGINAL_PATH ?? ""}`;
 
-		await expect(pollForExit("1-2", join(dir, "session.jsonl"), undefined, 1, 100)).resolves.toEqual({
+		await expect(pollForExit("1-2", join(dir, "session.jsonl"), undefined, 1, 1000)).resolves.toEqual({
 			reason: "sentinel",
 			exitCode: 7,
+			errorMessage: "Subagent exited with code 7; terminal output omitted.",
 		});
 
 		expect(readFileSync(logFile, "utf8").trim().split("\n")).toEqual([
 			"pane read 1-2 --source recent-unwrapped --lines 20",
 		]);
+	});
+
+	it("cancels a timed-out herdr pane-read subprocess", async () => {
+		const dir = tempDir();
+		const logFile = join(dir, "herdr.log");
+		const readPidFile = join(dir, "read.pid");
+		installFakeHerdr(dir, logFile, { hangingReadPidFile: readPidFile });
+		process.env.PATH = `${dir}:${ORIGINAL_PATH ?? ""}`;
+
+		await expect(pollForExit("1-2", join(dir, "session.jsonl"), undefined, 1, 250)).rejects.toThrow(/timed out/i);
+		await waitForFile(readPidFile);
+		const readPid = Number.parseInt(readFileSync(readPidFile, "utf8"), 10);
+		await waitForProcessExit(readPid);
 	});
 
 	it("treats Pi's missing-cwd startup prompt as a subagent error instead of waiting for timeout", async () => {
@@ -148,7 +177,7 @@ describe("herdr backend parity with cmux", () => {
 		installFakeHerdr(dir, logFile, { screenOutput: missingCwdPrompt() });
 		process.env.PATH = `${dir}:${ORIGINAL_PATH ?? ""}`;
 
-		await expect(pollForExit("1-2", join(dir, "session.jsonl"), undefined, 1, 50)).resolves.toMatchObject({
+		await expect(pollForExit("1-2", join(dir, "session.jsonl"), undefined, 1, 1000)).resolves.toMatchObject({
 			reason: "error",
 			exitCode: 1,
 			errorMessage: expect.stringContaining("cwd from session file does not exist"),
@@ -181,7 +210,11 @@ function missingCwdPrompt(): string {
 	].join("\n");
 }
 
-function installFakeHerdr(dir: string, logFile: string, options: { malformedCreate?: boolean; screenOutput?: string; splitOutput?: string } = {}): void {
+function installFakeHerdr(
+	dir: string,
+	logFile: string,
+	options: { malformedCreate?: boolean; screenOutput?: string; splitOutput?: string; hangingReadPidFile?: string } = {},
+): void {
 	writeFileSync(
 		join(dir, "herdr"),
 		`#!/bin/sh
@@ -196,13 +229,37 @@ if [ "$1 $2" = "tab create" ]; then
   exit 0
 fi
 if [ "$1 $2" = "pane read" ]; then
-  printf '%s\\n' ${shellQuote(options.screenOutput ?? "screen contents")}
+${options.hangingReadPidFile ? `  printf '%s' "$$" > ${shellQuote(options.hangingReadPidFile)}
+  while :; do :; done
+` : `  printf '%s\\n' ${shellQuote(options.screenOutput ?? "screen contents")}
   exit 0
-fi
+`}fi
 exit 0
 `,
 		{ mode: 0o755 },
 	);
+}
+
+async function waitForFile(path: string): Promise<void> {
+	for (let attempt = 0; attempt < 100; attempt++) {
+		if (existsSync(path)) return;
+		await new Promise((resolve) => setTimeout(resolve, 5));
+	}
+	throw new Error(`File was not created: ${path}`);
+}
+
+async function waitForProcessExit(pid: number): Promise<void> {
+	for (let attempt = 0; attempt < 100; attempt++) {
+		try {
+			process.kill(pid, 0);
+		} catch (error) {
+			if (error instanceof Error && "code" in error && error.code === "ESRCH") return;
+			throw error;
+		}
+		await new Promise((resolve) => setTimeout(resolve, 5));
+	}
+	process.kill(pid, "SIGKILL");
+	throw new Error(`Process was not cancelled: ${pid}`);
 }
 
 function shellQuote(value: string): string {

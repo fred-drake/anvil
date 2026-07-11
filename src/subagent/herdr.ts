@@ -27,8 +27,8 @@ export function herdrUnavailableMessage(): string {
 	return 'herdr is not available. Start pi inside herdr to run workflows with `delegation: { subagent: "herdr" }`.';
 }
 
-async function runHerdr(args: string[]): Promise<string> {
-	const { stdout } = await execFileAsync(process.env.HERDR_BIN_PATH ?? "herdr", args, { encoding: "utf8" });
+async function runHerdr(args: string[], signal?: AbortSignal): Promise<string> {
+	const { stdout } = await execFileAsync(process.env.HERDR_BIN_PATH ?? "herdr", args, { encoding: "utf8", signal });
 	return stdout;
 }
 
@@ -70,8 +70,12 @@ function inferWorkspaceId(paneId: string | undefined): string | undefined {
 	return match?.[1];
 }
 
-async function createSplitSurface(name: string): Promise<string> {
-	const stdout = await runHerdr(["pane", "split", "--current", "--direction", "right", "--no-focus"]);
+async function createSplitSurface(
+	name: string,
+	signal?: AbortSignal,
+	onCreated?: (surface: string) => void,
+): Promise<string> {
+	const stdout = await runHerdr(["pane", "split", "--current", "--direction", "right", "--no-focus"], signal);
 	const parsed = parseJsonOutput(stdout, "pane split");
 	const paneId = findStringPath(parsed, [
 		["result", "pane", "pane_id"],
@@ -80,7 +84,8 @@ async function createSplitSurface(name: string): Promise<string> {
 		["pane_id"],
 	]);
 	if (!paneId) throw new Error(`Unexpected herdr pane split output: missing pane_id in ${stdout.trim()}`);
-	await runHerdr(["pane", "rename", paneId, name]);
+	onCreated?.(paneId);
+	await runHerdr(["pane", "rename", paneId, name], signal);
 	subagentWorkspace =
 		findStringPath(parsed, [
 			["result", "workspace", "workspace_id"],
@@ -97,42 +102,68 @@ async function createSplitSurface(name: string): Promise<string> {
 	return paneId;
 }
 
-async function createTabSurface(name: string, workspace: string): Promise<string> {
+async function createTabSurface(
+	name: string,
+	workspace: string,
+	signal?: AbortSignal,
+	onCreated?: (surface: string) => void,
+): Promise<string> {
 	const args = ["tab", "create"];
 	if (workspace) args.push("--workspace", workspace);
 	args.push("--label", name, "--no-focus");
-	const stdout = await runHerdr(args);
-	return parseCreatedPane(stdout, "tab create", [
+	const stdout = await runHerdr(args, signal);
+	const paneId = parseCreatedPane(stdout, "tab create", [
 		["result", "root_pane", "pane_id"],
 		["result", "pane", "pane_id"],
 		["root_pane", "pane_id"],
 		["pane", "pane_id"],
 		["pane_id"],
 	]);
+	onCreated?.(paneId);
+	return paneId;
 }
 
 /**
  * Create a Herdr pane for a subagent. The first call creates a right split;
  * subsequent calls create labelled tabs in the same workspace.
  */
-export async function createSurface(name: string): Promise<string> {
+export async function createSurface(
+	name: string,
+	signal?: AbortSignal,
+	onCreated?: (surface: string) => void,
+): Promise<string> {
 	if (subagentWorkspace !== null) {
 		try {
-			return await createTabSurface(name, subagentWorkspace);
-		} catch {
+			return await createTabSurface(name, subagentWorkspace, signal, onCreated);
+		} catch (error) {
+			if (signal?.aborted) throw error;
 			subagentWorkspace = null;
 		}
 	}
-	return createSplitSurface(name);
+	return createSplitSurface(name, signal, onCreated);
 }
 
 /** Send the subagent launch command directly so the pane runs visible Pi, not a wrapper script. */
-export async function sendLongCommand(surface: string, command: string, _scriptPath: string): Promise<void> {
-	await runHerdr(["pane", "run", surface, command]);
+export async function sendLongCommand(surface: string, command: string, _scriptPath: string, signal?: AbortSignal): Promise<void> {
+	await runHerdr(["pane", "run", surface, command], signal);
 }
 
-export async function readScreen(surface: string, lines = 5): Promise<string> {
-	return runHerdr(["pane", "read", surface, "--source", "recent-unwrapped", "--lines", String(lines)]);
+/** Send text to the interactive Pi prompt after bootstrap readiness. */
+export async function sendInput(surface: string, input: string): Promise<void> {
+	await runHerdr(["pane", "send-text", surface, input]);
+	// Accepting an @file mention updates Pi's input state asynchronously. Sending
+	// both returns together can leave the second one in the old state.
+	await runHerdr(["pane", "send-keys", surface, "ENTER"]);
+	await delay(100);
+	await runHerdr(["pane", "send-keys", surface, "ENTER"]);
+}
+
+function delay(ms: number): Promise<void> {
+	return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+export async function readScreen(surface: string, lines = 5, signal?: AbortSignal): Promise<string> {
+	return runHerdr(["pane", "read", surface, "--source", "recent-unwrapped", "--lines", String(lines)], signal);
 }
 
 export function pollForExit(
@@ -143,12 +174,13 @@ export function pollForExit(
 	timeoutMs?: number,
 	sentinelNonce?: string,
 ): Promise<SubagentExit> {
-	const readForPoll = (pane: string, lines = 5) => readScreen(pane, Math.max(lines, 20));
+	const readForPoll = (pane: string, lines = 5, readSignal?: AbortSignal) =>
+		readScreen(pane, Math.max(lines, 20), readSignal);
 	return pollForExitWithReadScreen(readForPoll, surface, sessionFile, signal, intervalMs, timeoutMs, sentinelNonce);
 }
 
-export async function closeSurface(surface: string): Promise<void> {
-	await runHerdr(["pane", "close", surface]);
+export async function closeSurface(surface: string, signal?: AbortSignal): Promise<void> {
+	await runHerdr(["pane", "close", surface], signal);
 }
 
 function resetState(): void {

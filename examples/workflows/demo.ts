@@ -47,6 +47,7 @@ export default defineWorkflow({
 					id: "summary-quality",
 					name: "Useful summary",
 					prompt: "Pass if the summary clearly states what changed and any verification performed.",
+					review: { subagent: "auto" },
 				},
 			],
 		},

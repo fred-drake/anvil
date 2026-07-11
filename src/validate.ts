@@ -33,7 +33,8 @@ const STEP_KEYS = new Set([
 	"onFail",
 ]);
 const DETERMINISTIC_CHECK_KEYS = new Set(["type", "id", "name", "command", "cwd", "timeoutMs", "onFail"]);
-const AGENT_CHECK_KEYS = new Set(["type", "id", "name", "prompt", "agent", "timeoutMs", "onFail"]);
+const AGENT_CHECK_KEYS = new Set(["type", "id", "name", "prompt", "agent", "review", "reviewFallback", "timeoutMs", "onFail"]);
+const AGENT_REVIEW_KEYS = new Set(["subagent"]);
 const CHECK_KEYS = new Set([...DETERMINISTIC_CHECK_KEYS, ...AGENT_CHECK_KEYS]);
 const ON_FAIL_KEYS = new Set(["goto", "maxLoops", "onExhausted", "feedback"]);
 const RETRY_MODEL_SELECTION_KEYS = new Set(["retry", "model", "thinkingLevel"]);
@@ -337,8 +338,28 @@ function validateAgentCheck(check: Record<string, unknown>, path: string, errors
 	if (check.agent !== undefined && typeof check.agent !== "string") {
 		errors.push(`${path}.agent must be a string when provided`);
 	}
+	if (check.review !== undefined) validateAgentReview(check.review, `${path}.review`, errors);
+	if (check.reviewFallback !== undefined) {
+		if (check.review === undefined) {
+			errors.push(`${path}.reviewFallback requires review to be configured`);
+		}
+		if (check.reviewFallback !== "main" && check.reviewFallback !== "fail") {
+			errors.push(`${path}.reviewFallback must be "main" or "fail" when provided`);
+		}
+	}
 	if (check.timeoutMs !== undefined && !isPositiveInteger(check.timeoutMs)) {
 		errors.push(`${path}.timeoutMs must be a positive integer when provided`);
+	}
+}
+
+function validateAgentReview(review: unknown, path: string, errors: string[]): void {
+	if (!isRecord(review)) {
+		errors.push(`${path} must be an object when provided`);
+		return;
+	}
+	validateKnownKeys(review, path, AGENT_REVIEW_KEYS, errors);
+	if (review.subagent !== "cmux" && review.subagent !== "herdr" && review.subagent !== "auto") {
+		errors.push(`${path}.subagent must be "cmux", "herdr", or "auto"`);
 	}
 }
 

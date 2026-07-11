@@ -1,6 +1,7 @@
 import { shellEscape } from "./shell.ts";
 import type {
 	AgentCheck,
+	AgentReviewMode,
 	Templatable,
 	WorkflowContext,
 	WorkflowDefinition,
@@ -214,11 +215,30 @@ export async function buildAgentCheckInstruction(args: {
 
 	return `[anvil] Workflow "${args.workflow.name}" — evaluate step "${args.step.id}".\n\n` +
 		`Evaluation criteria:\n${criteria}${delegateLine}\n\n` +
-		`Call the \`anvil_verdict\` tool exactly once with:\n` +
-		`- check_id: ${args.checkId}\n` +
-		`- pass: true if the criteria are satisfied, otherwise false\n` +
-		`- reason: a concise explanation\n\n` +
-		`Do not report the verdict only in prose; the workflow engine only accepts the tool call.`;
+		`Submit exactly one \`anvil_verdict\` tool call: check_id \`${args.checkId}\`, pass true only when the criteria are satisfied, and a concise reason. A prose-only response does not count.`;
+}
+
+/**
+ * Builds the complete input for a fresh reviewer. This intentionally contains
+ * only review identity, criteria, workspace guidance, and the verdict contract.
+ */
+export async function buildIndependentReviewTask(args: {
+	workflow: WorkflowDefinition;
+	step: WorkflowStep;
+	check: AgentCheck;
+	ctx: WorkflowContext;
+	checkId: string;
+}): Promise<string> {
+	const criteria = await renderTemplatable(args.check.prompt, args.ctx);
+	return (
+		`[anvil] Independent review for workflow "${args.workflow.name}", step "${args.step.id}".\n\n` +
+		`Evaluation criteria:\n${criteria}\n\n` +
+		`Inspect artifacts directly with Anvil's read-only filesystem tools, which are confined to the realpath-resolved ` +
+		`workflow cwd and deny secret-like paths and symlink escapes. Do not modify the workspace, trust executor-authored ` +
+		`claims without verification, or attempt to inspect unrelated paths.\n\n` +
+		`Submit exactly one \`anvil_verdict\` tool call with check_id \`${args.checkId}\`, ` +
+		`pass true only when all criteria are satisfied, and a concise reason. A prose-only response does not count.`
+	);
 }
 
 export function buildVerdictReprompt(checkId: string): string {
@@ -262,6 +282,10 @@ export function detectAutoSubagentBackend(): WorkflowSubagentBackend | undefined
 	if (process.env.HERDR_ENV === "1") return "herdr";
 	if (process.env.CMUX_SHELL_INTEGRATION === "1") return "cmux";
 	return undefined;
+}
+
+export function resolveReviewSubagentBackend(review: AgentReviewMode): WorkflowSubagentBackend | undefined {
+	return review.subagent === "auto" ? detectAutoSubagentBackend() : review.subagent;
 }
 
 export function workflowSubagentBackends(workflow: WorkflowDefinition): WorkflowSubagentBackend[] {

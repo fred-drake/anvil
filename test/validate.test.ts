@@ -59,6 +59,49 @@ describe("validateWorkflow", () => {
 		expect(validateWorkflow(workflow)).toEqual({ ok: true, workflow });
 	});
 
+	it("accepts an independently reviewed agent check and its explicit fallback", () => {
+		const workflow = {
+			name: "independent-review",
+			steps: [
+				{
+					id: "review",
+					prompt: "review",
+					checks: [{ type: "agent", prompt: "criteria", review: { subagent: "cmux" }, reviewFallback: "main" }],
+				},
+			],
+		};
+
+		expect(validateWorkflow(workflow)).toEqual({ ok: true, workflow });
+	});
+
+	it("rejects unknown, malformed, and unsupported independent-review settings", () => {
+		const result = validateWorkflow({
+			name: "bad-independent-review",
+			steps: [
+				{
+					id: "review",
+					prompt: "review",
+					checks: [
+						{ type: "agent", prompt: "criteria", review: { subagent: "unknown", extra: true }, reviewFallback: "silent" },
+						{ type: "agent", prompt: "criteria", review: "cmux" },
+						{ type: "agent", prompt: "criteria", unexpectedReviewOption: true },
+						{ type: "agent", prompt: "criteria", reviewFallback: "main" },
+					],
+				},
+			],
+		});
+
+		expect(result.ok).toBe(false);
+		if (!result.ok) {
+			expect(result.errors).toContain('workflow.steps[0].checks[0].review.subagent must be "cmux", "herdr", or "auto"');
+			expect(result.errors).toContain('workflow.steps[0].checks[0].review.extra is not recognized');
+			expect(result.errors).toContain('workflow.steps[0].checks[0].reviewFallback must be "main" or "fail" when provided');
+			expect(result.errors).toContain("workflow.steps[0].checks[1].review must be an object when provided");
+			expect(result.errors).toContain("workflow.steps[0].checks[2].unexpectedReviewOption is not recognized");
+			expect(result.errors).toContain("workflow.steps[0].checks[3].reviewFallback requires review to be configured");
+		}
+	});
+
 	it("rejects dangling goto targets", () => {
 		const result = validateWorkflow({
 			name: "dangling",

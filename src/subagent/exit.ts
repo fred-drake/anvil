@@ -1,4 +1,5 @@
-import { existsSync, readFileSync, rmSync } from "node:fs";
+import { constants } from "node:fs";
+import { open, rm } from "node:fs/promises";
 import { AnvilAbortError, throwIfAborted } from "../errors.ts";
 
 export const SUBAGENT_SENTINEL_PREFIX = "__ANVIL_SUBAGENT_DONE_";
@@ -7,6 +8,7 @@ const MISSING_CWD_PROMPT_RE = /^cwd from session file does not exist[\s\S]*?cont
 const CONTINUE_CANCEL_PROMPT_RE = /^continue in current cwd[\s\S]*?\n\s*(?:→\s*)?Continue\b[\s\S]*?\n\s*Cancel\b/i;
 export const DEFAULT_SUBAGENT_TIMEOUT_MS = 1_800_000;
 export const DEFAULT_READ_SCREEN_FAILURE_LIMIT = 2;
+export const SUBAGENT_PROVIDER_ERROR_MESSAGE = "Subagent exited with stopReason=error; provider details omitted.";
 
 export interface SubagentExit {
 	reason: "done" | "error" | "sentinel";
@@ -14,29 +16,42 @@ export interface SubagentExit {
 	errorMessage?: string;
 }
 
-export type ReadSubagentScreen = (surface: string, lines?: number) => Promise<string>;
+export type ReadSubagentScreen = (surface: string, lines?: number, signal?: AbortSignal) => Promise<string>;
 
 export function interpretExitSidecar(data: unknown): SubagentExit {
-	const record = (typeof data === "object" && data !== null ? data : {}) as { type?: unknown; errorMessage?: unknown };
+	const record = (typeof data === "object" && data !== null ? data : {}) as { type?: unknown };
 	if (record.type === "error") {
-		const errorMessage =
-			typeof record.errorMessage === "string" && record.errorMessage.trim()
-				? record.errorMessage
-				: "Subagent exited with stopReason=error.";
-		return { reason: "error", exitCode: 1, errorMessage };
+		return {
+			reason: "error",
+			exitCode: 1,
+			errorMessage: SUBAGENT_PROVIDER_ERROR_MESSAGE,
+		};
 	}
 	return { reason: "done", exitCode: 0 };
 }
 
-function consumeExitSidecar(sessionFile: string): SubagentExit | undefined {
+const MAX_EXIT_SIDECAR_BYTES = 4096;
+
+async function consumeExitSidecar(sessionFile: string): Promise<SubagentExit | undefined> {
+	const exitFile = `${sessionFile}.exit`;
+	let handle;
 	try {
-		const exitFile = `${sessionFile}.exit`;
-		if (!existsSync(exitFile)) return undefined;
-		const data = JSON.parse(readFileSync(exitFile, "utf8"));
-		rmSync(exitFile, { force: true });
+		handle = await open(exitFile, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+	} catch {
+		return undefined;
+	}
+	try {
+		if (!(await handle.stat()).isFile()) return undefined;
+		const buffer = Buffer.alloc(MAX_EXIT_SIDECAR_BYTES + 1);
+		const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+		if (bytesRead > MAX_EXIT_SIDECAR_BYTES) return undefined;
+		const data = JSON.parse(buffer.toString("utf8", 0, bytesRead));
+		await rm(exitFile, { force: true });
 		return interpretExitSidecar(data);
 	} catch {
 		return undefined;
+	} finally {
+		await handle.close();
 	}
 }
 
@@ -62,32 +77,82 @@ export async function pollForExitWithReadScreen(
 		throwIfAborted(signal);
 		if (Date.now() >= deadline) throw new Error(`Subagent timed out after ${timeoutMs}ms`);
 
-		const sidecar = consumeExitSidecar(sessionFile);
+		const sidecar = await consumeExitSidecar(sessionFile);
 		if (sidecar) return sidecar;
 
 		try {
-			const screen = await readScreen(surface, 5);
+			const screen = await readScreenBeforeDeadline(readScreen, surface, deadline, timeoutMs, signal);
 			consecutiveReadFailures = 0;
 			const sentinelExitCode = detectTerminalSentinel(screen, sentinelNonce);
-			if (sentinelExitCode !== undefined) return { reason: "sentinel", exitCode: sentinelExitCode };
+			if (sentinelExitCode !== undefined) {
+				return sentinelExitCode === 0
+					? { reason: "sentinel", exitCode: 0 }
+					: {
+						reason: "sentinel",
+						exitCode: sentinelExitCode,
+						errorMessage: `Subagent exited with code ${sentinelExitCode}; terminal output omitted.`,
+					};
+			}
 			const blockingPrompt = detectBlockingPiStartupPrompt(screen);
 			if (blockingPrompt) return { reason: "error", exitCode: 1, errorMessage: blockingPrompt };
-		} catch {
+		} catch (error) {
+			if (error instanceof SubagentReadTimeoutError || error instanceof AnvilAbortError) throw error;
 			// Surface may already be gone — give the child a short grace period to write the sidecar,
-			// then fail fast instead of waiting for the full subagent timeout. Classify a completed
-			// read-failure streak before timeout so slow failed reads do not mask a closed surface.
+			// then fail fast instead of waiting for the full subagent timeout.
 			consecutiveReadFailures += 1;
+			if (Date.now() >= deadline) throw new Error(`Subagent timed out after ${timeoutMs}ms`);
 			if (consecutiveReadFailures >= DEFAULT_READ_SCREEN_FAILURE_LIMIT) {
-				const lateSidecar = consumeExitSidecar(sessionFile);
+				const lateSidecar = await consumeExitSidecar(sessionFile);
 				if (lateSidecar) return lateSidecar;
 				throw new Error(`Subagent surface closed before completion: ${surface}`);
 			}
-			if (Date.now() >= deadline) throw new Error(`Subagent timed out after ${timeoutMs}ms`);
-			const lateSidecar = consumeExitSidecar(sessionFile);
+			const lateSidecar = await consumeExitSidecar(sessionFile);
 			if (lateSidecar) return lateSidecar;
 		}
 
 		await sleep(Math.min(intervalMs, Math.max(0, deadline - Date.now())), signal);
+	}
+}
+
+class SubagentReadTimeoutError extends Error {
+	constructor(timeoutMs: number) {
+		super(`Subagent timed out after ${timeoutMs}ms`);
+	}
+}
+
+async function readScreenBeforeDeadline(
+	readScreen: ReadSubagentScreen,
+	surface: string,
+	deadline: number,
+	timeoutMs: number,
+	signal?: AbortSignal,
+): Promise<string> {
+	throwIfAborted(signal);
+	const remainingMs = deadline - Date.now();
+	if (remainingMs <= 0) throw new SubagentReadTimeoutError(timeoutMs);
+
+	const readController = new AbortController();
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	let onAbort: (() => void) | undefined;
+	const guard = new Promise<never>((_resolve, reject) => {
+		timer = setTimeout(() => {
+			readController.abort();
+			reject(new SubagentReadTimeoutError(timeoutMs));
+		}, remainingMs);
+		onAbort = () => {
+			readController.abort();
+			reject(new AnvilAbortError());
+		};
+		signal?.addEventListener("abort", onAbort, { once: true });
+	});
+	try {
+		return await Promise.race([readScreen(surface, 5, readController.signal), guard]);
+	} finally {
+		if (timer) clearTimeout(timer);
+		if (onAbort) signal?.removeEventListener("abort", onAbort);
+		// Ensure an in-flight backend subprocess is terminated when another race
+		// participant wins or the caller stops polling.
+		readController.abort();
 	}
 }
 

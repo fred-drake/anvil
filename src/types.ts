@@ -58,6 +58,11 @@ export type OnFailPolicy =
 /** Terminal-multiplexer backend Anvil can spawn subagent sessions in. */
 export type WorkflowSubagentBackend = "cmux" | "herdr";
 
+/** Configuration for a fresh, independent agent-check reviewer. */
+export type AgentReviewMode =
+	| { subagent: WorkflowSubagentBackend }
+	| { subagent: "auto" };
+
 export type WorkflowDelegation =
 	| "auto"
 	| "none"
@@ -90,7 +95,11 @@ export interface AgentCheck {
 	prompt: Templatable;
 	/** Subagent to delegate evaluation to; omit for main-agent evaluation. */
 	agent?: string;
-	/** Defaults to 300_000. */
+	/** Run this check in a fresh review-only subagent instead of self-grading in the main session. */
+	review?: AgentReviewMode;
+	/** Behavior when no requested review backend is available. Defaults to "fail". */
+	reviewFallback?: "main" | "fail";
+	/** Defaults to 300_000 for main-session grading and 1_800_000 for independent review. */
 	timeoutMs?: number;
 	onFail?: OnFailPolicy;
 }

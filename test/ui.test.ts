@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { RunSummary, StepRunState } from "../src/engine.ts";
-import { formatStatus, formatStepWidget, renderSummaryMarkdown } from "../src/ui.ts";
+import type { RunReport } from "../src/history.ts";
+import { formatStatus, formatStepWidget, renderRunHistoryTable, renderRunReport, renderSummaryMarkdown } from "../src/ui.ts";
 
 describe("formatStatus", () => {
 	it("formats lifecycle and step/check status text", () => {
@@ -74,6 +75,15 @@ describe("formatStepWidget", () => {
 		]);
 	});
 
+	it("prepends a failure reason above the persistent step list", () => {
+		const steps: StepRunState[] = [{ id: "implement", status: "failed", loops: 0, checks: [] }];
+
+		expect(formatStepWidget(steps, undefined, undefined, "reviewer: tests are missing")).toEqual([
+			"✖ Step failed: reviewer: tests are missing",
+			"✖ implement",
+		]);
+	});
+
 	it("appends a forEach item counter to the current running step only", () => {
 		const steps: StepRunState[] = [
 			{ id: "before", status: "passed", loops: 0, checks: [] },
@@ -97,6 +107,10 @@ describe("renderSummaryMarkdown", () => {
 			startedAt: "start",
 			endedAt: "end",
 			loopCounts: {},
+			evidence: {
+				workspaceEnd: { head: "abc", fingerprint: "123456789012345", changedFiles: ["src/ui.ts"], changedFileCount: 1 },
+				subagentSessions: ["/tmp/review.jsonl"],
+			},
 			failureReason: "bad | reason",
 			steps: [
 				{
@@ -104,8 +118,8 @@ describe("renderSummaryMarkdown", () => {
 					status: "failed",
 					loops: 2,
 					checks: [
-						{ id: "ok", name: "ok|check", pass: true, reason: "fine" },
-						{ id: "bad", name: "bad", pass: false, reason: "line1\nline2" },
+						{ id: "ok", name: "ok|check", type: "agent", pass: true, reason: "fine" },
+						{ id: "bad", name: "bad", type: "agent", pass: false, reason: "line1\nline2" },
 					],
 				},
 			],
@@ -116,7 +130,45 @@ describe("renderSummaryMarkdown", () => {
 		expect(failed).toContain("`one\\|two`");
 		expect(failed).toContain("✔ ok\\|check<br>✖ bad — line1 line2");
 		expect(failed).toContain("Failure: bad | reason");
+		expect(failed).toContain("Workspace files changed (may include pre-existing changes):\n- `src/ui.ts`");
+		expect(failed).toContain("Detailed report: `/anvil report run`");
 		expect(renderSummaryMarkdown({ ...base, state: "succeeded", failureReason: undefined })).toContain("✅");
 		expect(renderSummaryMarkdown({ ...base, state: "aborted", failureReason: undefined })).toContain("⏹");
+	});
+});
+
+describe("run report renderers", () => {
+	it("renders a concise history and detailed evidence report", () => {
+		const report: RunReport = {
+			runId: "run-1",
+			workflowName: "forge",
+			input: "feature",
+			startedAt: "2026-07-10T10:00:00.000Z",
+			endedAt: "2026-07-10T10:00:02.000Z",
+			durationMs: 2000,
+			finalState: "succeeded",
+			stepsStarted: 1,
+			lastStepIndex: 0,
+			checksRun: 1,
+			checksFailed: 0,
+			loopTotals: {},
+			subagentSessions: ["/tmp/review.jsonl"],
+			checkpoints: [
+				{
+					runId: "run-1", workflowName: "forge", input: "feature", phase: "check_result", timestamp: "2026-07-10T10:00:01.000Z",
+					stepId: "verify", checkId: "check", checkType: "deterministic", command: "npm test", timeoutMs: 300000, pass: true, reason: "command exited 0",
+				},
+				{
+					runId: "run-1", workflowName: "forge", input: "feature", phase: "run_end", timestamp: "2026-07-10T10:00:02.000Z", finalState: "succeeded",
+					workspaceState: { head: "abc", fingerprint: "123456789012345", changedFiles: ["src/report.ts"], changedFileCount: 1 },
+				},
+			],
+		};
+
+		expect(renderRunHistoryTable([report])).toContain("`run-1`");
+		const rendered = renderRunReport(report);
+		expect(rendered).toContain("`npm test`");
+		expect(rendered).toContain("- `src/report.ts`");
+		expect(rendered).toContain("- `/tmp/review.jsonl`");
 	});
 });

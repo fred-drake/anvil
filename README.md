@@ -37,11 +37,17 @@ Workflows live in:
 /anvil list
 /anvil validate <name>
 /anvil run <name> <free-form task input>
+/anvil history [name]
+/anvil report [run-id-prefix]
 /anvil resume <step> [retry-number]
 /anvil abort
 ```
 
 Use `/anvil list` to see available workflows, `/anvil validate` to check that one is ready, and `/anvil run` to start a workflow with whatever task input you want to give it.
+
+Use `/anvil history [name]` to list recent runs in the current Pi session, optionally for one workflow. Use `/anvil report [run-id-prefix]` for the latest run or a detailed persisted artifact for one run: check commands and outcomes, timeouts, Git workspace snapshot, changed files, and subagent session paths. The final workflow summary links to the same report. Run reports are session-scoped because they read Anvil's append-only checkpoint entries.
+
+Anvil captures a Git snapshot before the run, after every successful deterministic check, and after each agent approval. If an agent approval reports pass after the workspace changed since the most recent successful deterministic verification, Anvil fails that approval as stale. This prevents a review from approving code that is different from what was verified; workflows should rerun deterministic verification after intentional changes.
 
 Use `/anvil resume` after a failed or aborted run to see a numbered step map, for example `1. Plan`, `2. Implement`, `3. Verify`. The map includes the prior run timestamp and failure reason, and marks the last started step as a suggested resume point when Anvil can infer one. Then run `/anvil resume <step> [retry-number]` with the one-based step number to restart from that workflow step using the original task input. Omit `retry-number` when no retry count is seeded (so `{loop}` starts at 0 for the resumed step); normal workflow retry policies still apply.
 
@@ -49,13 +55,27 @@ Use `/anvil resume` after a failed or aborted run to see a numbered step map, fo
 
 Each workflow step can decide how much help it wants from another agent. By default, `delegation: "auto"` auto-detects your mux environment, using `HERDR_ENV=1` for herdr first, then `CMUX_SHELL_INTEGRATION=1` for cmux. Current supported environments are cmux and herdr. You can also force one of these two environments with `delegation: { subagent: "cmux" }` or `delegation: { subagent: "herdr" }`. Or if you prefer to use a specific skill that you've crafted that handles subagents, you can tell it to use that instead. Lastly, you can explicitly tell it to do not use subagents.
 
-Mux subagents launch a normal interactive `pi` session directly in the spawned pane or tab, so you can watch the step work live instead of staring at a shell-script wrapper until it finishes.
+Mux subagents launch a normal interactive `pi` session directly in the spawned pane or tab, so you can watch the step work live instead of staring at a shell-script wrapper until it finishes. Anvil retries provider transport failures (such as a dropped model connection) and fails the step after three such failures within five minutes; ordinary non-zero child exits still fail immediately.
 
 ⚠️ It is advised to use subagents on any step that is non-trivial, because you run the risk of context pollution.
 
 ⚠️ While skills are supported, be aware that unlike the other options you are at the mercy of the model to get it right. Non-deterministic skills run the risk of it doing the right thing 95% of the time, then misbehaving in that one time out of twenty.
 
-Warnings aside, this is ultimately _your workflow, your rules_. Checks still guard the workflow either way: deterministic checks run commands, while agent-judged checks ask for a clear pass/fail verdict before the workflow moves on. Main-session agent-judged checks are self-graded by the same main agent that performed or narrated the step, so they are not an independent review and cannot structurally prevent a rubber-stamp `pass: true`; use declarative subagent steps or a future fresh-subagent review pattern when independence matters.
+Warnings aside, this is ultimately _your workflow, your rules_. Checks still guard the workflow either way: deterministic checks run commands, while agent-judged checks ask for a clear pass/fail verdict before the workflow moves on. Main-session agent-judged checks are self-graded by the same main agent that performed or narrated the step, so they are not an independent review and cannot structurally prevent a rubber-stamp `pass: true`.
+
+For criteria that require independence, set `review: { subagent: "auto" }` (or force `"cmux"` / `"herdr"`) on an agent check. This independent review does not fall back to the main session unless explicitly configured. Anvil starts a fresh review-only session with only the criteria, workflow/step identity, workspace guidance, and the structured verdict contract; it does not pass the executor conversation. `reviewFallback` controls an unavailable backend: it defaults to `"fail"`, while explicit `reviewFallback: "main"` permits self-grading as a degraded fallback. The check's `timeoutMs` covers the full review launch and execution; it defaults to 1,800,000ms (30 minutes) for independent reviews, rather than the 300,000ms main-session verdict default.
+
+```ts
+{
+	type: "agent",
+	id: "quality",
+	prompt: "Pass only if the implemented artifacts satisfy the acceptance criteria.",
+	review: { subagent: "auto" },
+	reviewFallback: "fail", // optional; this is the default
+}
+```
+
+Independent reviewers launch without approval and expose only bounded, read-only workspace inspection through Anvil's `read`, `grep`, `find`, and `ls` implementations plus the verdict tool; they do not receive shell, mutation, or unrestricted built-in filesystem tools. Reviewer reads are confined to the realpath-resolved workflow cwd, skip traversal symlinks, deny symlink escapes, and block secret-like paths such as `.env` / `.envrc`, credential/key files, and `.ssh` / `.aws` / `.git` directories. User/project extensions and ambient shell startup hooks are disabled. Each review runs with an isolated home and Pi agent directory containing only the selected model provider's auth/model configuration; provider and cloud credentials for unrelated models are neither inherited nor copied, while the remaining runtime environment is narrowly allowlisted for Pi. These controls constrain reviewer-invoked filesystem access; they are not a general-purpose OS sandbox for the Pi process. When a required review backend is unavailable, Anvil records a failed gate result and applies the check's normal `onFail` policy; launch failures other than backend unavailability, timeouts, and verdict-transport failures stop the workflow as infrastructure errors rather than invoking `onFail`. Review tool output and transport diagnostics are bounded, and diagnostics never copy raw child/provider output. Recursive `find`/`grep` operations fail explicitly if secure traversal cannot complete within its directory-entry/subprocess limits rather than returning silent partial results. Because reviewer-written reasons can quote arbitrary artifact or provider secrets, Anvil replaces that prose with a fixed pass/fail reason before sidecar persistence or use in checkpoints, UI, retry feedback, reports, and resume prompts.
 
 When a failing check uses `onFail: "continue"`, Anvil continues to the next workflow step immediately and skips any remaining checks on the current step.
 

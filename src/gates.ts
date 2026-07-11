@@ -1,7 +1,22 @@
 import type { EngineHost } from "./engine.ts";
-import { abortError } from "./errors.ts";
-import { buildAgentCheckInstruction, buildVerdictReprompt, renderCommandTemplatable } from "./prompts.ts";
-import type { AgentCheck, Check, DeterministicCheck, WorkflowContext, WorkflowDefinition, WorkflowStep } from "./types.ts";
+import { abortError, isReviewSubagentUnavailableError } from "./errors.ts";
+import { independentReviewReason } from "./subagent/child.ts";
+import {
+	buildAgentCheckInstruction,
+	buildIndependentReviewTask,
+	buildVerdictReprompt,
+	renderCommandTemplatable,
+	resolveReviewSubagentBackend,
+} from "./prompts.ts";
+import type {
+	AgentCheck,
+	Check,
+	DeterministicCheck,
+	WorkflowContext,
+	WorkflowDefinition,
+	WorkflowStep,
+	WorkflowThinkingLevel,
+} from "./types.ts";
 
 export interface Verdict {
 	checkId: string;
@@ -15,11 +30,17 @@ export interface GateResult {
 	name: string;
 	pass: boolean;
 	reason: string;
+	/** Rendered command for deterministic evidence records. */
+	command?: string;
+	timeoutMs?: number;
 	output?: string;
+	/** Review child session used as evidence for independently reviewed checks. */
+	sessionFile?: string;
 }
 
 export const DEFAULT_DETERMINISTIC_TIMEOUT_MS = 300_000;
 export const DEFAULT_AGENT_VERDICT_TIMEOUT_MS = 300_000;
+export const DEFAULT_INDEPENDENT_REVIEW_TIMEOUT_MS = 1_800_000;
 
 export class VerdictBus {
 	private waiters = new Map<
@@ -111,6 +132,8 @@ export async function executeDeterministicCheck(args: {
 			: result.killed
 				? `command timed out after ${timeoutMs}ms${output ? `: ${tail(output, 2000)}` : ""}`
 				: tail(output || `command exited ${result.code}`, 2000),
+		command,
+		timeoutMs,
 		output,
 	};
 }
@@ -124,7 +147,58 @@ export async function executeAgentCheck(args: {
 	checkId: string;
 	signal?: AbortSignal;
 	timeoutMs?: number;
+	runId?: string;
+	model?: string;
+	thinkingLevel?: WorkflowThinkingLevel;
 }): Promise<GateResult> {
+	if (args.check.review) {
+		const backend = resolveReviewSubagentBackend(args.check.review);
+		const available = backend !== undefined &&
+			args.host.runReviewSubagent !== undefined &&
+			(args.host.isReviewSubagentAvailable?.(backend) ?? true);
+		if (!available) {
+			if (args.check.reviewFallback !== "main") return unavailableReviewGateResult(args.check, args.checkId);
+		} else {
+			const task = await buildIndependentReviewTask({
+				workflow: args.workflow,
+				step: args.step,
+				check: args.check,
+				ctx: args.ctx,
+				checkId: args.checkId,
+			});
+			try {
+				const result = await args.host.runReviewSubagent!({
+					runId: args.runId ?? args.checkId.split(":", 1)[0]!,
+					workflowName: args.workflow.name,
+					stepId: args.step.id,
+					checkId: args.checkId,
+					backend,
+					task,
+					cwd: args.ctx.cwd,
+					model: args.model,
+					thinkingLevel: args.thinkingLevel,
+					timeoutMs: args.check.timeoutMs ?? DEFAULT_INDEPENDENT_REVIEW_TIMEOUT_MS,
+				}, args.signal);
+				return {
+					...verdictToGateResult(
+						args.check,
+						args.checkId,
+						{
+							checkId: args.checkId,
+							pass: result.pass,
+							reason: independentReviewReason(result.pass),
+						},
+						args.check.timeoutMs ?? DEFAULT_INDEPENDENT_REVIEW_TIMEOUT_MS,
+					),
+					sessionFile: result.sessionFile,
+				};
+			} catch (error) {
+				if (!isReviewSubagentUnavailableError(error)) throw error;
+				if (args.check.reviewFallback !== "main") return unavailableReviewGateResult(args.check, args.checkId);
+			}
+		}
+	}
+
 	const firstWait = startVerdictWait(args);
 	const instruction = await buildAgentCheckInstruction({
 		workflow: args.workflow,
@@ -175,7 +249,7 @@ function startVerdictWait(args: {
 	const promise = args.host
 		.awaitVerdict(args.checkId, args.timeoutMs ?? DEFAULT_AGENT_VERDICT_TIMEOUT_MS, signal)
 		.catch((error) => {
-			if (canceled || controller.signal.aborted) return undefined;
+			if (canceled) return undefined;
 			throw error;
 		});
 	return {
@@ -194,13 +268,30 @@ function combineAbortSignals(external: AbortSignal | undefined, internal: AbortS
 	return AbortSignal.any([external, internal]);
 }
 
-function verdictToGateResult(check: AgentCheck, checkId: string, verdict: Verdict): GateResult {
+function unavailableReviewGateResult(check: AgentCheck, checkId: string): GateResult {
+	return {
+		check,
+		checkId,
+		name: checkDisplayName(check, checkId),
+		pass: false,
+		reason: `Independent review backend "${check.review!.subagent}" is unavailable.`,
+		timeoutMs: check.timeoutMs ?? DEFAULT_INDEPENDENT_REVIEW_TIMEOUT_MS,
+	};
+}
+
+function verdictToGateResult(
+	check: AgentCheck,
+	checkId: string,
+	verdict: Verdict,
+	timeoutMs = check.timeoutMs ?? DEFAULT_AGENT_VERDICT_TIMEOUT_MS,
+): GateResult {
 	return {
 		check,
 		checkId,
 		name: checkDisplayName(check, checkId),
 		pass: verdict.pass,
 		reason: verdict.reason,
+		timeoutMs,
 	};
 }
 

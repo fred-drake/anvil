@@ -1,17 +1,25 @@
+import { createHash } from "node:crypto";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Type, type Api, type Model } from "@earendil-works/pi-ai";
 import { defineTool, type ExtensionAPI, type ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { discoverWorkflows, type DiscoveredWorkflow } from "./discovery.ts";
-import { type AnvilCheckpoint, type EngineHost, newRunId, runWorkflow, type StepModelSelection } from "./engine.ts";
+import { type EngineHost, newRunId, runWorkflow, type StepModelSelection, type WorkspaceState } from "./engine.ts";
 import { AnvilAbortError } from "./errors.ts";
+import { buildRunHistory, buildRunReports, toAnvilCheckpoint } from "./history.ts";
 import { VerdictBus } from "./gates.ts";
 import { buildSubagentResultMessage, workflowSubagentBackends } from "./prompts.ts";
 import { cmuxUnavailableMessage, isCmuxAvailable } from "./subagent/cmux.ts";
+import anvilSubagentChild from "./subagent/child.ts";
 import { herdrUnavailableMessage, isHerdrAvailable } from "./subagent/herdr.ts";
-import { createCmuxSubagentRunner, runHerdrSubagent } from "./subagent/runner.ts";
+import {
+	createCmuxReviewSubagentRunner,
+	createCmuxSubagentRunner,
+	runHerdrReviewSubagent,
+	runHerdrSubagent,
+} from "./subagent/runner.ts";
 import type { WorkflowDefinition, WorkflowSubagentBackend } from "./types.ts";
-import { renderSummaryMarkdown } from "./ui.ts";
+import { renderRunHistoryTable, renderRunReport, renderSummaryMarkdown } from "./ui.ts";
 
 const baseDir = dirname(fileURLToPath(import.meta.url));
 const builderSkillPath = join(baseDir, "..", "skills", "anvil-workflow-builder", "SKILL.md");
@@ -75,11 +83,20 @@ type TurnWaiter = {
 /* c8 ignore start -- Pi extension registration and command/UI wiring are exercised through integration-style tests; pure internals remain covered directly. */
 /* v8 ignore start -- Pi extension registration and command/UI wiring are exercised through integration-style tests; pure internals remain covered directly. */
 export default function piAnvil(pi: ExtensionAPI) {
+	// The launcher explicitly loads this entrypoint for source/dev reliability.
+	// A global registration guard inside child.ts makes simultaneous discovery
+	// idempotent while leaving every other user extension available.
+	if (process.env.PI_ANVIL_SUBAGENT_SESSION) {
+		anvilSubagentChild(pi);
+		return;
+	}
+
 	let activeRun: ActiveRun | undefined;
 	const verdictBus = new VerdictBus();
 	const outputBus = new OutputBus();
 	const turnWaiters = new Set<TurnWaiter>();
 	const runCmuxSubagent = createCmuxSubagentRunner();
+	const runCmuxReviewSubagent = createCmuxReviewSubagentRunner();
 
 	pi.registerTool(createAnvilVerdictTool(verdictBus));
 	pi.registerTool(createAnvilOutputTool(outputBus));
@@ -122,6 +139,12 @@ export default function piAnvil(pi: ExtensionAPI) {
 					case "validate":
 						await handleValidate(pi, ctx, rest);
 						return;
+					case "history":
+						await handleHistory(pi, ctx, rest);
+						return;
+					case "report":
+						await handleReport(pi, ctx, rest);
+						return;
 					case "abort":
 						if (!activeRun) {
 							ctx.ui.notify("No Anvil workflow is running.", "info");
@@ -142,7 +165,7 @@ export default function piAnvil(pi: ExtensionAPI) {
 						});
 						return;
 					default:
-						ctx.ui.notify("Usage: /anvil <run|list|validate|abort|resume> ...", "warning");
+						ctx.ui.notify("Usage: /anvil <run|list|validate|history|report|abort|resume> ...", "warning");
 				}
 			} catch (error) {
 				ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
@@ -183,19 +206,21 @@ export default function piAnvil(pi: ExtensionAPI) {
 				return;
 			}
 
-			const unavailableBackend = workflowSubagentBackends(workflow.workflow).find((backend) => !isSubagentBackendAvailable(backend));
-			if (unavailableBackend) {
-				ctx.ui.notify(
-					`Workflow "${workflow.workflow.name}" declares ${unavailableBackend} subagent delegation. ${subagentUnavailableMessage(unavailableBackend)}`,
-					"error",
-				);
-				return;
-			}
+			if (!preflightSubagentBackends(workflow.workflow, ctx)) return;
 
 			if (!ctx.isIdle()) await ctx.waitForIdle();
 			if (controller.signal.aborted) return;
 
-			const host = createEngineHost(piApi, ctx, controller, verdictBus, outputBus, turnWaiters, runCmuxSubagent);
+			const host = createEngineHost(
+				piApi,
+				ctx,
+				controller,
+				verdictBus,
+				outputBus,
+				turnWaiters,
+				runCmuxSubagent,
+				runCmuxReviewSubagent,
+			);
 			launched = true;
 			ctx.ui.notify(`Started Anvil workflow "${workflow.workflow.name}" (${runId}).`, "info");
 
@@ -272,19 +297,21 @@ export default function piAnvil(pi: ExtensionAPI) {
 				return;
 			}
 
-			const unavailableBackend = workflowSubagentBackends(workflow.workflow).find((backend) => !isSubagentBackendAvailable(backend));
-			if (unavailableBackend) {
-				ctx.ui.notify(
-					`Workflow "${workflow.workflow.name}" declares ${unavailableBackend} subagent delegation. ${subagentUnavailableMessage(unavailableBackend)}`,
-					"error",
-				);
-				return;
-			}
+			if (!preflightSubagentBackends(workflow.workflow, ctx)) return;
 
 			if (!ctx.isIdle()) await ctx.waitForIdle();
 			if (controller.signal.aborted) return;
 
-			const host = createEngineHost(piApi, ctx, controller, verdictBus, outputBus, turnWaiters, runCmuxSubagent);
+			const host = createEngineHost(
+				piApi,
+				ctx,
+				controller,
+				verdictBus,
+				outputBus,
+				turnWaiters,
+				runCmuxSubagent,
+				runCmuxReviewSubagent,
+			);
 			launched = true;
 			ctx.ui.notify(`Resumed Anvil workflow "${workflow.workflow.name}" from step ${parsed.stepNumber} (${runId}).`, "info");
 
@@ -402,6 +429,7 @@ function createEngineHost(
 	outputBus: OutputBus,
 	turnWaiters: Set<TurnWaiter>,
 	runCmuxSubagent: typeof runHerdrSubagent,
+	runCmuxReviewSubagent: typeof runHerdrReviewSubagent,
 ): EngineHost {
 	let pendingTurn: Promise<void> | undefined;
 	const defaultModel = ctx.model;
@@ -430,6 +458,29 @@ function createEngineHost(
 				model,
 				(selection.thinkingLevel ?? defaultThinkingLevel) as ReturnType<ExtensionAPI["getThinkingLevel"]>,
 			);
+		},
+		isReviewSubagentAvailable(backend) {
+			return isSubagentBackendAvailable(backend);
+		},
+		async runReviewSubagent(request, signal) {
+			const selectedModel = request.model
+				? resolveModelReference(request.model, ctx.modelRegistry.getAll())
+				: ctx.model;
+			if (!selectedModel) throw new Error("Independent review requires a selected model.");
+			const launch = {
+				name: `Anvil review: ${request.stepId}`,
+				task: request.task,
+				cwd: request.cwd,
+				runId: request.runId,
+				stepId: request.stepId,
+				checkId: request.checkId,
+				model: `${selectedModel.provider}/${selectedModel.id}`,
+				thinkingLevel: request.thinkingLevel ?? defaultThinkingLevel,
+				timeoutMs: request.timeoutMs,
+			};
+			return request.backend === "herdr"
+				? runHerdrReviewSubagent(launch, signal)
+				: runCmuxReviewSubagent(launch, signal);
 		},
 		async runSubagent(request, signal) {
 			const launch = {
@@ -481,6 +532,9 @@ function createEngineHost(
 				signal: options?.signal,
 			});
 		},
+		captureWorkspaceState(cwd, signal) {
+			return captureGitWorkspaceState(pi, cwd, signal);
+		},
 		awaitVerdict(checkId, timeoutMs, signal) {
 			return verdictBus.awaitVerdict(checkId, timeoutMs, signal);
 		},
@@ -516,6 +570,53 @@ function createEngineHost(
 	};
 }
 
+async function captureGitWorkspaceState(
+	pi: ExtensionAPI,
+	cwd: string,
+	signal?: AbortSignal,
+): Promise<WorkspaceState | undefined> {
+	const [head, status, diff, untrackedHashes] = await Promise.all([
+		pi.exec("git", ["rev-parse", "HEAD"], { cwd, signal }),
+		pi.exec("git", ["status", "--porcelain=v1", "--untracked-files=all"], { cwd, signal }),
+		pi.exec("bash", ["-c", "set -o pipefail; git diff --no-ext-diff --binary HEAD | git hash-object --stdin"], { cwd, signal }),
+		pi.exec("bash", ["-c", "set -o pipefail; git ls-files --others --exclude-standard | git hash-object --stdin-paths"], { cwd, signal }),
+	]);
+	if (head.code !== 0) return undefined;
+	if (status.code !== 0 || diff.code !== 0 || untrackedHashes.code !== 0) throw new Error("Git could not capture the working-tree state");
+	const changedFiles = status.stdout
+		.split(/\r?\n/)
+		.filter(Boolean)
+		.map((line) => line.slice(3).trim())
+		.filter(Boolean);
+	return {
+		head: head.stdout.trim(),
+		fingerprint: createHash("sha256")
+			.update(head.stdout)
+			.update("\0")
+			.update(status.stdout)
+			.update("\0")
+			.update(diff.stdout)
+			.update("\0")
+			.update(untrackedHashes.stdout)
+			.digest("hex"),
+		changedFiles: changedFiles.slice(0, 100),
+		changedFileCount: changedFiles.length,
+	};
+}
+
+function preflightSubagentBackends(workflow: WorkflowDefinition, ctx: ExtensionCommandContext): boolean {
+	const unavailableDelegation = workflowSubagentBackends(workflow).find((backend) => !isSubagentBackendAvailable(backend));
+	if (unavailableDelegation) {
+		ctx.ui.notify(
+			`Workflow "${workflow.name}" declares ${unavailableDelegation} subagent delegation. ${subagentUnavailableMessage(unavailableDelegation)}`,
+			"error",
+		);
+		return false;
+	}
+
+	return true;
+}
+
 function isSubagentBackendAvailable(backend: WorkflowSubagentBackend): boolean {
 	return backend === "herdr" ? isHerdrAvailable() : isCmuxAvailable();
 }
@@ -549,6 +650,31 @@ async function handleValidate(pi: ExtensionAPI, ctx: ExtensionCommandContext, re
 		"anvil-validate",
 		workflow.errors?.length ? formatWorkflowErrors(workflow) : `✅ Workflow \`${workflow.name}\` is valid.\n\n${workflow.file}`,
 	);
+}
+
+async function handleHistory(pi: ExtensionAPI, ctx: ExtensionCommandContext, rest: string): Promise<void> {
+	const workflowName = rest.trim();
+	const entries = buildRunHistory(getSessionEntries(ctx)).filter((entry) => !workflowName || entry.workflowName === workflowName);
+	if (entries.length === 0) {
+		ctx.ui.notify(workflowName ? `No Anvil runs recorded for workflow "${workflowName}" in this session.` : "No Anvil runs recorded in this session.", "info");
+		return;
+	}
+	postCommandMessage(pi, "anvil-history", renderRunHistoryTable(entries));
+}
+
+async function handleReport(pi: ExtensionAPI, ctx: ExtensionCommandContext, rest: string): Promise<void> {
+	const reports = buildRunReports(getSessionEntries(ctx));
+	const prefix = rest.trim();
+	const matches = prefix ? reports.filter((report) => report.runId.startsWith(prefix)) : reports.slice(-1);
+	if (matches.length === 0) {
+		ctx.ui.notify(prefix ? `No Anvil run matches "${prefix}" in this session.` : "No Anvil runs recorded in this session.", "info");
+		return;
+	}
+	if (matches.length > 1) {
+		ctx.ui.notify(`Run id "${prefix}" is ambiguous; use a longer prefix.`, "warning");
+		return;
+	}
+	postCommandMessage(pi, "anvil-report", renderRunReport(matches[0]!));
 }
 
 async function findWorkflow(cwd: string, name: string): Promise<DiscoveredWorkflow | undefined> {
@@ -606,7 +732,7 @@ function extractAnvilArgumentText(textBeforeCursor: string): string | undefined 
 }
 
 export async function getAnvilCompletions(argumentPrefix: string, cwd?: string) {
-	const subcommands = ["run", "list", "validate", "abort", "resume"];
+	const subcommands = ["run", "list", "validate", "history", "report", "abort", "resume"];
 	const trimmedStart = argumentPrefix.trimStart();
 	const parts = trimmedStart.split(/\s+/);
 	if (parts.length <= 1 && !trimmedStart.endsWith(" ")) {
@@ -616,7 +742,7 @@ export async function getAnvilCompletions(argumentPrefix: string, cwd?: string) 
 	}
 
 	const subcommand = parts[0];
-	if ((subcommand === "run" || subcommand === "validate") && parts.length <= 2) {
+	if ((subcommand === "run" || subcommand === "validate" || subcommand === "history") && parts.length <= 2) {
 		if (!cwd) return [];
 		const prefix = parts[1] ?? "";
 		const workflows = await discoverWorkflows({ cwd });
@@ -692,14 +818,6 @@ function findLatestResumableRun(entries: unknown[]): ResumableRun | undefined {
 		};
 	}
 	return latest;
-}
-
-function toAnvilCheckpoint(entry: unknown): Partial<AnvilCheckpoint> | undefined {
-	if (!entry || typeof entry !== "object") return undefined;
-	const record = entry as Record<string, unknown>;
-	if (record.customType !== "anvil-run") return undefined;
-	const data = record.data ?? record.details ?? record;
-	return data && typeof data === "object" ? (data as Partial<AnvilCheckpoint>) : undefined;
 }
 
 function formatResumeStepMap(run: ResumableRun, workflow: WorkflowDefinition): string {
@@ -813,4 +931,4 @@ function cleanupTurnWaiter(waiter: TurnWaiter): void {
 }
 
 
-export const __testing__ = { resolveModelReference, parseAnvilArgs, parseRunArgs };
+export const __testing__ = { resolveModelReference, parseAnvilArgs, parseRunArgs, preflightSubagentBackends };

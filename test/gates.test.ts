@@ -4,10 +4,20 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
-import type { EngineHost, EngineExecOptions, EngineExecResult, RunSummary, AnvilCheckpoint } from "../src/engine.ts";
+import type {
+	AnvilCheckpoint,
+	EngineExecOptions,
+	EngineExecResult,
+	EngineHost,
+	ReviewSubagentRunRequest,
+	ReviewSubagentRunResult,
+	RunSummary,
+} from "../src/engine.ts";
+import { ReviewSubagentUnavailableError } from "../src/errors.ts";
 import { executeAgentCheck, executeDeterministicCheck, VerdictBus, type Verdict } from "../src/gates.ts";
-import { renderCommandTemplateString, renderTemplateString } from "../src/prompts.ts";
-import type { WorkflowDefinition } from "../src/types.ts";
+import { buildIndependentReviewTask, renderCommandTemplateString, renderTemplateString } from "../src/prompts.ts";
+import { INDEPENDENT_REVIEW_FAIL_REASON } from "../src/subagent/child.ts";
+import type { AgentCheck, WorkflowDefinition } from "../src/types.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -19,6 +29,8 @@ class GateHost implements EngineHost {
 	verdictQueue: Array<Verdict | undefined> = [];
 	neverVerdict = false;
 	turns = 0;
+	reviewRequests: ReviewSubagentRunRequest[] = [];
+	runReviewSubagent?: (request: ReviewSubagentRunRequest, signal?: AbortSignal) => Promise<ReviewSubagentRunResult>;
 
 	sendInstruction(instruction: string): void {
 		this.instructions.push(instruction);
@@ -307,6 +319,227 @@ describe("executeDeterministicCheck", () => {
 });
 
 describe("executeAgentCheck", () => {
+	it("routes reviewed checks without self-grading or propagating reviewer prose", async () => {
+		const host = new GateHost();
+		const secret = "unmarked-reviewer-secret";
+		host.runReviewSubagent = async (request) => {
+			host.reviewRequests.push(request);
+			return { pass: false, reason: `missing regression test: ${secret}`, sessionFile: "/tmp/review.jsonl", exitCode: 0 };
+		};
+
+		const result = await executeAgentCheck({
+			host,
+			workflow: workflow(),
+			step: workflow().steps[0]!,
+			check: { type: "agent", prompt: "criteria", review: { subagent: "cmux" } },
+			ctx: ctx(),
+			checkId: "run:one:0:0",
+		});
+
+		expect(result).toMatchObject({
+			pass: false,
+			reason: INDEPENDENT_REVIEW_FAIL_REASON,
+			checkId: "run:one:0:0",
+			timeoutMs: 1_800_000,
+		});
+		expect(JSON.stringify(result)).not.toContain(secret);
+		expect(host.reviewRequests).toHaveLength(1);
+		expect(host.reviewRequests[0]?.timeoutMs).toBe(1_800_000);
+		expect(host.instructions).toEqual([]);
+		expect(host.turns).toBe(0);
+	});
+
+	it("fails closed with a gate result when an independent review backend is unavailable, unless main fallback is explicit", async () => {
+		const unavailable = new GateHost();
+		const required = await executeAgentCheck({
+			host: unavailable,
+			workflow: workflow(),
+			step: workflow().steps[0]!,
+			check: { type: "agent", prompt: "criteria", review: { subagent: "herdr" } },
+			ctx: ctx(),
+			checkId: "required-review",
+		});
+		expect(required).toMatchObject({
+			checkId: "required-review",
+			pass: false,
+			reason: 'Independent review backend "herdr" is unavailable.',
+			timeoutMs: 1_800_000,
+		});
+		expect(unavailable.instructions).toEqual([]);
+
+		const automatic = await executeAgentCheck({
+			host: unavailable,
+			workflow: workflow(),
+			step: workflow().steps[0]!,
+			check: { type: "agent", prompt: "criteria", review: { subagent: "auto" } },
+			ctx: ctx(),
+			checkId: "automatic-review",
+		});
+		expect(automatic).toMatchObject({
+			pass: false,
+			reason: 'Independent review backend "auto" is unavailable.',
+		});
+
+		const fallback = new GateHost();
+		fallback.verdict = { checkId: "ignored", pass: true, reason: "explicit fallback" };
+		const optional = await executeAgentCheck({
+			host: fallback,
+			workflow: workflow(),
+			step: workflow().steps[0]!,
+			check: { type: "agent", prompt: "criteria", review: { subagent: "herdr" }, reviewFallback: "main" },
+			ctx: ctx(),
+			checkId: "fallback-review",
+		});
+		expect(optional).toMatchObject({ pass: true, reason: "explicit fallback" });
+		expect(fallback.instructions).toHaveLength(1);
+	});
+
+	it("returns a failed gate or uses explicit main fallback when the backend becomes unavailable at review launch", async () => {
+		const required = new GateHost();
+		required.runReviewSubagent = async () => {
+			throw new ReviewSubagentUnavailableError();
+		};
+		const requiredResult = await executeAgentCheck({
+			host: required,
+			workflow: workflow(),
+			step: workflow().steps[0]!,
+			check: { type: "agent", prompt: "criteria", review: { subagent: "cmux" }, timeoutMs: 4321 },
+			ctx: ctx(),
+			checkId: "required-runtime-review",
+		});
+		expect(requiredResult).toMatchObject({
+			checkId: "required-runtime-review",
+			pass: false,
+			reason: 'Independent review backend "cmux" is unavailable.',
+			timeoutMs: 4321,
+		});
+		expect(required.instructions).toEqual([]);
+
+		const host = new GateHost();
+		host.verdict = { checkId: "ignored", pass: true, reason: "explicit runtime fallback" };
+		host.runReviewSubagent = async () => {
+			throw new ReviewSubagentUnavailableError();
+		};
+
+		const result = await executeAgentCheck({
+			host,
+			workflow: workflow(),
+			step: workflow().steps[0]!,
+			check: { type: "agent", prompt: "criteria", review: { subagent: "cmux" }, reviewFallback: "main" },
+			ctx: ctx(),
+			checkId: "runtime-fallback",
+		});
+
+		expect(result).toMatchObject({ pass: true, reason: "explicit runtime fallback" });
+		expect(host.reviewRequests).toEqual([]);
+		expect(host.instructions).toHaveLength(1);
+		expect(host.turns).toBe(1);
+	});
+
+	it("does not self-grade review launch or transport failures", async () => {
+		const host = new GateHost();
+		host.verdict = { checkId: "ignored", pass: true, reason: "rubber stamp" };
+		host.runReviewSubagent = async () => {
+			throw new Error("Independent review verdict sidecar is malformed");
+		};
+
+		await expect(executeAgentCheck({
+			host,
+			workflow: workflow(),
+			step: workflow().steps[0]!,
+			check: { type: "agent", prompt: "criteria", review: { subagent: "cmux" }, reviewFallback: "main" },
+			ctx: ctx(),
+			checkId: "transport-failure",
+		})).rejects.toThrow("Independent review verdict sidecar is malformed");
+		expect(host.instructions).toEqual([]);
+		expect(host.turns).toBe(0);
+	});
+
+	it("builds an independent reviewer task with only the documented reviewer contract", async () => {
+		const definition = workflow();
+		const step = {
+			...definition.steps[0]!,
+			prompt: "EXECUTOR_PROMPT_MUST_NOT_REACH_REVIEWER",
+		};
+		const task = await buildIndependentReviewTask({
+			workflow: definition,
+			step,
+			check: { type: "agent", prompt: "Inspect {input}" },
+			ctx: ctx("checked-in artifacts"),
+			checkId: "run:one:0:0",
+		});
+
+		expect(task).toContain(`workflow "${definition.name}", step "${step.id}"`);
+		expect(task).toContain("Evaluation criteria:\nInspect checked-in artifacts");
+		expect(task).toMatch(/inspect artifacts directly/i);
+		expect(task).toMatch(/read-only filesystem tools/i);
+		expect(task).toMatch(/realpath-resolved workflow cwd/i);
+		expect(task).toMatch(/deny secret-like paths and symlink escapes/i);
+		expect(task).toContain("Submit exactly one `anvil_verdict` tool call");
+		expect(task).toContain("check_id `run:one:0:0`");
+		expect(task).toContain("pass true only when all criteria are satisfied");
+		expect(task).toContain("a concise reason");
+		expect(task).not.toContain("EXECUTOR_PROMPT_MUST_NOT_REACH_REVIEWER");
+		expect(task).not.toMatch(/executor (?:conversation|transcript)|internal reasoning/i);
+	});
+
+	it("propagates verdict transport errors before a wait is canceled", async () => {
+		class FailingVerdictHost extends GateHost {
+			override async awaitVerdict(): Promise<Verdict> {
+				throw new Error("verdict transport failed");
+			}
+		}
+		const definition = workflow();
+
+		await expect(executeAgentCheck({
+			host: new FailingVerdictHost(),
+			workflow: definition,
+			step: definition.steps[0]!,
+			check: { type: "agent", prompt: "criteria" },
+			ctx: ctx(),
+			checkId: "transport-error",
+		})).rejects.toThrow("verdict transport failed");
+	});
+
+	it("combines active cancellation signals and preserves an already-aborted signal", async () => {
+		class SignalHost extends GateHost {
+			receivedSignals: AbortSignal[] = [];
+			override async awaitVerdict(_checkId: string, _timeoutMs?: number, signal?: AbortSignal): Promise<Verdict> {
+				this.receivedSignals.push(signal!);
+				return { checkId: "ignored", pass: true, reason: "signal observed" };
+			}
+		}
+		const host = new SignalHost();
+		const active = new AbortController();
+		const aborted = new AbortController();
+		aborted.abort();
+		const definition = workflow();
+		const check: AgentCheck = { type: "agent", prompt: "criteria" };
+
+		await executeAgentCheck({
+			host,
+			workflow: definition,
+			step: definition.steps[0]!,
+			check,
+			ctx: ctx(),
+			checkId: "active-signal",
+			signal: active.signal,
+		});
+		await executeAgentCheck({
+			host,
+			workflow: definition,
+			step: definition.steps[0]!,
+			check,
+			ctx: ctx(),
+			checkId: "aborted-signal",
+			signal: aborted.signal,
+		});
+
+		expect(host.receivedSignals[0]).not.toBe(active.signal);
+		expect(host.receivedSignals[0]?.aborted).toBe(false);
+		expect(host.receivedSignals[1]).toBe(aborted.signal);
+	});
+
 	it("returns the reported verdict", async () => {
 		const host = new GateHost();
 		host.verdict = { checkId: "ignored", pass: true, reason: "looks good" };

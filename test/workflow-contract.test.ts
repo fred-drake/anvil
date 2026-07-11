@@ -69,6 +69,29 @@ describe("workflow public contract", () => {
 		expect(source).toMatch(/interface\s+AgentCheck[\s\S]*Defaults to 300_000/);
 	});
 
+	it("exposes and documents independent agent-review checks", () => {
+		const types = readFileSync(new URL("../src/types.ts", import.meta.url), "utf8");
+		const readme = readFileSync(new URL("../README.md", import.meta.url), "utf8");
+		const skill = readFileSync(new URL("../skills/anvil-workflow-builder/SKILL.md", import.meta.url), "utf8");
+		const demo = readFileSync(new URL("../examples/workflows/demo.ts", import.meta.url), "utf8");
+
+		expect(types).toMatch(
+			/export\s+type\s+AgentReviewMode\s*=\s*\|?\s*\{\s*subagent\s*:\s*WorkflowSubagentBackend\s*\}\s*\|\s*\{\s*subagent\s*:\s*["']auto["']\s*\}/,
+		);
+		expect(types).toMatch(/interface\s+AgentCheck[\s\S]*review\??\s*:\s*AgentReviewMode/);
+		expect(types).toMatch(/interface\s+AgentCheck[\s\S]*reviewFallback\??\s*:\s*["']main["']\s*\|\s*["']fail["']/);
+		expect(readme).toMatch(/reviewFallback[\s\S]{0,240}fail/i);
+		expect(readme).toMatch(/independent review[\s\S]{0,240}(main|fallback)/i);
+		expect(readme).toMatch(/read-only[^\n]+(artifact|workspace)|(?:artifact|workspace)[^\n]+read-only/i);
+		expect(readme).toMatch(/realpath-resolved workflow cwd/i);
+		expect(readme).toMatch(/deny symlink escapes/i);
+		expect(readme).toMatch(/block secret-like paths/i);
+		expect(skill).toContain("reviewFallback");
+		expect(skill).toMatch(/read-only[^\n]+(artifact|workspace)|(?:artifact|workspace)[^\n]+read-only/i);
+		expect(skill).toMatch(/realpath-confined[^\n]+symlink escapes[^\n]+secret-like paths/i);
+		expect(demo).toMatch(/summary-quality[\s\S]{0,240}review\s*:\s*\{\s*subagent/);
+	});
+
 	it("parses pi's colon thinking shorthand without treating slash as a thinking separator", () => {
 		expect(resolveStepModelSelection({ id: "one", prompt: "a", model: "openai-codex/gpt-5.5:high" })).toEqual({
 			model: "openai-codex/gpt-5.5",
@@ -126,6 +149,57 @@ describe("workflow public contract", () => {
 
 		expect(result.errors).toBeUndefined();
 		expect(result.workflow?.name).toBe("feature-forge");
+		expect(result.workflow?.defaults?.maxLoops).toBe(3);
+		const steps = result.workflow?.steps ?? [];
+		expect(steps.map((step) => step.id)).toEqual([
+			"research-and-plan",
+			"review-security-design",
+			"write-test-stubs",
+			"review-round-context",
+			"implement-feature",
+			"review-correctness-contracts",
+			"review-security-privacy",
+			"review-performance-reliability",
+			"review-tests-maintainability-docs",
+			"aggregate-review",
+		]);
+
+		const plan = steps.find((step) => step.id === "research-and-plan");
+		const securityDesign = steps.find((step) => step.id === "review-security-design");
+		const testStubs = steps.find((step) => step.id === "write-test-stubs");
+		const implementation = steps.find((step) => step.id === "implement-feature");
+		expect(plan?.prompt).toEqual(expect.stringContaining("security design and threat-boundary assessment"));
+		expect(securityDesign?.checks).toBeUndefined();
+		expect(securityDesign?.prompt).toEqual(expect.stringContaining("This is an advisory review, not an approval gate"));
+		expect(testStubs?.prompt).toEqual(expect.stringContaining("isolation/security regression case"));
+		expect(implementation?.checks?.map((check) => check.id)).toEqual(["focused-tests", "tests-and-coverage"]);
+		expect(implementation?.checks?.[0]).toMatchObject({
+			type: "deterministic",
+			command: "npx vitest run --changed",
+			onFail: { goto: "implement-feature", maxLoops: 3 },
+		});
+
+		const reviewContext = steps.find((step) => step.id === "review-round-context");
+		expect(reviewContext?.outputFrom).toBeUndefined();
+		expect(reviewContext?.prompt).toEqual(expect.stringContaining("zero-based remediation-loop count"));
+		expect(reviewContext?.checks?.map((check) => check.id)).toEqual(["review-round-marker"]);
+
+		const specialistReviews = steps.filter((step) =>
+			step.id.startsWith("review-") && !["review-security-design", "review-round-context"].includes(step.id),
+		);
+		expect(specialistReviews).toHaveLength(4);
+		for (const review of specialistReviews) {
+			expect(review.checks).toBeUndefined();
+			expect(review.onFail).toBeUndefined();
+			expect(review.prompt).toEqual(expect.stringContaining("Review-round protocol"));
+			expect(review.prompt).toEqual(expect.stringContaining("CONVERGENCE"));
+		}
+
+		const aggregate = steps.find((step) => step.id === "aggregate-review");
+		expect(aggregate?.checks?.map((check) => check.id)).toEqual(["aggregate-workspace-valid", "blocking-review"]);
+		expect(aggregate?.prompt).toEqual(expect.stringContaining("blocker ledger in the review-round context is frozen"));
+		expect(aggregate?.checks?.[1]?.onFail).toMatchObject({ goto: "review-round-context", maxLoops: 2 });
+		expect(implementation?.prompt).toEqual(expect.stringContaining("{outputs.review-round-context}"));
 	});
 
 	it("documents herdr alongside cmux in the README", () => {
