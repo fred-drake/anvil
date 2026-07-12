@@ -94,25 +94,20 @@ describe("workflow public contract", () => {
 
 	it("documents the independent-review grading and sidecar trust boundary", () => {
 		const readme = readFileSync(new URL("../README.md", import.meta.url), "utf8");
-		const feature = readFileSync(new URL("../docs/features/01-independent-subagent-review.md", import.meta.url), "utf8");
 
-		for (const document of [readme, feature]) {
-			expect(document).toMatch(/main-session grading[\s\S]{0,300}(?:in-process|VerdictBus)/i);
-			expect(document).toMatch(/independent(?:-review)? grading[\s\S]{0,300}(?:child|reviewer)[^\n]*sidecar[^\n]*parent/i);
-			expect(document).toContain("{ check_id, pass, reason }");
-			expect(document).toMatch(/parent accepts exactly `?\{ check_id, pass, reason \}`?/i);
-			expect(document).toMatch(/rejects payloads with extra\s+fields or invalid\s+(?:fields|field types)/i);
-			expect(document).toMatch(/missing[^\n]+malformed[^\n]+duplicate[^\n]+wrong[^\n]+check_id[^\n]+transport errors/i);
-		}
-		expect(feature).not.toMatch(/src\/[^\s`)]+\.ts:\d+/);
+		expect(readme).toMatch(/main-session grading[\s\S]{0,300}(?:in-process|VerdictBus)/i);
+		expect(readme).toMatch(/independent(?:-review)? grading[\s\S]{0,300}(?:child|reviewer)[^\n]*sidecar[^\n]*parent/i);
+		expect(readme).toContain("{ check_id, pass, reason }");
+		expect(readme).toMatch(/parent accepts exactly `?\{ check_id, pass, reason \}`?/i);
+		expect(readme).toMatch(/rejects payloads with extra\s+fields or invalid\s+(?:fields|field types)/i);
+		expect(readme).toMatch(/missing[^\n]+malformed[^\n]+duplicate[^\n]+wrong[^\n]+check_id[^\n]+transport errors/i);
 	});
 
 	it("documents the Phase 6 infrastructure-failure matrix for independent reviews", () => {
 		const readme = readFileSync(new URL("../README.md", import.meta.url), "utf8");
-		const feature = readFileSync(new URL("../docs/features/01-independent-subagent-review.md", import.meta.url), "utf8");
 		const skill = readFileSync(new URL("../skills/anvil-workflow-builder/SKILL.md", import.meta.url), "utf8");
 
-		for (const document of [readme, feature, skill]) {
+		for (const document of [readme, skill]) {
 			expect(document).toMatch(/(?:backend (?:is )?unavailable|no backend (?:is )?available)[\s\S]{0,280}(?:failed gate|onFail|fallback)/i);
 			expect(document).toMatch(/(?:launch|timeout|transport)[\s\S]{0,280}infrastructure error/i);
 			expect(document).toMatch(/reviewFallback[\s\S]{0,280}main/i);
@@ -123,10 +118,8 @@ describe("workflow public contract", () => {
 		const readme = readFileSync(new URL("../README.md", import.meta.url), "utf8");
 		const skill = readFileSync(new URL("../skills/anvil-workflow-builder/SKILL.md", import.meta.url), "utf8");
 		const demo = readFileSync(new URL("../examples/workflows/demo.ts", import.meta.url), "utf8");
-		const feature = readFileSync(new URL("../docs/features/01-independent-subagent-review.md", import.meta.url), "utf8");
-		const backlog = readFileSync(new URL("../docs/FEATURE.md", import.meta.url), "utf8");
 
-		for (const document of [readme, skill, feature]) {
+		for (const document of [readme, skill]) {
 			expect(document).toMatch(/observable (?:step )?result/i);
 			expect(document).toMatch(/8\s*(?:KiB|KB|\*\s*1024)/i);
 			expect(document).toMatch(/UTF-?8.*byte/i);
@@ -137,9 +130,6 @@ describe("workflow public contract", () => {
 			expect(document).toMatch(/(?:basename|task\/session)[^\n]+255\s*bytes/i);
 		}
 		expect(demo).toMatch(/summary-quality[\s\S]{0,360}(?:observable|independent review)/i);
-		expect(backlog).toMatch(/independent fresh-subagent review[\s\S]{0,500}(?:shipped|implemented)/i);
-		expect(backlog).toMatch(/observable\s+(?:step\s+)?result[\s\S]{0,500}8\s*(?:KiB|KB)/i);
-		expect(backlog).not.toMatch(/there is no mechanism to force an \*independent\* reviewer/i);
 	});
 
 	it("parses pi's colon thinking shorthand without treating slash as a thinking separator", () => {

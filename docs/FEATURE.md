@@ -10,46 +10,9 @@ Value is judged on: does it close a gap the docs already admit, does it unlock c
 that is otherwise impossible, and how much risk does it add.
 
 Each feature below links to a detailed implementation plan in
-[`docs/features/`](features/). A feature's number is its position in the build order.
-Shipped features move to [Shipped](#shipped) at the bottom.
-
----
-
-## 1. Independent fresh-subagent review for agent-judged checks
-
-📄 **Detailed plan:** [`features/01-independent-subagent-review.md`](features/01-independent-subagent-review.md)
-
-**Status: shipped and implemented.** The entry remains here as the contract record while
-follow-up hardening phases continue.
-
-**Why:** This is the one honesty gap the project already admits. `README.md` states
-that main-session agent-judged checks are self-graded by the same agent that
-performed the step, so they "cannot structurally prevent a rubber-stamp
-`pass: true`." The shipped independent-review contract closes that gap.
-
-**Current contract:** `AgentCheck.review` launches a fresh cmux/herdr review session and
-returns its structured sidecar verdict through the existing check/checkpoint flow.
-`reviewFallback` defaults to `"fail"`; only explicit `"main"` permits degraded
-self-grading when the backend is unavailable.
-
-Independent review receives rendered criteria plus the current attempt's **observable
-step result**, bounded to **8 KiB including its marker**: explicit main/chat output or a successful delegated final summary. It does
-not receive executor transcripts, hidden reasoning, raw terminal/provider output, retry
-feedback, or unrelated/prior workflow output. Missing output is explicit. Criteria and
-result text are conservatively secret-redacted and bounded; unsafe or over-256-byte
-workflow/step/check identities use deterministic SHA-256 aliases, review path components over 255 bytes are aliased, and generated review task/session, sidecar, and same-directory atomic temporary basenames are capped at 255 bytes. Observable capture scans
-only the final 64 Ki UTF-16 code units, redacts quoted `.env` and JSON database credentials,
-fails closed on ambiguous clipped or unmatched private-key markers, and uses byte-measured,
-deterministic UTF-8-safe tail truncation. The context is prompt-only and is not persisted
-in diagnostics, checkpoints, evidence, summaries, or sidecars.
-
-**Files:** `src/types.ts`, `src/gates.ts`, `src/engine.ts`, `src/subagent/*`,
-`src/validate.ts`, tests in `test/gates.test.ts` and `test/subagent.test.ts`,
-`README.md`, `skills/anvil-workflow-builder/SKILL.md`.
-
-**Risks:** Requires a subagent backend to be present; must clearly define what context
-the reviewer is and is not given so the independence guarantee is real. Add tests that
-assert the reviewer session does not inherit executor context.
+[`docs/features/`](features/). A feature's number is a stable identifier that preserves
+references after shipped entries are removed. Shipped features move to [Shipped](#shipped)
+at the bottom.
 
 ---
 
@@ -350,8 +313,8 @@ widen the trust surface.
 
 The list above is already in build order. The dependencies driving it:
 
-- **#1 and #2 first** — high value with contained surface area; #2 is nearly pure
-  read-side, and its checkpoint-folding reader is reused by #3 and #4.
+- **#2 first** — high value with contained surface area and nearly pure read-side work;
+  its checkpoint-folding reader is reused by #3 and #4.
 - **#3 (mid-run reload / id-based resume) right after #2** — its phase 1 reuses #2's
   reader to match resume by step id and to rehydrate the shipped step outputs; phase 2
   (dev-mode reload) is strictly opt-in.
