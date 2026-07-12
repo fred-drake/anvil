@@ -1,6 +1,9 @@
-# Feature 7 — Per-item fan-out (`forEach` steps)
+# Per-item fan-out (`forEach` steps) (shipped)
 
-Back to [Feature backlog](../FEATURE.md#7-per-item-fan-out-foreach-steps).
+> **Status: shipped** in `3fe8f83`. This plan is retained as a design record; see
+> [Shipped](../FEATURE.md#shipped) in the backlog.
+
+Back to [Feature backlog](../FEATURE.md#shipped).
 
 ## Summary
 

@@ -1,6 +1,9 @@
-# Feature 2 — `/anvil history` and per-run reports
+# `/anvil history` and per-run reports (shipped)
 
-Back to [Feature backlog](../FEATURE.md#2-anvil-history-and-per-run-reports).
+> **Status: shipped** in `40379ca`. This plan is retained as a design record; see
+> [Shipped](../FEATURE.md#shipped) in the backlog.
+
+Back to [Feature backlog](../FEATURE.md#shipped).
 
 ## Summary
 

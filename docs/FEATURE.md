@@ -16,38 +16,6 @@ at the bottom.
 
 ---
 
-## 2. `/anvil history` and per-run reports
-
-📄 **Detailed plan:** [`features/02-history-and-run-reports.md`](features/02-history-and-run-reports.md)
-
-**Why:** Anvil already persists everything needed, but nothing surfaces it. Runs emit
-checkpoints via `pi.appendEntry("anvil-run", ...)` with phases `run_start`,
-`step_start`, `check_result`, `step_pass`, and `run_end`, each carrying timestamps,
-final state, and failure reasons. Today only `/anvil resume` replays that log. A
-history view and run report is almost pure read-side work over data that already
-exists, making it low risk and high polish.
-
-**Current state:** Checkpoint reading logic already lives in `src/index.ts`
-(`toAnvilCheckpoint`, the replay loop building `lastStartedStep` / `lastFailure`).
-
-**Design sketch:**
-- Add `/anvil history [name]` listing recent runs: run id, workflow, start time,
-  duration (from `run_start` to `run_end`), final state, and the failing step when
-  applicable.
-- Add a per-run markdown report (reuse the existing `renderSummaryMarkdown` style)
-  showing each step, its checks, verdicts, retry counts, and timings.
-- Optionally cap or paginate output; keep formatting consistent with the current
-  `/anvil resume` step map.
-
-**Files:** `src/index.ts` (new subcommand + completions around the `subcommands`
-array), `src/ui.ts` for formatting, tests in `test/anvil-command.test.ts` and
-`test/completions.test.ts`, `README.md`.
-
-**Risks:** Low. Mostly presentation. Watch for large append logs; consider limiting
-how far back the replay scans.
-
----
-
 ## 3. Mid-run reload and id-based resume
 
 📄 **Detailed plan:** [`features/03-mid-run-reload.md`](features/03-mid-run-reload.md)
@@ -191,47 +159,6 @@ validation.
 
 ---
 
-## 7. Per-item fan-out (`forEach` steps)
-
-📄 **Detailed plan:** [`features/07-per-item-fanout.md`](features/07-per-item-fanout.md)
-
-**Why:** A step is one prompt executed by one agent session, so a step's scope must fit
-one context window. That breaks down on small local models: "write test stubs for this
-feature" exceeds what a 27B model can hold, and prompting the model to split the work
-itself hands orchestration to the least reliable component. Engine-driven fan-out runs
-a step's prompt once per item (typically per file) in a fresh subagent session each —
-deterministic decomposition, bounded context per session, and per-item retry/feedback
-and model escalation.
-
-**Current state:** The run loop executes exactly one prompt per step
-(`src/engine.ts`), and retry state (`loopCounts`, `feedbackByStep`) is keyed per step,
-not per item. The cmux runner already manages multiple surfaces, so the spawning
-infrastructure exists.
-
-**Design sketch:**
-- Add `forEach` to `WorkflowStep`: an item source (a function over `ctx` — typically
-  parsing a prior step's output from the shipped step outputs — or a deterministic command
-  whose stdout becomes the item list), plus `concurrency` (default 1), `maxItems`, and
-  `onItemExhausted`.
-- New `{item}` / `{itemIndex}` / `{itemCount}` template placeholders in prompts and
-  (shell-safely) in check commands, so checks can gate each item individually
-  (`npx vitest run {item}`).
-- Per-item retry keys for loop counts and feedback; `onFail.goto` inside a `forEach`
-  step may only target the step itself ("retry this item") in v1.
-- Step output (the shipped step outputs) becomes a per-item digest; resume re-runs the
-  whole step.
-
-**Files:** `src/types.ts`, `src/validate.ts`, `src/engine.ts` (includes extracting a
-single-attempt helper from the run loop first), `src/prompts.ts`, `src/ui.ts`,
-`skills/anvil-workflow-builder/SKILL.md`, `README.md`, examples, broad tests.
-
-**Risks:** The engine refactor touches the most intricate code in the project — land
-it as a pure-move commit first. Item-qualified retry keys must not disturb existing
-step-keyed behavior. Ship sequential-only first; parallel surfaces are proven for cmux
-but not herdr.
-
----
-
 ## 8. Lifecycle hooks and completion notifications
 
 📄 **Detailed plan:** [`features/08-lifecycle-hooks.md`](features/08-lifecycle-hooks.md)
@@ -313,18 +240,14 @@ widen the trust surface.
 
 The list above is already in build order. The dependencies driving it:
 
-- **#2 first** — high value with contained surface area and nearly pure read-side work;
-  its checkpoint-folding reader is reused by #3 and #4.
-- **#3 (mid-run reload / id-based resume) right after #2** — its phase 1 reuses #2's
-  reader to match resume by step id and to rehydrate the shipped step outputs; phase 2
-  (dev-mode reload) is strictly opt-in.
-- **#4 (status)** also shares #2's reader; build it while that code is fresh.
+- **#3 (mid-run reload / id-based resume)** reuses the shipped history reader to match
+  resume by step id and rehydrate step outputs; its dev-mode reload phase remains strictly
+  opt-in.
+- **#4 (status)** can also share the history reader.
 - **#5 (dry-run), #8 (hooks), #9 (budget)** are largely independent quality-of-life —
   orderable to taste.
 - **#6 (named params)** is a `WorkflowDefinition` contract change and a prerequisite for
   #10.
-- **#7 (per-item fan-out)** builds on the shipped step outputs; the highest-value
-  follow-up for small-context local models.
 - **#10 (composition) last** — highest complexity, and depends on #6 (params) plus the
   shipped step outputs.
 
@@ -344,3 +267,9 @@ records.
   `WorkflowContext.outputs` (keyed by step id), `{outputs.<id>}` / `ctx.outputs`
   templating, and `outputFrom` deterministic capture. Plan:
   [`features/shipped-step-outputs.md`](features/shipped-step-outputs.md).
+- **Per-item fan-out (`forEach` steps)** — shipped in `3fe8f83`.
+  Runs one subagent attempt per deterministic item with per-item retries, templating,
+  checks, and progress. Plan: [`features/07-per-item-fanout.md`](features/07-per-item-fanout.md).
+- **`/anvil history` and per-run reports** — shipped in `40379ca`.
+  Provides bounded checkpoint-backed run history and detailed markdown reports. Plan:
+  [`features/02-history-and-run-reports.md`](features/02-history-and-run-reports.md).
