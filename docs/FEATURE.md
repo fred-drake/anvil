@@ -19,32 +19,29 @@ Shipped features move to [Shipped](#shipped) at the bottom.
 
 📄 **Detailed plan:** [`features/01-independent-subagent-review.md`](features/01-independent-subagent-review.md)
 
+**Status: shipped and implemented.** The entry remains here as the contract record while
+follow-up hardening phases continue.
+
 **Why:** This is the one honesty gap the project already admits. `README.md` states
 that main-session agent-judged checks are self-graded by the same agent that
 performed the step, so they "cannot structurally prevent a rubber-stamp
-`pass: true`," and it explicitly teases a "future fresh-subagent review pattern
-when independence matters." Closing this makes agent gates trustworthy rather than
-advisory.
+`pass: true`." The shipped independent-review contract closes that gap.
 
-**Current state:** `AgentCheck` (`src/types.ts`) already has an optional `agent?`
-field, but there is no mechanism to force an *independent* reviewer that is distinct
-from the step's executor and does not share its context. The cmux/herdr subagent
-runner (`src/subagent/`) already knows how to spawn a clean session.
+**Current contract:** `AgentCheck.review` launches a fresh cmux/herdr review session and
+returns its structured sidecar verdict through the existing check/checkpoint flow.
+`reviewFallback` defaults to `"fail"`; only explicit `"main"` permits degraded
+self-grading when the backend is unavailable.
 
-**Design sketch:**
-- Add an option on `AgentCheck` to require independent evaluation, e.g.
-  `independent: true` or `review: { subagent: "cmux" | "herdr" | "auto" }`.
-- When set, the check spawns a fresh subagent session (reusing `src/subagent/runner.ts`)
-  that receives only the step's declared criteria and the observable result, not the
-  executor's conversation.
-- The reviewer returns a structured verdict from the child session (the detailed plan
-  recommends a `<sessionFile>.verdict.json` sidecar written by the child extension,
-  since the child is a separate pi process with no access to the parent's `VerdictBus`);
-  the parent converts it into the existing `GateResult` shape so downstream plumbing
-  stays unchanged.
-- When no subagent backend is available, fail the check by default with a clear reason
-  (silent self-grading would reintroduce the rubber-stamp this feature removes); a
-  workflow can opt into falling back to main-session evaluation.
+Independent review receives rendered criteria plus the current attempt's **observable
+step result**, bounded to **8 KiB including its marker**: explicit main/chat output or a successful delegated final summary. It does
+not receive executor transcripts, hidden reasoning, raw terminal/provider output, retry
+feedback, or unrelated/prior workflow output. Missing output is explicit. Criteria and
+result text are conservatively secret-redacted and bounded; unsafe or over-256-byte
+workflow/step/check identities use deterministic SHA-256 aliases, review path components over 255 bytes are aliased, and generated review task/session, sidecar, and same-directory atomic temporary basenames are capped at 255 bytes. Observable capture scans
+only the final 64 Ki UTF-16 code units, redacts quoted `.env` and JSON database credentials,
+fails closed on ambiguous clipped or unmatched private-key markers, and uses byte-measured,
+deterministic UTF-8-safe tail truncation. The context is prompt-only and is not persisted
+in diagnostics, checkpoints, evidence, summaries, or sidecars.
 
 **Files:** `src/types.ts`, `src/gates.ts`, `src/engine.ts`, `src/subagent/*`,
 `src/validate.ts`, tests in `test/gates.test.ts` and `test/subagent.test.ts`,

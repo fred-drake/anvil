@@ -95,7 +95,10 @@ export interface AgentCheck {
 	prompt: Templatable;
 	/** Subagent to delegate evaluation to; omit for main-agent evaluation. */
 	agent?: string;
-	/** Run this check in a fresh review-only subagent instead of self-grading in the main session. */
+	/**
+	 * Run this check in a fresh review-only subagent. The reviewer receives only
+	 * bounded current-attempt observable output, never general workflow outputs.
+	 */
 	review?: AgentReviewMode;
 	/** Behavior when no requested review backend is available. Defaults to "fail". */
 	reviewFallback?: "main" | "fail";

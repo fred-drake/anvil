@@ -45,6 +45,7 @@ export default defineWorkflow({
 				{
 					type: "agent",
 					id: "summary-quality",
+					// The independent review receives this step's bounded observable chat result.
 					name: "Useful summary",
 					prompt: "Pass if the summary clearly states what changed and any verification performed.",
 					review: { subagent: "auto" },

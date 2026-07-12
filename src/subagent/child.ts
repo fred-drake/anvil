@@ -17,6 +17,7 @@ import {
 } from "node:fs";
 import { lstat, open, rename, rm } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
+import { dirname, join } from "node:path";
 import { Type } from "@earendil-works/pi-ai";
 import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { ReviewFileAccessError, ReviewFileSystem } from "./review-fs.ts";
@@ -46,13 +47,14 @@ const SAFE_CREATE_FLAGS = constants.O_WRONLY | constants.O_CREAT | constants.O_E
 export async function writeIndependentReviewVerdict(
 	sessionFile: string,
 	verdict: IndependentReviewVerdict,
+	onTemporaryPath?: (path: string) => void,
 ): Promise<void> {
 	const sidecarFile = `${sessionFile}.verdict.json`;
 	// The filesystem entry is the claim. Keeping successful claims in a process-
 	// global Set leaks one path for every review session, while O_EXCL already
 	// provides the required atomic duplicate detection.
 	if (await sidecarExists(sidecarFile)) {
-		await replaceSidecarAtomically(sidecarFile, DUPLICATE_REVIEW_VERDICT);
+		await replaceSidecarAtomically(sidecarFile, DUPLICATE_REVIEW_VERDICT, onTemporaryPath);
 		return;
 	}
 
@@ -75,7 +77,7 @@ export async function writeIndependentReviewVerdict(
 		await createSidecarExclusively(sidecarFile, record);
 	} catch (error) {
 		if (isAlreadyExistsError(error) || await sidecarExists(sidecarFile)) {
-			await replaceSidecarAtomically(sidecarFile, DUPLICATE_REVIEW_VERDICT);
+			await replaceSidecarAtomically(sidecarFile, DUPLICATE_REVIEW_VERDICT, onTemporaryPath);
 			return;
 		}
 		throw error;
@@ -105,8 +107,19 @@ async function createSidecarExclusively(path: string, content: string): Promise<
 	}
 }
 
-async function replaceSidecarAtomically(path: string, content: string): Promise<void> {
-	const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
+export function atomicSidecarTemporaryPath(path: string): string {
+	// Keep the temporary basename independent of the near-limit final basename.
+	// rename still remains atomic because the temporary lives in the same directory.
+	return join(dirname(path), `.anvil-sidecar-${randomUUID()}.tmp`);
+}
+
+async function replaceSidecarAtomically(
+	path: string,
+	content: string,
+	onTemporaryPath?: (path: string) => void,
+): Promise<void> {
+	const temporary = atomicSidecarTemporaryPath(path);
+	onTemporaryPath?.(temporary);
 	try {
 		await createSidecarExclusively(temporary, content);
 		await rename(temporary, path);
@@ -115,8 +128,13 @@ async function replaceSidecarAtomically(path: string, content: string): Promise<
 	}
 }
 
-function replaceSidecarAtomicallySync(path: string, content: string): void {
-	const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
+function replaceSidecarAtomicallySync(
+	path: string,
+	content: string,
+	onTemporaryPath?: (path: string) => void,
+): void {
+	const temporary = atomicSidecarTemporaryPath(path);
+	onTemporaryPath?.(temporary);
 	let descriptor: number | undefined;
 	try {
 		descriptor = openSync(temporary, SAFE_CREATE_FLAGS, 0o600);
@@ -142,14 +160,22 @@ function isMissingFileError(error: unknown): boolean {
 	return error instanceof Error && "code" in error && error.code === "ENOENT";
 }
 
-export function writeSubagentReadySidecar(sessionFile: string): void {
-	replaceSidecarAtomicallySync(`${sessionFile}.ready`, SUBAGENT_READY_MARKER);
+export function writeSubagentReadySidecar(
+	sessionFile: string,
+	onTemporaryPath?: (path: string) => void,
+): void {
+	replaceSidecarAtomicallySync(`${sessionFile}.ready`, SUBAGENT_READY_MARKER, onTemporaryPath);
 }
 
-export function writeSubagentExitSidecar(sessionFile: string, errorMessage?: string): void {
+export function writeSubagentExitSidecar(
+	sessionFile: string,
+	errorMessage?: string,
+	onTemporaryPath?: (path: string) => void,
+): void {
 	replaceSidecarAtomicallySync(
 		`${sessionFile}.exit`,
 		JSON.stringify(errorMessage ? { type: "error", errorMessage } : { type: "done" }),
+		onTemporaryPath,
 	);
 }
 

@@ -90,16 +90,20 @@ mechanisms:
 ### Reviewer prompt
 
 Add `buildIndependentReviewTask(...)` to `src/prompts.ts`, modeled on
-`buildSubagentStepTask` (`src/prompts.ts:138`). It must include **only**:
+`buildSubagentStepTask` (`src/prompts.ts:138`). It includes only:
 
-- the workflow name and the step id being reviewed,
-- the rendered check criteria (`renderTemplatable(check.prompt, ctx)`),
+- the workflow name and the step id being reviewed, with workflow/step/check identities bounded to 256 UTF-8 bytes and unsafe or oversized values represented by deterministic SHA-256 aliases across prompt text and launcher requests/names; review path components over 255 bytes are aliased, and complete generated task/session and sidecar basenames, including extensions, plus same-directory atomic temporary basenames are capped at 255 bytes,
+- bounded, sanitized check criteria rendered with a restricted context where prior `{outputs.<step-id>}` values are unavailable,
+- the current attempt's bounded observable step result,
 - an instruction to inspect the working tree / artifacts directly (the reviewer starts in
   `ctx.cwd`) rather than trusting any narrative,
 - the exact `anvil_verdict` contract (check_id, pass, reason).
 
-It must **not** include the step's executor conversation or the step prompt's internal
-reasoning — that is the independence guarantee.
+The observable result comes only from explicit main/chat `anvil_output` capture or a successful delegated subagent's final summary. Missing or empty output renders a fixed missing-output state. It is prompt-only and is never added to checkpoints, summaries, evidence, retry feedback, sidecars, UI diagnostics, or launcher errors.
+
+The result limit is **8 KiB including the truncation marker**, measured in UTF-8 bytes. Capture preprocessing inspects at most the final 64 Ki UTF-16 code units, bounding sanitizer and byte-copy work even when an executor reports a very large value. A partial line at that scan boundary is discarded (or output is reported missing when no complete line remains), preventing a split credential label from bypassing redaction. Oversized values retain a deterministic UTF-8-safe tail with a visible marker. Unsupported control characters are normalized, and conservative redaction covers Slack, GitLab, GitHub, OpenAI, AWS, NPM tokens, credential-bearing database URLs (including quoted `.env` and JSON forms), JWT, cookie, Basic/Bearer authorization, and private-key forms before truncation. Ambiguous clipped or unmatched private-key markers fail closed as missing output. Redaction is defense in depth rather than a complete secret detector; workflow steps must report only intentionally disclosed observable text.
+
+The review prompt treats the observable result as untrusted quoted data and tells the reviewer not to follow instructions in it. It does **not** include the executor transcript, hidden reasoning, raw terminal/provider output, prior workflow output, or retry feedback.
 
 ### Engine / gates wiring
 

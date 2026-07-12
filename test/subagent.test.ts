@@ -1,10 +1,11 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { open } from "node:fs/promises";
 import { describe, expect, it, vi } from "vitest";
 import { ReviewSubagentUnavailableError } from "../src/errors.ts";
+import { normalizeIndependentReviewIdentity } from "../src/prompts.ts";
 import {
 	findLatestAssistantError,
 	INDEPENDENT_REVIEW_FAIL_REASON,
@@ -668,6 +669,211 @@ describe("dedicated independent review launcher", () => {
 			sessionFile,
 			exitCode: 0,
 		});
+	});
+
+	it("bounds and sanitizes launcher identities for a multi-megabyte control-containing step id", async () => {
+		const hostileStepId = `${"review\u0000\n\u001b[31m".repeat(150_000)}STEP_ID_CANARY`;
+		const checkId = normalizeIndependentReviewIdentity(`run:${hostileStepId}:0:0`);
+		let surfaceName = "";
+		let sessionFile = "";
+		let scriptPath = "";
+
+		const result = await reviewRunnerTesting.runReviewSubagentWithBackend(
+			{
+				name: `Anvil review: ${hostileStepId}`,
+				task: `Submit anvil_verdict for ${checkId}.`,
+				cwd: process.cwd(),
+				runId: "bounded-review-run",
+				stepId: hostileStepId,
+				checkId,
+				model: "openai-codex/gpt-5.5",
+				timeoutMs: 100,
+			},
+			{
+				isAvailable: () => true,
+				unavailableMessage: () => "unavailable",
+				createSurface: async (name) => {
+					surfaceName = name;
+					return "surface:bounded-review";
+				},
+				sendLongCommand: async (_surface, command, receivedScriptPath) => {
+					scriptPath = receivedScriptPath;
+					sessionFile = command.match(/--session '([^']+)'/)?.[1] ?? "";
+					if (!sessionFile) throw new Error("missing session file");
+					writeSubagentReadySidecar(sessionFile);
+				},
+				pollForExit: async () => {
+					await writeIndependentReviewVerdict(sessionFile, {
+						checkId,
+						pass: true,
+						reason: "Artifacts satisfy the criteria.",
+					});
+					return { reason: "done", exitCode: 0 };
+				},
+				closeSurface: async () => undefined,
+			},
+			undefined,
+			{ readyTimeoutMs: 10, attempts: 1 },
+		);
+
+		expect(result).toMatchObject({ checkId, pass: true, exitCode: 0 });
+		expect(Buffer.byteLength(surfaceName, "utf8")).toBeLessThanOrEqual(256);
+		expect(surfaceName).toMatch(/^sha256:[a-f0-9]{64}$/u);
+		expect(surfaceName).not.toMatch(/[\u0000-\u001f\u007f]/u);
+		for (const path of [sessionFile, scriptPath]) {
+			expect(Buffer.byteLength(path, "utf8")).toBeLessThan(1024);
+			expect(path).not.toContain("STEP_ID_CANARY");
+			expect(path).not.toMatch(/[\u0000-\u001f\u007f]/u);
+		}
+	});
+
+	it("bounds complete review task and session basenames for a 256-byte safe step id", async () => {
+		const stepId = "s".repeat(256);
+		const generatedPaths: string[] = [];
+		let sessionFile = "";
+
+		const result = await reviewRunnerTesting.runReviewSubagentWithBackend(
+			{
+				name: "Anvil: maximum safe review identity",
+				task: `Submit anvil_verdict for ${expectedReviewCheckId}.`,
+				cwd: process.cwd(),
+				runId: "maximum-safe-review-identity",
+				stepId,
+				checkId: expectedReviewCheckId,
+				model: "openai-codex/gpt-5.5",
+				timeoutMs: 100,
+			},
+			{
+				isAvailable: () => true,
+				unavailableMessage: () => "unavailable",
+				createSurface: async () => "surface:maximum-safe-review-identity",
+				sendLongCommand: async (_surface, command, scriptPath) => {
+					sessionFile = command.match(/--session '([^']+)'/)?.[1] ?? "";
+					const taskFile = command.match(/'@([^']+)'/)?.[1] ?? "";
+					if (!sessionFile || !taskFile) throw new Error("missing generated review path");
+					generatedPaths.push(taskFile, sessionFile, scriptPath, `${sessionFile}.ready`, `${sessionFile}.verdict.json`);
+					writeSubagentReadySidecar(sessionFile);
+				},
+				pollForExit: async () => {
+					await writeIndependentReviewVerdict(sessionFile, {
+						checkId: expectedReviewCheckId,
+						pass: true,
+						reason: "Artifacts satisfy the criteria.",
+					});
+					return { reason: "done", exitCode: 0 };
+				},
+				closeSurface: async () => undefined,
+			},
+			undefined,
+			{ readyTimeoutMs: 10, attempts: 1 },
+		);
+
+		expect(result).toMatchObject({ checkId: expectedReviewCheckId, pass: true, exitCode: 0 });
+		expect(generatedPaths).toHaveLength(5);
+		for (const path of generatedPaths) expect(Buffer.byteLength(basename(path), "utf8")).toBeLessThanOrEqual(255);
+	});
+
+	it("completes a review with a 256-byte run id and bounds every actual lifecycle basename", async () => {
+		const runId = "r".repeat(256);
+		const stepId = "s".repeat(180);
+		const generatedPaths = new Set<string>();
+		const temporaryPaths = new Set<string>();
+		const captureTemporaryPath = (path: string) => temporaryPaths.add(path);
+		const now = vi.spyOn(Date, "now").mockReturnValue(1_700_000_000_000);
+		let sessionFile = "";
+
+		try {
+			const result = await reviewRunnerTesting.runReviewSubagentWithBackend(
+				{
+					name: "Anvil: near-limit atomic review",
+					task: `Submit anvil_verdict for ${expectedReviewCheckId}.`,
+					cwd: process.cwd(),
+					runId,
+					stepId,
+					checkId: expectedReviewCheckId,
+					model: "openai-codex/gpt-5.5",
+					timeoutMs: 100,
+				},
+				{
+					isAvailable: () => true,
+					unavailableMessage: () => "unavailable",
+					createSurface: async () => "surface:near-limit-atomic-review",
+					sendLongCommand: async (_surface, command, scriptPath) => {
+						sessionFile = command.match(/--session '([^']+)'/)?.[1] ?? "";
+						const taskFile = command.match(/'@([^']+)'/)?.[1] ?? "";
+						if (!sessionFile || !taskFile) throw new Error("missing generated review path");
+						const sidecars = [`${sessionFile}.ready`, `${sessionFile}.exit`, `${sessionFile}.verdict.json`];
+						for (const path of [taskFile, sessionFile, scriptPath, ...sidecars]) generatedPaths.add(path);
+						writeSubagentReadySidecar(sessionFile, captureTemporaryPath);
+					},
+					pollForExit: async () => {
+						writeSubagentExitSidecar(sessionFile, undefined, captureTemporaryPath);
+						await writeIndependentReviewVerdict(sessionFile, {
+							checkId: expectedReviewCheckId,
+							pass: true,
+							reason: "Artifacts satisfy the criteria.",
+						}, captureTemporaryPath);
+						return { reason: "done", exitCode: 0 };
+					},
+					closeSurface: async () => undefined,
+				},
+				undefined,
+				{ readyTimeoutMs: 10, attempts: 1 },
+			);
+
+			expect(result).toMatchObject({ checkId: expectedReviewCheckId, pass: true, exitCode: 0 });
+			expect(basename(sessionFile).startsWith(stepId)).toBe(true);
+			expect(temporaryPaths).toHaveLength(2);
+			expect(basename(dirname(sessionFile))).toMatch(/^sha256-[a-f0-9]{64}$/u);
+			expect(Buffer.byteLength(basename(dirname(sessionFile)), "utf8")).toBeLessThanOrEqual(255);
+			for (const path of [...generatedPaths, ...temporaryPaths]) {
+				expect(Buffer.byteLength(basename(path), "utf8"), path).toBeLessThanOrEqual(255);
+			}
+		} finally {
+			now.mockRestore();
+			if (sessionFile) rmSync(dirname(sessionFile), { recursive: true, force: true });
+		}
+	});
+
+	it("does not let a path-shaped review run id escape the session root", async () => {
+		let sessionFile = "";
+		const result = await reviewRunnerTesting.runReviewSubagentWithBackend(
+			{
+				name: "Anvil: path-confined review",
+				task: `Submit anvil_verdict for ${expectedReviewCheckId}.`,
+				cwd: process.cwd(),
+				runId: "../../REVIEW_PATH_ESCAPE",
+				stepId: "implement/path",
+				checkId: expectedReviewCheckId,
+				model: "openai-codex/gpt-5.5",
+				timeoutMs: 100,
+			},
+			{
+				isAvailable: () => true,
+				unavailableMessage: () => "unavailable",
+				createSurface: async () => "surface:path-confined-review",
+				sendLongCommand: async (_surface, command) => {
+					sessionFile = command.match(/--session '([^']+)'/)?.[1] ?? "";
+					if (!sessionFile) throw new Error("missing session file");
+					writeSubagentReadySidecar(sessionFile);
+				},
+				pollForExit: async () => {
+					await writeIndependentReviewVerdict(sessionFile, {
+						checkId: expectedReviewCheckId,
+						pass: true,
+						reason: "Artifacts satisfy the criteria.",
+					});
+					return { reason: "done", exitCode: 0 };
+				},
+				closeSurface: async () => undefined,
+			},
+			undefined,
+			{ readyTimeoutMs: 10, attempts: 1 },
+		);
+
+		expect(result.pass).toBe(true);
+		expect(sessionFile).toMatch(/[/\\]anvil[/\\]sha256-[a-f0-9]{64}[/\\]sha256-[a-f0-9]{64}-/u);
+		expect(sessionFile).not.toContain("REVIEW_PATH_ESCAPE");
 	});
 
 	it("uses distinct session and sidecar paths for concurrent reviews of the same step", async () => {

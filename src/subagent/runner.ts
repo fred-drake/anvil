@@ -22,6 +22,11 @@ import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { AnvilAbortError, ReviewSubagentUnavailableError, throwIfAborted } from "../errors.ts";
+import {
+	buildIndependentReviewFilename,
+	normalizeIndependentReviewIdentity,
+	normalizeIndependentReviewPathIdentity,
+} from "../review-identity.ts";
 import * as cmux from "./cmux.ts";
 import * as herdr from "./herdr.ts";
 import { shellEscape, SUBAGENT_SENTINEL_PREFIX, type SubagentExit } from "./cmux.ts";
@@ -764,14 +769,24 @@ async function runChildSubagentWithBackend(
 	const rootDir = join(tmpdir(), "anvil");
 	mkdirSync(rootDir, { recursive: true, mode: 0o700 });
 	chmodSync(rootDir, 0o700);
-	const workDir = join(rootDir, launch.runId);
+	// Review identities cross backend and filesystem boundaries. Normalize them
+	// again at the launcher boundary so direct callers cannot create oversized or
+	// control-containing surface names and paths. Ordinary step launches retain
+	// their existing naming behavior.
+	const launcherRunId = mode === "review" ? normalizeIndependentReviewPathIdentity(launch.runId) : launch.runId;
+	const launcherStepId = mode === "review" ? normalizeIndependentReviewPathIdentity(launch.stepId) : launch.stepId;
+	const launcherName = mode === "review" ? normalizeIndependentReviewIdentity(launch.name) : launch.name;
+	const workDir = join(rootDir, launcherRunId);
 	mkdirSync(workDir, { recursive: true, mode: 0o700 });
 	chmodSync(workDir, 0o700);
 	// A run may execute repeated/concurrent checks for the same step (notably forEach).
 	// Wall-clock timestamps alone can collide, causing sessions and verdict sidecars to
 	// overwrite one another. Keep every child invocation in a collision-resistant namespace.
-	const base = join(workDir, `${sanitizeForFilename(launch.stepId)}-${Date.now().toString(36)}-${randomUUID()}`);
-	const taskFile = `${base}.task.md`;
+	const invocationIdentity = `${sanitizeForFilename(launcherStepId)}-${Date.now().toString(36)}-${randomUUID()}`;
+	const base = join(workDir, invocationIdentity);
+	const taskFile = mode === "review"
+		? join(workDir, buildIndependentReviewFilename(invocationIdentity, ".task.md"))
+		: `${base}.task.md`;
 	writeFileSync(taskFile, launch.task, { encoding: "utf8", mode: 0o600 });
 
 	const timeoutMs = launch.timeoutMs ?? DEFAULT_SUBAGENT_TIMEOUT_MS;
@@ -790,7 +805,13 @@ async function runChildSubagentWithBackend(
 	for (;;) {
 		throwIfAborted(signal);
 		sessionAttempt += 1;
-		const sessionFile = `${base}-attempt-${sessionAttempt}.jsonl`;
+		const attemptSuffix = `-attempt-${sessionAttempt}`;
+		const sessionFile = mode === "review"
+			? join(workDir, buildIndependentReviewFilename(invocationIdentity, `${attemptSuffix}.jsonl`, ".verdict.json"))
+			: `${base}${attemptSuffix}.jsonl`;
+		const scriptFile = mode === "review"
+			? join(workDir, buildIndependentReviewFilename(invocationIdentity, `${attemptSuffix}.sh`))
+			: `${base}${attemptSuffix}.sh`;
 		const sentinelNonce = newSentinelNonce();
 		const reviewIdentity = mode === "review" ? prepareReviewIdentity(workDir, launch.model) : undefined;
 		const commandBuilder = mode === "review" ? buildReviewSubagentBootstrapCommand : buildSubagentBootstrapCommand;
@@ -820,7 +841,7 @@ async function runChildSubagentWithBackend(
 		try {
 			surface = await runLaunchOperation(
 				(operationSignal) =>
-					backend.createSurface(launch.name, operationSignal, (created) => {
+					backend.createSurface(launcherName, operationSignal, (created) => {
 						createdSurfaces.add(created);
 						if (launchFailed) void cleanupCreatedSurface(created);
 					}),
@@ -842,7 +863,7 @@ async function runChildSubagentWithBackend(
 		try {
 			try {
 				await runLaunchOperation(
-					(operationSignal) => backend.sendLongCommand(surface, command, `${base}-attempt-${sessionAttempt}.sh`, operationSignal),
+					(operationSignal) => backend.sendLongCommand(surface, command, scriptFile, operationSignal),
 					deadline,
 					timeoutMs,
 					signal,

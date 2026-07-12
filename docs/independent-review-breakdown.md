@@ -57,10 +57,12 @@ Tests:
 Goal: give the fresh reviewer enough observable information to judge text-only and artifact-based outputs without exposing the executor transcript.
 
 Scope:
-- Capture a bounded observable step result after step execution.
-- Include that result in the independent review prompt.
-- Exclude executor conversation, hidden reasoning, and unrelated session transcript.
-- Document size limits and truncation behavior.
+- Capture only the current attempt's explicit main/chat `anvil_output` or successful delegated final summary.
+- Include that observable step result only in the independent review prompt; render a fixed missing state otherwise, and bound/sanitize rendered criteria and workflow/step/check identities. Unsafe or over-256-byte identity fields use deterministic SHA-256 aliases consistently in prompt text and launcher requests/names; review path components over 255 bytes are aliased, and complete generated task/session and sidecar basenames, including extensions, plus same-directory atomic temporary basenames are capped at 255 bytes.
+- Exclude executor transcripts, hidden reasoning, raw terminal/provider output, retry feedback, and prior workflow outputs.
+- Sanitize unsupported controls and conservatively redact Slack, GitLab, GitHub, OpenAI, AWS, NPM token, credential-bearing database URL (including quoted `.env` and JSON forms), JWT, cookie, Basic/Bearer authorization, and private-key secret shapes; fail closed on ambiguous clipped or unmatched private-key markers.
+- Bound preprocessing to the final 64 Ki UTF-16 code units, discarding any scan-boundary partial line (or treating the result as missing when no complete line remains), then limit the value to 8 KiB including its marker, measured in UTF-8 bytes, using deterministic UTF-8-safe tail truncation.
+- Keep the value prompt-only; do not persist it in diagnostics, checkpoints, summaries, evidence, or sidecars.
 
 Tests:
 - Chat-only step output reaches the review prompt.

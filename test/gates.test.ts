@@ -349,6 +349,35 @@ describe("executeAgentCheck", () => {
 		expect(host.turns).toBe(0);
 	});
 
+	it("bounds review request identities before crossing the launcher boundary", async () => {
+		const hostileIdentity = `${"identity\u0000\n\u001b[31m".repeat(150_000)}REQUEST_ID_CANARY`;
+		const host = new GateHost();
+		host.runReviewSubagent = async (request) => {
+			host.reviewRequests.push(request);
+			return { pass: true, reason: "review passed", sessionFile: "/tmp/review.jsonl", exitCode: 0 };
+		};
+		const definition = workflow();
+
+		await executeAgentCheck({
+			host,
+			workflow: { ...definition, name: hostileIdentity },
+			step: { ...definition.steps[0]!, id: hostileIdentity },
+			check: { type: "agent", prompt: "criteria", review: { subagent: "cmux" } },
+			ctx: ctx(),
+			checkId: `run:${hostileIdentity}:0:0`,
+			runId: hostileIdentity,
+		});
+
+		const request = host.reviewRequests[0]!;
+		for (const identity of [request.runId, request.workflowName, request.stepId, request.checkId]) {
+			expect(identity).toMatch(/^sha256:[a-f0-9]{64}$/u);
+			expect(Buffer.byteLength(identity, "utf8")).toBeLessThanOrEqual(256);
+			expect(identity).not.toMatch(/[\u0000-\u001f\u007f]/u);
+			expect(identity).not.toContain("REQUEST_ID_CANARY");
+		}
+		expect(Buffer.byteLength(request.task, "utf8")).toBeLessThan(20_000);
+	});
+
 	it("fails closed with a gate result when an independent review backend is unavailable, unless main fallback is explicit", async () => {
 		const unavailable = new GateHost();
 		const required = await executeAgentCheck({
@@ -481,6 +510,54 @@ describe("executeAgentCheck", () => {
 		expect(task).toContain("a concise reason");
 		expect(task).not.toContain("EXECUTOR_PROMPT_MUST_NOT_REACH_REVIEWER");
 		expect(task).not.toMatch(/executor (?:conversation|transcript)|internal reasoning/i);
+	});
+
+	it("sanitizes credentials in independent-review criteria and observable results", async () => {
+		const npmToken = "npm_super_secret_token_value_123456789";
+		const databaseUrls = [
+			"postgresql://admin:database-password@db.example.test/app",
+			"mysql://quoted-user:quoted-password@db.example.test/app",
+			"mongodb://json-user:json-password@db.example.test/app",
+		];
+		const secretInput = [
+			`NPM_TOKEN=${npmToken}`,
+			`DATABASE_URL=${databaseUrls[0]}`,
+			`DATABASE_URL=\"${databaseUrls[1]}\"`,
+			`{\"DATABASE_URL\": \"${databaseUrls[2]}\"}`,
+		].join("\n");
+		const definition = workflow();
+		const task = await buildIndependentReviewTask({
+			workflow: definition,
+			step: definition.steps[0]!,
+			check: { type: "agent", prompt: "Inspect {input}" },
+			ctx: ctx(secretInput),
+			checkId: "sanitized-review",
+			observableResult: { state: "present", text: secretInput },
+		});
+
+		expect(task).not.toContain(npmToken);
+		for (const databaseUrl of databaseUrls) expect(task).not.toContain(databaseUrl);
+		for (const password of ["database-password", "quoted-password", "json-password"]) {
+			expect(task).not.toContain(password);
+		}
+		expect(task.match(/\[REDACTED SECRET\]/g)?.length).toBeGreaterThanOrEqual(8);
+	});
+
+	it("bounds and sanitizes untrusted independent-review identity fields", async () => {
+		const hostileIdentity = `${"hostile\u0000\nidentity".repeat(150_000)}IDENTITY_CANARY`;
+		const definition = workflow();
+		const task = await buildIndependentReviewTask({
+			workflow: { ...definition, name: hostileIdentity },
+			step: { ...definition.steps[0]!, id: hostileIdentity },
+			check: { type: "agent", prompt: "Inspect artifacts" },
+			ctx: ctx(),
+			checkId: hostileIdentity,
+		});
+
+		expect(Buffer.byteLength(task, "utf8")).toBeLessThan(20_000);
+		expect(task).not.toContain("\u0000");
+		expect(task).not.toContain("IDENTITY_CANARY");
+		expect(task).toMatch(/check_id `sha256:[a-f0-9]{64}`/u);
 	});
 
 	it("propagates verdict transport errors before a wait is canceled", async () => {

@@ -1,10 +1,12 @@
 import type { EngineHost } from "./engine.ts";
 import { abortError, isReviewSubagentUnavailableError } from "./errors.ts";
+import { captureObservableStepResult, type ObservableStepResult } from "./observable-result.ts";
 import { independentReviewReason } from "./subagent/child.ts";
 import {
 	buildAgentCheckInstruction,
 	buildIndependentReviewTask,
 	buildVerdictReprompt,
+	normalizeIndependentReviewIdentity,
 	renderCommandTemplatable,
 	resolveReviewSubagentBackend,
 } from "./prompts.ts";
@@ -150,6 +152,8 @@ export async function executeAgentCheck(args: {
 	runId?: string;
 	model?: string;
 	thinkingLevel?: WorkflowThinkingLevel;
+	/** Prompt-only output explicitly captured from the current step attempt. */
+	observableResult?: ObservableStepResult;
 }): Promise<GateResult> {
 	if (args.check.review) {
 		const backend = resolveReviewSubagentBackend(args.check.review);
@@ -159,19 +163,21 @@ export async function executeAgentCheck(args: {
 		if (!available) {
 			if (args.check.reviewFallback !== "main") return unavailableReviewGateResult(args.check, args.checkId);
 		} else {
+			const reviewCheckId = normalizeIndependentReviewIdentity(args.checkId);
 			const task = await buildIndependentReviewTask({
 				workflow: args.workflow,
 				step: args.step,
 				check: args.check,
 				ctx: args.ctx,
-				checkId: args.checkId,
+				checkId: reviewCheckId,
+				observableResult: args.observableResult ?? captureObservableStepResult(undefined),
 			});
 			try {
 				const result = await args.host.runReviewSubagent!({
-					runId: args.runId ?? args.checkId.split(":", 1)[0]!,
-					workflowName: args.workflow.name,
-					stepId: args.step.id,
-					checkId: args.checkId,
+					runId: normalizeIndependentReviewIdentity(args.runId ?? args.checkId.split(":", 1)[0]!),
+					workflowName: normalizeIndependentReviewIdentity(args.workflow.name),
+					stepId: normalizeIndependentReviewIdentity(args.step.id),
+					checkId: reviewCheckId,
 					backend,
 					task,
 					cwd: args.ctx.cwd,

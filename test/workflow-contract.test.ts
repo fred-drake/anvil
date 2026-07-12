@@ -92,6 +92,29 @@ describe("workflow public contract", () => {
 		expect(demo).toMatch(/summary-quality[\s\S]{0,240}review\s*:\s*\{\s*subagent/);
 	});
 
+	it("documents the bounded, sanitized observable-result boundary for independent reviews", () => {
+		const readme = readFileSync(new URL("../README.md", import.meta.url), "utf8");
+		const skill = readFileSync(new URL("../skills/anvil-workflow-builder/SKILL.md", import.meta.url), "utf8");
+		const demo = readFileSync(new URL("../examples/workflows/demo.ts", import.meta.url), "utf8");
+		const feature = readFileSync(new URL("../docs/features/01-independent-subagent-review.md", import.meta.url), "utf8");
+		const backlog = readFileSync(new URL("../docs/FEATURE.md", import.meta.url), "utf8");
+
+		for (const document of [readme, skill, feature]) {
+			expect(document).toMatch(/observable (?:step )?result/i);
+			expect(document).toMatch(/8\s*(?:KiB|KB|\*\s*1024)/i);
+			expect(document).toMatch(/UTF-?8.*byte/i);
+			expect(document).toMatch(/deterministic.*tail|tail.*deterministic/i);
+			expect(document).toMatch(/not.*(?:transcript|reasoning|terminal|provider|prior)/i);
+			expect(document).toMatch(/(?:redact|secret)/i);
+			expect(document).toMatch(/256[^\n]+launcher[^\n]+(?:path|session)/i);
+			expect(document).toMatch(/(?:basename|task\/session)[^\n]+255\s*bytes/i);
+		}
+		expect(demo).toMatch(/summary-quality[\s\S]{0,360}(?:observable|independent review)/i);
+		expect(backlog).toMatch(/independent fresh-subagent review[\s\S]{0,500}(?:shipped|implemented)/i);
+		expect(backlog).toMatch(/observable\s+(?:step\s+)?result[\s\S]{0,500}8\s*(?:KiB|KB)/i);
+		expect(backlog).not.toMatch(/there is no mechanism to force an \*independent\* reviewer/i);
+	});
+
 	it("parses pi's colon thinking shorthand without treating slash as a thinking separator", () => {
 		expect(resolveStepModelSelection({ id: "one", prompt: "a", model: "openai-codex/gpt-5.5:high" })).toEqual({
 			model: "openai-codex/gpt-5.5",

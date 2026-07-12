@@ -15,6 +15,7 @@ import type {
 	WorkflowSubagentBackend,
 	WorkflowThinkingLevel,
 } from "./types.ts";
+import { captureObservableStepResult, type ObservableStepResult } from "./observable-result.ts";
 import { formatStatus, formatStepWidget } from "./ui.ts";
 
 export interface EngineExecOptions {
@@ -377,6 +378,7 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<RunSumma
 			}
 
 			const delegation = resolveStepDelegation(options.workflow, step);
+			let observableResult = captureObservableStepResult(undefined);
 			let subagentSessionFile: string | undefined;
 			if (delegation.mode === "subagent") {
 				if (!options.host.runSubagent) {
@@ -433,6 +435,7 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<RunSumma
 					);
 				}
 				outputs[step.id] = truncateStepOutput(result.summary);
+				observableResult = captureObservableStepResult(result.summary);
 				subagentSessionFile = result.sessionFile;
 				if (subagentSessionFile && !evidence.subagentSessions.includes(subagentSessionFile)) {
 					evidence.subagentSessions.push(subagentSessionFile);
@@ -459,12 +462,9 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<RunSumma
 				feedbackByStep.delete(step.id);
 
 				checkpoint({ phase: "step_start", stepId: step.id, stepIndex });
-				options.host.beginStepOutputCapture?.(step.id);
-				options.host.sendInstruction(instruction);
-				await options.host.waitForTurnComplete(options.signal);
-				const capturedOutput = options.host.endStepOutputCapture?.(step.id);
+				const capturedOutput = await runMainSessionAttempt(options, step.id, instruction);
+				observableResult = captureObservableStepResult(capturedOutput);
 				if (capturedOutput !== undefined) outputs[step.id] = truncateStepOutput(capturedOutput);
-				throwIfAborted(options.signal);
 			}
 
 			const checks = step.checks ?? [];
@@ -497,6 +497,7 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<RunSumma
 					checkId,
 					runId,
 					modelSelection: resolveStepModelSelection(step, getCurrentLoopCount(checkCtx)),
+					observableResult,
 					signal: options.signal,
 				});
 				if (result.sessionFile && !evidence.subagentSessions.includes(result.sessionFile)) {
@@ -769,6 +770,7 @@ async function executeForEachItem(args: ForEachItemArgs): Promise<ForEachItemRes
 				checkId,
 				runId: args.runId,
 				modelSelection: resolveStepModelSelection(step, getCurrentLoopCount(checkCtx)),
+				observableResult: captureObservableStepResult(attempt.summary),
 				signal: options.signal,
 			});
 			if (result.sessionFile && !args.evidence.subagentSessions.includes(result.sessionFile)) {
@@ -898,11 +900,29 @@ async function runItemDelegation(args: ForEachItemArgs & { ctx: WorkflowContext 
 	});
 	args.feedbackByStep.delete(feedbackKey);
 	args.checkpoint({ phase: "step_start", stepId: step.id, stepIndex, itemIndex, itemCount });
-	options.host.beginStepOutputCapture?.(step.id);
-	options.host.sendInstruction(instruction);
-	await options.host.waitForTurnComplete(options.signal);
-	throwIfAborted(options.signal);
-	return { ok: true, summary: options.host.endStepOutputCapture?.(step.id) ?? "" };
+	const summary = await runMainSessionAttempt(options, step.id, instruction);
+	return { ok: true, summary: summary ?? "" };
+}
+
+/** Ends capture in all paths, but only returns captured output after a successful turn. */
+async function runMainSessionAttempt(
+	options: RunWorkflowOptions,
+	stepId: string,
+	instruction: string,
+): Promise<string | undefined> {
+	options.host.beginStepOutputCapture?.(stepId);
+	let completed = false;
+	let output: string | undefined;
+	try {
+		options.host.sendInstruction(instruction);
+		await options.host.waitForTurnComplete(options.signal);
+		throwIfAborted(options.signal);
+		completed = true;
+	} finally {
+		const captured = options.host.endStepOutputCapture?.(stepId);
+		if (completed) output = captured;
+	}
+	return output;
 }
 
 function firstLine(text: string): string {
@@ -974,6 +994,7 @@ async function executeCheck(args: {
 	checkId: string;
 	runId: string;
 	modelSelection?: StepModelSelection;
+	observableResult: ObservableStepResult;
 	signal?: AbortSignal;
 }): Promise<GateResult> {
 	if (args.check.type === "deterministic") {
@@ -995,6 +1016,7 @@ async function executeCheck(args: {
 		runId: args.runId,
 		model: args.modelSelection?.model,
 		thinkingLevel: args.modelSelection?.thinkingLevel,
+		observableResult: args.observableResult,
 		signal: args.signal,
 		timeoutMs: args.check.timeoutMs,
 	});
