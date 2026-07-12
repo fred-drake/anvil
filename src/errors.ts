@@ -5,6 +5,13 @@ export class ReviewSubagentUnavailableError extends Error {
 	}
 }
 
+export class WorkflowInfrastructureError extends Error {
+	constructor(message: string) {
+		super(message);
+		this.name = "WorkflowInfrastructureError";
+	}
+}
+
 export class AnvilAbortError extends Error {
 	constructor(message = "Anvil run aborted") {
 		super(message);
@@ -26,4 +33,8 @@ export function isAnvilAbortError(error: unknown): error is AnvilAbortError {
 
 export function isReviewSubagentUnavailableError(error: unknown): error is ReviewSubagentUnavailableError {
 	return error instanceof ReviewSubagentUnavailableError;
+}
+
+export function isWorkflowInfrastructureError(error: unknown): error is WorkflowInfrastructureError {
+	return error instanceof WorkflowInfrastructureError;
 }

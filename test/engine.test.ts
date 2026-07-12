@@ -1111,20 +1111,79 @@ describe("runWorkflow", () => {
 		expect(host.instructions).toHaveLength(0);
 	});
 
-	it("fails the run when the subagent reports an error", async () => {
-		const host = new FakeHost();
-		host.enableSubagents();
-		host.subagentQueue.push({ summary: "boom", exitCode: 1, errorMessage: "provider overloaded" });
-		const summary = await runWorkflow({
-			workflow: workflow([{ id: "one", prompt: "1", delegation: { subagent: "cmux" } }]),
-			input: "task",
-			cwd: "/repo",
-			host,
-			runId: "run",
-		});
+	it("hard-stops delegated transport failures without exposing provider diagnostics or applying retry policy", async () => {
+		for (const mode of ["returned failure", "launcher rejection"] as const) {
+			const host = new FakeHost();
+			const providerDiagnostic = "provider overloaded: sk-proj-delegated-secret /private/provider.log";
+			host.enableSubagents();
+			if (mode === "returned failure") {
+				host.subagentQueue.push({ summary: "boom", exitCode: 1, errorMessage: providerDiagnostic });
+			} else {
+				host.runSubagent = async (request) => {
+					host.subagentRequests.push(request);
+					throw new Error(providerDiagnostic);
+				};
+			}
+			const summary = await runWorkflow({
+				workflow: {
+					...workflow([{
+						id: "one",
+						prompt: "1",
+						delegation: { subagent: "cmux" },
+						checks: [{ type: "deterministic", command: "never-runs", onFail: { goto: "one", maxLoops: 2 } }],
+					}]),
+					defaults: { onFail: { goto: "one", maxLoops: 2 } },
+				},
+				input: "task",
+				cwd: "/repo",
+				host,
+				runId: `run-${mode}`,
+			});
 
-		expect(summary.state).toBe("failed");
-		expect(summary.failureReason).toBe("provider overloaded");
+			expect(summary.state).toBe("failed");
+			expect(summary.steps[0]).toMatchObject({ status: "failed", checks: [], loops: 0 });
+			expect(host.subagentRequests).toHaveLength(1);
+			expect(host.execQueue).toHaveLength(0);
+			expect(host.checkpoints.some((entry) => entry.phase === "check_result")).toBe(false);
+			expect(JSON.stringify({ summary, checkpoints: host.checkpoints, notifications: host.notifications })).not.toContain(providerDiagnostic);
+		}
+	});
+
+	it("hard-stops forEach delegated infrastructure failures without continuing later items or publishing a digest", async () => {
+		for (const mode of ["returned failure", "launcher rejection"] as const) {
+			const host = new FakeHost();
+			const diagnostic = "child transport failed: npm_item_secret /private/child.log";
+			host.enableSubagents();
+			if (mode === "returned failure") {
+				host.subagentQueue.push({ summary: "failed", exitCode: 1, errorMessage: diagnostic });
+			} else {
+				host.runSubagent = async (request) => {
+					host.subagentRequests.push(request);
+					throw new Error(diagnostic);
+				};
+			}
+			const summary = await runWorkflow({
+				workflow: workflow([{
+					id: "fanout",
+					prompt: "Process {item}",
+					delegation: { subagent: "cmux" },
+					forEach: { items: () => ["first-secret-item.ts", "must-not-launch.ts"], onItemExhausted: "continue" },
+					checks: [{ type: "deterministic", command: "never-runs", onFail: { goto: "fanout", maxLoops: 2 } }],
+				}]),
+				input: "task",
+				cwd: "/repo",
+				host,
+				runId: `fanout-${mode}`,
+			});
+
+			expect(summary.state).toBe("failed");
+			expect(host.subagentRequests).toHaveLength(1);
+			expect(host.subagentRequests[0]?.task).toContain("first-secret-item.ts");
+			expect(host.checkpoints.some((entry) => entry.phase === "check_result")).toBe(false);
+			expect(summary.steps[0]).toMatchObject({ status: "failed", checks: [], loops: 0 });
+			expect(JSON.stringify({ summary, checkpoints: host.checkpoints, notifications: host.notifications })).not.toContain(diagnostic);
+			expect(JSON.stringify(summary)).not.toContain("first-secret-item.ts");
+		}
 	});
 
 	it("loops subagent steps with feedback from failed checks", async () => {
@@ -1818,6 +1877,96 @@ describe("runWorkflow", () => {
 			checkId: "run-runtime-review-fallback:implement:0:0",
 			pass: true,
 		}));
+	});
+
+	it("hard-stops missing or malformed review verdict transport without fallback, checkpoints, or retry feedback", async () => {
+		for (const transportFailure of ["missing verdict sidecar", "malformed verdict sidecar"] as const) {
+			const host = new FakeHost();
+			const diagnostic = `${transportFailure}: ghp_review_transport_secret /private/reviewer.jsonl`;
+			host.verdictQueue.push({ pass: true, reason: "main fallback must not run" });
+			host.runReviewSubagent = async (request) => {
+				host.reviewRequests.push(request);
+				throw new Error(diagnostic);
+			};
+			const summary = await runWorkflow({
+				workflow: workflow([{
+					id: "implement",
+					prompt: "Implement",
+					checks: [{
+						type: "agent",
+						id: "quality",
+						prompt: "Review",
+						review: { subagent: "cmux" },
+						reviewFallback: "main",
+						onFail: { goto: "implement", maxLoops: 2 },
+					}],
+				}]),
+				input: "task",
+				cwd: "/repo",
+				host,
+				runId: `review-${transportFailure}`,
+			});
+
+			expect(summary.state).toBe("failed");
+			expect(summary.steps[0]).toMatchObject({ status: "failed", checks: [], loops: 0 });
+			expect(host.reviewRequests).toHaveLength(1);
+			// The executor turn is allowed; no extra main-session grading turn may be requested.
+			expect(host.instructions).toHaveLength(1);
+			expect(host.checkpoints.some((entry) => entry.phase === "check_result")).toBe(false);
+			expect(JSON.stringify({ summary, checkpoints: host.checkpoints, notifications: host.notifications, instructions: host.instructions })).not.toContain(diagnostic);
+		}
+	});
+
+	it("keeps a valid failing independent verdict as a retryable gate result", async () => {
+		const host = new FakeHost();
+		host.runReviewSubagent = async (request) => {
+			host.reviewRequests.push(request);
+			return { pass: host.reviewRequests.length === 2, reason: "reviewer prose", exitCode: 0 };
+		};
+		const summary = await runWorkflow({
+			workflow: workflow([{
+				id: "implement",
+				prompt: "Implement",
+				checks: [{
+					type: "agent",
+					id: "quality",
+					prompt: "Review",
+					review: { subagent: "cmux" },
+					onFail: { goto: "implement", maxLoops: 1 },
+				}],
+			}]),
+			input: "task",
+			cwd: "/repo",
+			host,
+			runId: "retry-valid-review-verdict",
+		});
+
+		expect(summary.state).toBe("succeeded");
+		expect(host.reviewRequests).toHaveLength(2);
+		expect(summary.loopCounts).toEqual({ "quality->implement": 1 });
+		expect(host.checkpoints.filter((entry) => entry.phase === "check_result")).toHaveLength(2);
+	});
+
+	it("preserves an aborted delegated launch as aborted rather than an infrastructure failure", async () => {
+		const host = new FakeHost();
+		const controller = new AbortController();
+		host.enableSubagents();
+		host.runSubagent = async (request) => {
+			host.subagentRequests.push(request);
+			controller.abort();
+			return { summary: "ignored", exitCode: 1, errorMessage: "provider failure must not win" };
+		};
+		const summary = await runWorkflow({
+			workflow: workflow([{ id: "implement", prompt: "Implement", delegation: { subagent: "cmux" } }]),
+			input: "task",
+			cwd: "/repo",
+			host,
+			runId: "aborted-delegated-launch",
+			signal: controller.signal,
+		});
+
+		expect(summary.state).toBe("aborted");
+		expect(summary.failureReason).not.toContain("provider failure must not win");
 	});
 
 	it("threads agent check timeout settings from the workflow contract", async () => {

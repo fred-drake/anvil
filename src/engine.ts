@@ -1,4 +1,10 @@
-import { AnvilAbortError, isAnvilAbortError, throwIfAborted } from "./errors.ts";
+import {
+	AnvilAbortError,
+	isAnvilAbortError,
+	isWorkflowInfrastructureError,
+	throwIfAborted,
+	WorkflowInfrastructureError,
+} from "./errors.ts";
 import { executeAgentCheck, executeDeterministicCheck, type GateResult, type Verdict } from "./gates.ts";
 import {
 	buildStepInstruction,
@@ -333,26 +339,33 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<RunSumma
 				for (let itemIndex = 0; itemIndex < items.length; itemIndex += 1) {
 					const item = items[itemIndex]!;
 					updateStepUi(options, steps, stepIndex, "step", undefined, undefined, undefined, itemIndex, items.length);
-					const itemResult = await executeForEachItem({
-						options,
-						runId,
-						workflowHasModelSelectionOverrides,
-						markRestoreModelSelection: () => { shouldRestoreModelSelection = true; },
-						step,
-						stepIndex,
-						stepState,
-						steps,
-						loopCounts,
-						outputs,
-						item,
-						itemIndex,
-						itemCount: items.length,
-						feedbackByStep,
-						attempts,
-						checkpoint,
-						evidence,
-						freshness,
-					});
+					let itemResult: ForEachItemResult;
+					try {
+						itemResult = await executeForEachItem({
+							options,
+							runId,
+							workflowHasModelSelectionOverrides,
+							markRestoreModelSelection: () => { shouldRestoreModelSelection = true; },
+							step,
+							stepIndex,
+							stepState,
+							steps,
+							loopCounts,
+							outputs,
+							item,
+							itemIndex,
+							itemCount: items.length,
+							feedbackByStep,
+							attempts,
+							checkpoint,
+							evidence,
+							freshness,
+						});
+					} catch (error) {
+						stepState.status = "failed";
+						updateStepUi(options, steps, stepIndex, "failed", undefined, undefined, undefined, itemIndex, items.length);
+						throw error;
+					}
 					const label = `[${itemIndex + 1}/${items.length}] ${firstLine(item)}`;
 					if (itemResult.ok) {
 						digest.push(`${label} — ok: ${firstLine(itemResult.summary)}`);
@@ -423,16 +436,13 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<RunSumma
 				} catch (error) {
 					stepState.status = "failed";
 					updateStepUi(options, steps, stepIndex, "failed");
-					throw error;
+					throw infrastructureFailure("Delegated step infrastructure failed.", error, options.signal);
 				}
 				throwIfAborted(options.signal);
 				if (result.errorMessage || result.exitCode !== 0) {
 					stepState.status = "failed";
 					updateStepUi(options, steps, stepIndex, "failed");
-					return finish(
-						"failed",
-						result.errorMessage ?? `subagent for step "${step.id}" exited with code ${result.exitCode}`,
-					);
+					throw new WorkflowInfrastructureError("Delegated step infrastructure failed.");
 				}
 				outputs[step.id] = truncateStepOutput(result.summary);
 				observableResult = captureObservableStepResult(result.summary);
@@ -488,18 +498,26 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<RunSumma
 				// Step execution may have replaced outputs after the attempt context was created.
 				// Snapshot again so each check evaluates only the latest attempt output.
 				const checkCtx = makeWorkflowContext(options.input, step, stepIndex, loopCounts, options.cwd, outputs);
-				let result = await executeCheck({
-					host: options.host,
-					workflow: options.workflow,
-					step,
-					check,
-					ctx: checkCtx,
-					checkId,
-					runId,
-					modelSelection: resolveStepModelSelection(step, getCurrentLoopCount(checkCtx)),
-					observableResult,
-					signal: options.signal,
-				});
+				let result: GateResult;
+				try {
+					result = await executeCheck({
+						host: options.host,
+						workflow: options.workflow,
+						step,
+						check,
+						ctx: checkCtx,
+						checkId,
+						runId,
+						modelSelection: resolveStepModelSelection(step, getCurrentLoopCount(checkCtx)),
+						observableResult,
+						signal: options.signal,
+					});
+				} catch (error) {
+					if (check.type !== "agent" || !check.review) throw error;
+					stepState.status = "failed";
+					updateStepUi(options, steps, stepIndex, "failed");
+					throw infrastructureFailure("Independent review infrastructure failed.", error, options.signal);
+				}
 				if (result.sessionFile && !evidence.subagentSessions.includes(result.sessionFile)) {
 					evidence.subagentSessions.push(result.sessionFile);
 				}
@@ -587,8 +605,15 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<RunSumma
 		if (options.signal?.aborted || isAnvilAbortError(error)) {
 			return finish("aborted", "aborted");
 		}
-		return finish("failed", error instanceof Error ? error.message : String(error));
+		return finish("failed", isWorkflowInfrastructureError(error) ? error.message : error instanceof Error ? error.message : String(error));
 	}
+}
+
+function infrastructureFailure(message: string, error: unknown, signal?: AbortSignal): Error {
+	throwIfAborted(signal);
+	if (isAnvilAbortError(error)) return error;
+	if (isWorkflowInfrastructureError(error)) return error;
+	return new WorkflowInfrastructureError(message);
 }
 
 async function captureWorkspaceState(options: RunWorkflowOptions): Promise<WorkspaceState | undefined> {
@@ -761,18 +786,26 @@ async function executeForEachItem(args: ForEachItemArgs): Promise<ForEachItemRes
 				{ ...args.outputs, [step.id]: truncateStepOutput(attempt.summary) },
 				{ item: args.item, itemIndex, itemCount },
 			);
-			let result = await executeCheck({
-				host: options.host,
-				workflow: options.workflow,
-				step,
-				check,
-				ctx: checkCtx,
-				checkId,
-				runId: args.runId,
-				modelSelection: resolveStepModelSelection(step, getCurrentLoopCount(checkCtx)),
-				observableResult: captureObservableStepResult(attempt.summary),
-				signal: options.signal,
-			});
+			let result: GateResult;
+			try {
+				result = await executeCheck({
+					host: options.host,
+					workflow: options.workflow,
+					step,
+					check,
+					ctx: checkCtx,
+					checkId,
+					runId: args.runId,
+					modelSelection: resolveStepModelSelection(step, getCurrentLoopCount(checkCtx)),
+					observableResult: captureObservableStepResult(attempt.summary),
+					signal: options.signal,
+				});
+			} catch (error) {
+				if (check.type !== "agent" || !check.review) throw error;
+				args.stepState.status = "failed";
+				updateStepUi(options, args.steps, stepIndex, "failed", undefined, undefined, undefined, itemIndex, itemCount);
+				throw infrastructureFailure("Independent review infrastructure failed.", error, options.signal);
+			}
 			if (result.sessionFile && !args.evidence.subagentSessions.includes(result.sessionFile)) {
 				args.evidence.subagentSessions.push(result.sessionFile);
 			}
@@ -843,10 +876,7 @@ async function runItemDelegation(args: ForEachItemArgs & { ctx: WorkflowContext 
 
 	if (delegation.mode === "subagent") {
 		if (!options.host.runSubagent) {
-			return {
-				ok: false,
-				reason: `step "${step.id}" declares delegation: { subagent: "${delegation.backend}" }, but this host cannot run subagents`,
-			};
+			throw new WorkflowInfrastructureError("Delegated step infrastructure failed.");
 		}
 		const task = await buildSubagentStepTask({
 			workflow: options.workflow,
@@ -859,26 +889,31 @@ async function runItemDelegation(args: ForEachItemArgs & { ctx: WorkflowContext 
 		args.feedbackByStep.delete(feedbackKey);
 		args.checkpoint({ phase: "step_start", stepId: step.id, stepIndex, itemIndex, itemCount });
 		const selection = resolveStepModelSelection(step, getCurrentLoopCount(ctx));
-		const result = await options.host.runSubagent(
-			{
-				runId: args.runId,
-				workflowName: options.workflow.name,
-				stepId: step.id,
-				stepTitle: step.title ?? step.id,
-				stepIndex,
-				stepCount: options.workflow.steps.length,
-				backend: delegation.backend,
-				task,
-				cwd: options.cwd,
-				model: selection?.model,
-				thinkingLevel: selection?.thinkingLevel,
-				timeoutMs: step.subagentTimeoutMs ?? options.workflow.defaults?.subagentTimeoutMs,
-			},
-			options.signal,
-		);
+		let result: SubagentStepRunResult;
+		try {
+			result = await options.host.runSubagent(
+				{
+					runId: args.runId,
+					workflowName: options.workflow.name,
+					stepId: step.id,
+					stepTitle: step.title ?? step.id,
+					stepIndex,
+					stepCount: options.workflow.steps.length,
+					backend: delegation.backend,
+					task,
+					cwd: options.cwd,
+					model: selection?.model,
+					thinkingLevel: selection?.thinkingLevel,
+					timeoutMs: step.subagentTimeoutMs ?? options.workflow.defaults?.subagentTimeoutMs,
+				},
+				options.signal,
+			);
+		} catch (error) {
+			throw infrastructureFailure("Delegated step infrastructure failed.", error, options.signal);
+		}
 		throwIfAborted(options.signal);
 		if (result.errorMessage || result.exitCode !== 0) {
-			return { ok: false, reason: result.errorMessage ?? `subagent for step "${step.id}" exited with code ${result.exitCode}` };
+			throw new WorkflowInfrastructureError("Delegated step infrastructure failed.");
 		}
 		if (result.sessionFile && !args.evidence.subagentSessions.includes(result.sessionFile)) {
 			args.evidence.subagentSessions.push(result.sessionFile);

@@ -2,202 +2,164 @@
 
 Back to [Feature backlog](../FEATURE.md#1-independent-fresh-subagent-review-for-agent-judged-checks).
 
-## Summary
+## Status
 
-Let an `AgentCheck` demand an *independent* verdict from a freshly spawned subagent
-session that does not share the executing agent's context. This closes the honesty gap
-the README already admits: main-session agent-judged checks are self-graded by the same
-agent that performed the step and "cannot structurally prevent a rubber-stamp
-`pass: true`."
+Shipped. An `AgentCheck` can require an independent verdict from a freshly spawned
+review session that does not share the executing agent's context. This closes the
+honesty gap documented in the README: main-session agent-judged checks are self-graded
+and cannot structurally prevent a rubber-stamp `pass: true`.
 
-## Motivation
+## Grading and trust boundaries
 
-- `README.md` explicitly promises a "future fresh-subagent review pattern when
-  independence matters." This feature is that pattern.
-- Today an agent check either runs in the main session (self-grading) or names a
-  subagent via `check.agent`, but `check.agent` is only a *prompt hint*: see
-  `buildAgentCheckInstruction` in `src/prompts.ts:169`, which merely appends
-  "If you use subagents for evaluations, delegate this evaluation to subagent ...".
-  Nothing structurally guarantees an independent evaluator or a clean context.
-- Anvil already knows how to spawn a clean pi session and capture its result: the
-  cmux/herdr runner in `src/subagent/runner.ts` plus the child extension in
-  `src/subagent/child.ts`.
+The two grading modes use separate transports:
 
-## Current state (grounding)
+- **Main-session grading** is in-process. The main `anvil_verdict` tool publishes into
+  the `VerdictBus` used by `executeAgentCheck` in `src/gates.ts`; no sidecar is involved.
+- **Independent-review grading** starts an isolated reviewer child; the child writes a verdict sidecar and the parent reads and validates it after the child exits.
+  The literal wire contract is `{ check_id, pass, reason }`.
 
-- `AgentCheck` (`src/types.ts:54`) has `type`, `id`, `name`, `prompt`, `agent`,
-  `timeoutMs`, `onFail`.
-- `executeAgentCheck` (`src/gates.ts:118`) drives the verdict flow entirely through the
-  main session: it calls `host.sendInstruction`, `host.waitForTurnComplete`, and
-  `host.awaitVerdict`, racing a verdict against turn completion, with one re-prompt via
-  `buildVerdictReprompt`.
-- The verdict arrives through the `anvil_verdict` tool (`src/index.ts:311`) and the
-  `VerdictBus` (`src/gates.ts:24`). The engine correlates verdicts by `checkId`
-  (`makeRuntimeCheckId`, `src/engine.ts:592`).
-- Subagent step execution already exists end to end via `EngineHost.runSubagent`
-  (`src/engine.ts:61`, implemented in `src/index.ts:375`), `SubagentStepRunRequest` /
-  `SubagentStepRunResult` (`src/engine.ts:35`/`:51`), and
-  `runSubagentWithBackend` (`src/subagent/runner.ts:151`), which returns the child's
-  last assistant message as `summary` via `extractLastAssistantText`
-  (`src/subagent/runner.ts:74`).
+The parent accepts exactly `{ check_id, pass, reason }` and rejects payloads with extra
+fields or invalid fields. The parent-side `readIndependentReviewVerdict` parser in
+`src/subagent/runner.ts` requires one bounded UTF-8 JSON record. It rejects a
+missing, malformed, duplicate, or wrong-`check_id` sidecar as transport errors. It also
+rejects symlinks, non-regular or oversized files, extra or invalid fields, empty fields,
+oversized reasons, and unsupported control characters. A failed transport is an
+infrastructure error, not a reviewer-authored failed gate. Reviewer prose is untrusted;
+Anvil replaces it with a fixed parent-controlled pass/fail reason before propagation.
 
-## Design
+Runtime check IDs continue to correlate the verdict with the active check. The child
+must echo the exact ID supplied in its review task, and only the parent converts a
+validated record into a gate result.
 
-### Schema (`src/types.ts`)
+## Public contract
 
-Extend `AgentCheck` with an optional `review` field:
+Independent grading is selected per agent check:
 
 ```ts
 export type AgentReviewMode =
-    | { subagent: WorkflowSubagentBackend }   // force this backend
-    | { subagent: "auto" };                    // detect like delegation "auto"
+	| { subagent: WorkflowSubagentBackend }
+	| { subagent: "auto" };
 
 export interface AgentCheck {
-    type: "agent";
-    // ...existing fields...
-    /**
-     * When set, the verdict is produced by a fresh, independent subagent session
-     * that does not share the executing agent's context. Falls back to main-session
-     * evaluation only if explicitly allowed (see fallback).
-     */
-    review?: AgentReviewMode;
-    /** When review is set but no backend is available: "main" (self-grade) or "fail". Default "fail". */
-    reviewFallback?: "main" | "fail";
+	type: "agent";
+	// ...other fields...
+	review?: AgentReviewMode;
+	reviewFallback?: "main" | "fail";
 }
 ```
 
-Rationale for `reviewFallback` defaulting to `"fail"`: the whole point is independence.
-Silently self-grading when no backend exists would reintroduce the rubber-stamp the
-feature removes, so the safe default is to fail the check with a clear reason. A workflow
-author who prefers graceful degradation opts into `"main"`.
+`reviewFallback` defaults to `"fail"`. This preserves the requested independence when
+no backend is available. A workflow author can explicitly choose `"main"` to degrade
+to self-grading. Review availability is evaluated when the check runs, allowing an
+unavailable reviewer to produce the documented failed gate and follow the check's
+`onFail` policy. This typed backend-unavailable case is the only review failure to which
+`reviewFallback: "main"` applies.
 
-### Verdict transport from an isolated child
+A valid review verdict with `pass: false` is a product-level failed gate: it is
+checkpointed and follows `onFail`. Review launch failures, timeouts, child non-zero
+exits, and missing, malformed, duplicate, or wrong-ID verdict transport are hard
+infrastructure errors. They produce no synthetic `check_result`, retry feedback, or
+loop increment and cannot fall back to main-session grading. Normal delegated-step
+launch, timeout, transport, and non-zero failures use the same hard-stop boundary,
+including inside `forEach`: they bypass check retry and `onItemExhausted: "continue"`,
+stop before later items launch, and do not publish a per-item continuation digest.
+Persisted infrastructure diagnostics use fixed parent-controlled messages and omit
+child/provider output, reviewer prose, item text, secrets, and paths.
 
-The reviewer must return a structured `pass`/`reason`, not just prose. Two viable
-mechanisms:
+## Reviewer inputs
 
-1. **Sidecar verdict file (recommended).** The child extension (`src/subagent/child.ts`)
-   already writes a `<sessionFile>.exit` sidecar on `agent_end`. Add an `anvil_verdict`
-   tool inside the child extension that writes `<sessionFile>.verdict.json`
-   (`{ pass, reason }`). The parent reads that file after `pollForExit`, exactly where
-   `runSubagentWithBackend` already reads the session file. This keeps the isolation
-   guarantee real: the reviewer's only inputs are the criteria + observable result, and
-   its only output is the verdict file.
-2. **Parse the last assistant message.** Reuse `extractLastAssistantText` and require the
-   reviewer to end with a fenced `anvil-verdict` JSON block. Simpler but brittle; prefer
-   option 1.
+`buildIndependentReviewTask` in `src/prompts.ts` supplies only:
 
-### Reviewer prompt
+- workflow, step, and check identities, bounded to 256 UTF-8 bytes; unsafe or oversized
+  identities use deterministic SHA-256 aliases across prompt text and launcher requests;
+- sanitized check criteria rendered without prior `{outputs.<step-id>}` values;
+- the current attempt's bounded **observable step result**;
+- guidance to inspect the working tree directly; and
+- the exact `anvil_verdict` contract: `{ check_id, pass, reason }`.
 
-Add `buildIndependentReviewTask(...)` to `src/prompts.ts`, modeled on
-`buildSubagentStepTask` (`src/prompts.ts:138`). It includes only:
+The observable result comes only from explicit main/chat `anvil_output` capture or a
+successful delegated subagent's final summary. Missing or empty output becomes a fixed
+missing-output state. It is prompt-only and is never added to checkpoints, summaries,
+evidence, retry feedback, sidecars, UI diagnostics, or launcher errors.
 
-- the workflow name and the step id being reviewed, with workflow/step/check identities bounded to 256 UTF-8 bytes and unsafe or oversized values represented by deterministic SHA-256 aliases across prompt text and launcher requests/names; review path components over 255 bytes are aliased, and complete generated task/session and sidecar basenames, including extensions, plus same-directory atomic temporary basenames are capped at 255 bytes,
-- bounded, sanitized check criteria rendered with a restricted context where prior `{outputs.<step-id>}` values are unavailable,
-- the current attempt's bounded observable step result,
-- an instruction to inspect the working tree / artifacts directly (the reviewer starts in
-  `ctx.cwd`) rather than trusting any narrative,
-- the exact `anvil_verdict` contract (check_id, pass, reason).
+The result limit is **8 KiB including the truncation marker**, measured in UTF-8 bytes.
+Capture preprocessing inspects at most the final 64 Ki UTF-16 code units, bounding
+sanitizer and byte-copy work. A partial line at that scan boundary is discarded, or the
+output is reported missing if no complete line remains. Oversized values retain a
+deterministic UTF-8-safe tail with a visible marker.
 
-The observable result comes only from explicit main/chat `anvil_output` capture or a successful delegated subagent's final summary. Missing or empty output renders a fixed missing-output state. It is prompt-only and is never added to checkpoints, summaries, evidence, retry feedback, sidecars, UI diagnostics, or launcher errors.
+Unsupported control characters are normalized. Conservative redaction covers common
+Slack, GitLab, GitHub, OpenAI, AWS, NPM, JWT, cookie, authorization, database-credential,
+and private-key forms, including quoted `.env` and JSON values. Ambiguous clipped or
+unmatched private-key markers fail closed as missing output. Redaction is defense in
+depth, not a complete secret detector; steps must report only intentionally disclosed
+observable text.
 
-The result limit is **8 KiB including the truncation marker**, measured in UTF-8 bytes. Capture preprocessing inspects at most the final 64 Ki UTF-16 code units, bounding sanitizer and byte-copy work even when an executor reports a very large value. A partial line at that scan boundary is discarded (or output is reported missing when no complete line remains), preventing a split credential label from bypassing redaction. Oversized values retain a deterministic UTF-8-safe tail with a visible marker. Unsupported control characters are normalized, and conservative redaction covers Slack, GitLab, GitHub, OpenAI, AWS, NPM tokens, credential-bearing database URLs (including quoted `.env` and JSON forms), JWT, cookie, Basic/Bearer authorization, and private-key forms before truncation. Ambiguous clipped or unmatched private-key markers fail closed as missing output. Redaction is defense in depth rather than a complete secret detector; workflow steps must report only intentionally disclosed observable text.
+The observable result is untrusted quoted data, and the reviewer is told not to follow
+instructions in it. The prompt does not contain the executor transcript, hidden
+reasoning, raw terminal or provider output, retry feedback, or prior workflow output.
 
-The review prompt treats the observable result as untrusted quoted data and tells the reviewer not to follow instructions in it. It does **not** include the executor transcript, hidden reasoning, raw terminal/provider output, prior workflow output, or retry feedback.
+Identity and filesystem-name bounds also apply before launch: 256-byte identity bounds cover launcher names and path/session identities; path components longer than 255 bytes
+are aliased, and each complete generated task/session basename, sidecar basename, and
+atomic temporary basename is capped at 255 bytes.
 
-### Engine / gates wiring
+## Isolation controls
 
-- Add an optional `EngineHost.runReviewSubagent?(request, signal)` OR reuse
-  `runSubagent` with a discriminator on the request. Prefer a dedicated method so the
-  result type can be `{ pass, reason, exitCode, errorMessage, sessionFile }` instead of a
-  free-form summary.
-- In `executeAgentCheck` (`src/gates.ts:118`), branch at the top: if
-  `check.review` is set, resolve the backend (honoring `"auto"` via
-  `detectAutoSubagentBackend`, `src/prompts.ts:227`); if available, call the review path
-  and convert its result straight into a `GateResult`; if unavailable, apply
-  `reviewFallback` (`"fail"` → `pass:false, reason:"no independent reviewer available"`;
-  `"main"` → existing main-session flow).
-- The engine passes `checkId` through unchanged; the reviewer echoes it, so the existing
-  correlation and checkpoints (`check_result`) keep working without change.
+`src/subagent/runner.ts`, `src/subagent/child.ts`, and `src/subagent/review-fs.ts`
+implement the review boundary:
 
-### Validation (`src/validate.ts`)
+- the launcher uses trusted absolute Node/Pi paths, `env -i`, and Bash
+  `--noprofile --norc`;
+- discovered extensions, skills, themes, prompt templates, and context files are
+  disabled;
+- the exact tool allowlist is `read`, `grep`, `find`, `ls`, and `anvil_verdict`; shell,
+  edit, write, and unrestricted built-in filesystem tools are absent;
+- reads are confined to the realpath-resolved workflow cwd, with parent and absolute
+  escapes rejected, symlink traversal denied, and descriptor-aware checks protecting
+  against traversal races;
+- secret-like files and directories such as `.env`, credential/key files, `.ssh`,
+  `.aws`, and `.git` are hidden or rejected recursively;
+- traversal, reads, search output, and UTF-8 processing are bounded; and
+- each reviewer receives an ephemeral home and Pi agent directory containing only the
+  selected provider's required authentication/model configuration. Unrelated provider,
+  cloud, and ambient credentials are not inherited or copied.
 
-- Add `review` and `reviewFallback` to `AGENT_CHECK_KEYS` (`src/validate.ts:36`).
-- In `validateAgentCheck` (`src/validate.ts:260`): validate `review` is
-  `{ subagent: "cmux" | "herdr" | "auto" }` and `reviewFallback` is `"main"` | `"fail"`.
-- Keep delegation availability preflight unchanged. Review backend availability is evaluated
-  when the check runs so `reviewFallback: "fail"` can produce a normal failed `GateResult`,
-  checkpoint the result, and apply the check's `onFail` policy. Only explicit
-  `reviewFallback: "main"` degrades to main-session grading.
+Launch, exit, backend, and transport diagnostics omit raw child/provider output. The
+reviewer-controlled reason is replaced with a fixed pass/fail reason before it can
+reach checkpoints, UI, retry feedback, reports, or resume prompts.
 
-## Implementation steps
+These controls constrain the Pi process through startup configuration and reviewer tool
+access. They are intentionally **not a general-purpose OS or kernel sandbox**.
 
-1. `src/types.ts`: add `AgentReviewMode`, `review`, `reviewFallback` to `AgentCheck`.
-2. `src/validate.ts`: extend key sets and `validateAgentCheck`; add a
-   `validateAgentReview` helper alongside `validateDelegation`.
-3. `src/subagent/child.ts`: register an `anvil_verdict` tool that writes
-   `<sessionFile>.verdict.json`; keep the existing exit-sidecar behavior.
-4. `src/subagent/runner.ts`: add reading of the verdict sidecar to
-   `runSubagentWithBackend` (or a thin `runReviewSubagent` wrapper) and surface
-   `{ pass, reason }` in the result.
-5. `src/prompts.ts`: add `buildIndependentReviewTask`.
-6. `src/engine.ts`: add `runReviewSubagent?` to `EngineHost`; thread review requests.
-7. `src/gates.ts`: branch `executeAgentCheck` on `check.review`.
-8. `src/index.ts`: implement `runReviewSubagent` on the host (reusing
-   `runHerdrSubagent` / `createCmuxSubagentRunner`); expose runtime backend availability to gates.
-9. Docs + skill + example.
+## Runtime flow
 
-## Testing
+1. Validation accepts `review: { subagent: "cmux" | "herdr" | "auto" }` and
+   `reviewFallback: "main" | "fail"`.
+2. `executeAgentCheck` resolves the requested backend. An explicit main fallback uses
+   the existing in-process path; otherwise unavailable required review fails closed.
+3. `buildIndependentReviewTask` constructs the bounded prompt without executor context.
+4. The review-only runner creates an isolated identity and launches the child.
+5. The child exposes only the review filesystem tools and `anvil_verdict`, then writes
+   one exclusive verdict sidecar.
+6. The parent strictly validates the sidecar and returns a sanitized gate result.
+7. Cleanup removes the ephemeral reviewer identity and temporary artifacts.
 
-- `test/gates.test.ts`: with a fake host, assert that when `check.review` is set the
-  review path is taken, the returned `{ pass, reason }` becomes the `GateResult`, and the
-  main-session `sendInstruction` flow is **not** invoked.
-- Fallback matrix: backend unavailable + `reviewFallback:"fail"` → failing gate with the
-  documented reason; `+ "main"` → falls back to existing flow.
-- `test/subagent.test.ts`: verdict-sidecar parsing (present / malformed / missing).
-- A prompt test asserting `buildIndependentReviewTask` contains the criteria and the
-  `anvil_verdict` contract but not the step's executor prompt (independence assertion, as
-  called out in the backlog risk).
-- Keep tests deterministic per `AGENTS.md`: fake the backend adapter; never spawn real
-  cmux/herdr.
+## Regression coverage
 
-## Docs to update
+The shipped tests cover:
 
-- `README.md`: replace the "future fresh-subagent review pattern" caveat with real usage.
-- `skills/anvil-workflow-builder/SKILL.md`: add `review` to the agent-check authoring
-  guidance and explain the `reviewFallback` tradeoff.
-- `examples/workflows/demo.ts`: make the `summary-quality` agent check independent to
-  demonstrate the pattern.
+- independent routing without invoking the main-session instruction path;
+- unavailable-backend fallback behavior;
+- criteria/result prompt isolation and sanitization;
+- fixed executable paths, `env -i`, non-startup Bash, disabled discovered resources,
+  and environment/provider credential isolation;
+- the exact read-only tool allowlist;
+- canonical cwd, parent/absolute rejection, direct and traversal-race symlink defenses,
+  and recursive sensitive-path denial;
+- sidecar success plus missing, malformed, duplicate, symlinked, oversized,
+  wrong-`check_id`, invalid-field, and unsafe-reason cases; and
+- suppression of reviewer prose and raw backend/transport diagnostics.
 
-## Risks & open questions
-
-- **Independence must be real.** The reviewer's prompt and inputs are the guarantee; test
-  it explicitly. Do not pass the executor transcript.
-- **Cost/latency.** Every independent review spawns a session. Document that this is for
-  checks where independence matters, consistent with the README's existing guidance about
-  subagents on non-trivial steps.
-- **Backend requirement.** Independent review needs cmux or herdr. Decide whether a
-  future in-process "sub-session" backend (no multiplexer) is worth it; out of scope here.
-- **Reviewer tool access.** Review sessions use the dedicated no-approval launcher,
-  disable discovered resources and shell/mutation tools, and override `read`, `grep`,
-  `find`, and `ls` with bounded implementations confined to the realpath-resolved
-  workflow cwd. Symlink escapes and secret-like paths are denied. The launcher also
-  creates an ephemeral home and Pi agent directory containing only the selected model
-  provider's auth/model configuration; unrelated provider and cloud credentials are
-  neither inherited nor copied, and the identity directory is removed after the child
-  exits. These controls structurally constrain reviewer-invoked tools, but they are not
-  a general-purpose OS sandbox for the Pi process.
-- **Verdict reason privacy.** Reviewer prose is untrusted and may quote secrets from an
-  artifact or provider response. Anvil validates the bounded `reason` field as part of
-  the sidecar protocol but replaces it with a fixed pass/fail reason before writing or
-  consuming the sidecar. Reviewer-controlled prose therefore cannot reach checkpoints,
-  UI, retry feedback, reports, or resume prompts.
-- **Timeout semantics.** `check.timeoutMs` defaults to 300_000 (`src/gates.ts:22`),
-  tuned for a main-session verdict wait — but an independent review spawns a whole
-  session that must start up and inspect the tree, closer in cost to a subagent step
-  (default 1_800_000, `src/types.ts:93`). Decide which knob governs the review (reusing
-  `check.timeoutMs` is simplest but its default is likely too tight; a separate
-  `review.timeoutMs` with a larger default avoids surprising timeouts) and document it.
-- **Open question:** should `review` also be allowed at step/workflow defaults level
-  (apply to all agent checks) rather than per check? Start per-check; add defaults later
-  if demand appears.
+The documentation contract is covered in `test/workflow-contract.test.ts`, while
+runtime and isolation behavior is covered primarily in `test/subagent.test.ts`,
+`test/gates.test.ts`, and `test/anvil-command.test.ts`.
