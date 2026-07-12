@@ -221,8 +221,10 @@ describe("workflow public contract", () => {
 		const aggregate = steps.find((step) => step.id === "aggregate-review");
 		expect(aggregate?.checks?.map((check) => check.id)).toEqual(["aggregate-workspace-valid", "blocking-review"]);
 		expect(aggregate?.prompt).toEqual(expect.stringContaining("blocker ledger in the review-round context is frozen"));
-		expect(aggregate?.checks?.[1]?.onFail).toMatchObject({ goto: "review-round-context", maxLoops: 2 });
+		expect(aggregate?.prompt).toEqual(expect.stringContaining("exact regression test required to prove the fix"));
+		expect(aggregate?.checks?.[1]?.onFail).toMatchObject({ goto: "review-round-context", maxLoops: 10 });
 		expect(implementation?.prompt).toEqual(expect.stringContaining("{outputs.review-round-context}"));
+		expect(implementation?.prompt).toEqual(expect.stringContaining("focused security remediation pass"));
 	});
 
 	it("documents herdr alongside cmux in the README", () => {
