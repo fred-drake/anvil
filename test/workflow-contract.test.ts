@@ -179,6 +179,7 @@ describe("workflow public contract", () => {
 			"review-security-design",
 			"write-test-stubs",
 			"review-round-context",
+			"assess-remediation-feasibility",
 			"implement-feature",
 			"review-correctness-contracts",
 			"review-security-privacy",
@@ -190,11 +191,14 @@ describe("workflow public contract", () => {
 		const plan = steps.find((step) => step.id === "research-and-plan");
 		const securityDesign = steps.find((step) => step.id === "review-security-design");
 		const testStubs = steps.find((step) => step.id === "write-test-stubs");
+		const feasibility = steps.find((step) => step.id === "assess-remediation-feasibility");
 		const implementation = steps.find((step) => step.id === "implement-feature");
 		expect(plan?.prompt).toEqual(expect.stringContaining("security design and threat-boundary assessment"));
 		expect(securityDesign?.checks).toBeUndefined();
 		expect(securityDesign?.prompt).toEqual(expect.stringContaining("This is an advisory review, not an approval gate"));
 		expect(testStubs?.prompt).toEqual(expect.stringContaining("isolation/security regression case"));
+		expect(feasibility?.prompt).toEqual(expect.stringContaining("materially different architecture"));
+		expect(feasibility?.prompt).toEqual(expect.stringContaining("Do not defer the decision to a human reviewer"));
 		expect(implementation?.checks?.map((check) => check.id)).toEqual(["focused-tests", "tests-and-coverage"]);
 		expect(implementation?.checks?.[0]).toMatchObject({
 			type: "deterministic",
@@ -222,8 +226,9 @@ describe("workflow public contract", () => {
 		expect(aggregate?.checks?.map((check) => check.id)).toEqual(["aggregate-workspace-valid", "blocking-review"]);
 		expect(aggregate?.prompt).toEqual(expect.stringContaining("blocker ledger in the review-round context is frozen"));
 		expect(aggregate?.prompt).toEqual(expect.stringContaining("exact regression test required to prove the fix"));
-		expect(aggregate?.checks?.[1]?.onFail).toMatchObject({ goto: "review-round-context", maxLoops: 10 });
+		expect(aggregate?.checks?.[1]?.onFail).toMatchObject({ goto: "review-round-context", maxLoops: 3 });
 		expect(implementation?.prompt).toEqual(expect.stringContaining("{outputs.review-round-context}"));
+		expect(implementation?.prompt).toEqual(expect.stringContaining("{outputs.assess-remediation-feasibility}"));
 		expect(implementation?.prompt).toEqual(expect.stringContaining("focused security remediation pass"));
 	});
 

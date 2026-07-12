@@ -2,7 +2,7 @@ import { defineWorkflow } from "anvil";
 
 const model = "openai-codex/gpt-5.6-terra:medium";
 const implementationLoopLimit = 3;
-const reviewRemediationLoopLimit = 10;
+const reviewRemediationLoopLimit = 3;
 
 function specialistReviewProtocol(): string {
 	return `Review-round protocol:
@@ -10,8 +10,9 @@ function specialistReviewProtocol(): string {
 - In ROUND 1, perform one comprehensive discovery pass and report every finding in this focus area at once.
 - In ROUND 2, verify the blocker ledger supplied in the remediation context and perform one final comprehensive pass for genuinely new blockers.
 - In ROUND 3 or later, this is CONVERGENCE: gate only on unresolved ledger finding IDs, incomplete remediations, or regressions directly introduced by those remediations.
-- During CONVERGENCE, map variants with the same root cause or acceptance criterion back to the existing ledger ID instead of inventing a new blocker ID.
-- During CONVERGENCE, report unrelated or previously latent new findings as non-blocking follow-up items; do not use them to fail this feature or expand its scope.
+- The CONVERGENCE ledger freezes each finding's ID, root cause, affected assets, threat boundary, reproduction, acceptance criteria, and required regression. Map variants to that frozen finding; do not broaden its scope, threat model, required assets, or acceptance criteria without concrete evidence that remediation introduced a CRITICAL-NEW issue.
+- During CONVERGENCE, the correctness/contracts reviewer is the sole verifier of frozen-ledger remediation. Other specialists must only scan for CRITICAL-NEW issues introduced by remediation and report unrelated or previously latent items as non-blocking follow-up work.
+- Review against the explicit feature requirements and documented threat boundary. Do not convert optional hardening, an excluded OS-sandbox guarantee, or a hypothetical attacker capability outside that boundary into a blocker.
 - Emergency exception: a remediation-introduced credential exposure, arbitrary code execution, destructive data loss, or sandbox escape may still block; label it CRITICAL-NEW and provide concrete evidence that the remediation introduced it.
 - Do not relitigate accepted design decisions without new evidence. Blocking findings must violate an explicit requirement or documented threat boundary, include a concrete failure path, and specify an exact regression test that reproduces the failure.
 - Assign stable finding IDs, preserve them across rounds, and list every ledger ID as resolved or unresolved. Begin the response with exactly one round label: ROUND 1, ROUND 2, or CONVERGENCE.`;
@@ -100,7 +101,7 @@ The zero-based remediation-loop count is {loop}:
 - 1: output "ROUND 2" followed by the aggregate feedback appended below as the blocker ledger.
 - 2 or greater: output "CONVERGENCE" followed by the aggregate feedback appended below as the frozen blocker ledger.
 
-Call the anvil_output tool exactly once with step_id "review-round-context" and only that round label plus ledger. Preserve every finding ID and acceptance criterion from the aggregate feedback.`,
+Call the anvil_output tool exactly once with step_id "review-round-context" and only that round label plus ledger. Preserve every finding ID and its frozen root cause, affected assets, threat boundary, reproduction, acceptance criteria, and required regression from the aggregate feedback.`,
 			checks: [
 				{
 					type: "deterministic",
@@ -109,6 +110,23 @@ Call the anvil_output tool exactly once with step_id "review-round-context" and 
 					command: "test -n {loop}",
 				},
 			],
+		},
+		{
+			id: "assess-remediation-feasibility",
+			title: "Assess remediation feasibility and choose an architecture",
+			model: "openai-codex/gpt-5.6-sol:high",
+			prompt: `For this feature request:
+{input}
+
+Review-round context:
+{outputs.review-round-context}
+
+Before implementation, assess the feasibility of the current remediation ledger. In ROUND 1, state that implementation may proceed from the existing plan. In later rounds:
+- Treat the frozen finding scope, threat boundary, acceptance criteria, and required regression as authoritative; do not silently broaden them.
+- Determine whether the requested guarantee is achievable using the repository's current APIs and architecture.
+- If the prior approach cannot meet the criterion, choose a materially different architecture that can; do not propose another equivalent check at the same race or trust boundary.
+- Reconcile the plan with the documented non-goals (including any non-OS-sandbox boundary) and explain why the chosen design stays within scope.
+- Produce an autonomous, concrete implementation decision with affected modules, a focused regression, and verification commands. Do not defer the decision to a human reviewer.`,
 		},
 		{
 			id: "implement-feature",
@@ -130,9 +148,14 @@ Security design review:
 Review-round context and blocker ledger (empty before review begins):
 {outputs.review-round-context}
 
+Remediation feasibility decision:
+{outputs.assess-remediation-feasibility}
+
 Requirements:
 - Implement real logic in the appropriate core module before touching thin command/extension wiring.
-- On a review retry, remediate every unresolved finding ID in the review-round blocker ledger and report how each was addressed; do not expand into unrelated hardening.
+- On a review retry, remediate every unresolved finding ID in the frozen blocker ledger and report how each was addressed; do not expand its frozen root cause, affected assets, threat boundary, acceptance criteria, or required regression.
+- Follow the feasibility decision. A retry must make a materially different architectural change from any rejected approach; do not add another verification, retry, or test seam at the same unresolved trust boundary.
+- Resolve architectural impasses autonomously: select and implement the feasible in-scope design, or remove unsupported guarantee claims and retain only the documented threat boundary. Do not defer the decision to a human reviewer.
 - Before changing production code for a blocker, add a focused regression test that reproduces its concrete failure path and acceptance criterion. Keep that test as permanent coverage and show that it passes after remediation.
 - For security, privacy, or trust-boundary blockers, perform a focused security remediation pass: test the exact exploit plus relevant boundary/partial-input variants, prefer fail-closed behavior where safe sanitization cannot be proven, and rerun the affected isolation/security tests.
 - Fill in the unit test stubs with meaningful assertions; do not delete coverage unless it is obsolete and replaced.
@@ -180,6 +203,7 @@ Requirements:
 - Verify the implementation satisfies the requested behavior, acceptance criteria, edge cases, and failure cases.
 - Check public TypeScript contracts, command behavior, workflow schema compatibility, and architecture boundaries.
 - Treat correctness regressions, broken contracts, data loss, architecture violations, and incomplete required behavior as blocking.
+- In CONVERGENCE, act as the sole verifier of frozen-ledger remediation; assess every unresolved ledger item only against its frozen scope and acceptance criteria.
 - Do not modify production code, tests, or docs/ISSUE.md; this specialist review should report findings only.
 - Classify each finding as blocking or non-blocking with enough detail for remediation.
 - If you find no issues in this focus area, state that explicitly.`,
@@ -204,6 +228,7 @@ Requirements:
 - Look for unsafe shell execution, command injection, path traversal, unsafe file-system access, secret leakage, untrusted workflow input handling, and environment variable exposure.
 - Check whether new logs, prompts, errors, docs, tests, or command output could expose private data or credentials.
 - Treat exploitable input handling, secret/privacy leakage, unsafe command construction, and destructive file operations as blocking.
+- In CONVERGENCE, do not re-evaluate frozen ledger items; report only concretely evidenced CRITICAL-NEW issues introduced by remediation, plus non-blocking follow-ups.
 - Do not modify production code, tests, or docs/ISSUE.md; this specialist review should report findings only.
 - Classify each finding as blocking or non-blocking with enough detail for remediation.
 - If you find no issues in this focus area, state that explicitly.`,
@@ -228,6 +253,7 @@ Requirements:
 - Look for inefficient file scans, excessive subprocess work, unbounded loops, weak timeout handling, flaky async behavior, race conditions, resource leaks, and large-repo scalability problems.
 - Check retry behavior, concurrency safety, deterministic execution, and failure-mode handling.
 - Treat runaway work, flaky or nondeterministic behavior, resource leaks, timeout hazards, and reliability regressions as blocking.
+- In CONVERGENCE, do not re-evaluate frozen ledger items; report only concretely evidenced CRITICAL-NEW issues introduced by remediation, plus non-blocking follow-ups.
 - Do not modify production code, tests, or docs/ISSUE.md; this specialist review should report findings only.
 - Classify each finding as blocking or non-blocking with enough detail for remediation.
 - If you find no issues in this focus area, state that explicitly.`,
@@ -253,6 +279,7 @@ Requirements:
 - Check readability, repository conventions, TypeScript style, import style, naming, and whether the design is easy to maintain.
 - Check that README, skills, examples, and command documentation stay aligned when behavior or public contracts change.
 - Treat missing required tests, misleading documentation, convention violations that cause maintenance risk, and evidence of stale verification as blocking.
+- In CONVERGENCE, do not re-evaluate frozen ledger items; report only concretely evidenced CRITICAL-NEW issues introduced by remediation, plus non-blocking follow-ups.
 - Do not modify production code, tests, or docs/ISSUE.md; this specialist review should report findings only.
 - Classify each finding as blocking or non-blocking with enough detail for remediation.
 - If you find no issues in this focus area, state that explicitly.`,
@@ -274,9 +301,9 @@ Authoritative review round:
 Round enforcement:
 - In ROUND 1, build a complete, de-duplicated blocker ledger from all specialist reviews.
 - In ROUND 2, verify remediation of the blocker ledger in the review-round context and permit the specialists' final discovery of genuinely new blockers.
-- In CONVERGENCE, the blocker ledger in the review-round context is frozen. Only unresolved ledger IDs, incomplete remediations, remediation-introduced regressions, or a concretely evidenced CRITICAL-NEW issue introduced by remediation may block.
-- In CONVERGENCE, map variants sharing a frozen blocker's root cause or acceptance criterion to that existing ID; do not create a new ID for the same remediation gap.
-- In CONVERGENCE, downgrade unrelated or previously latent newly discovered items to non-blocking follow-up work even if a specialist labelled them blocking.
+- In CONVERGENCE, the blocker ledger in the review-round context is frozen, including each finding's root cause, affected assets, threat boundary, reproduction, acceptance criteria, and required regression. Only an unresolved frozen ledger item, an incomplete remediation within that frozen scope, or a concretely evidenced CRITICAL-NEW issue introduced by remediation may block.
+- In CONVERGENCE, map variants sharing a frozen blocker's root cause and acceptance criteria to that existing ID; do not broaden its threat model, affected assets, or requirements while retaining its ID.
+- In CONVERGENCE, downgrade unrelated, previously latent, optional-hardening, or out-of-boundary items to non-blocking follow-up work even if a specialist labelled them blocking.
 - Preserve stable finding IDs and show every blocker as resolved or unresolved so implementation receives an actionable ledger.
 
 Correctness and contracts review:
@@ -295,7 +322,8 @@ Requirements:
 - Synthesize and de-duplicate all specialist findings under the round rules above.
 - Treat correctness regressions, broken contracts, missing required tests, failing verification, data loss, security/privacy issues, architecture violations, runaway work, and reliability regressions as blocking only when allowed by the current round.
 - If any blocking issues remain, report them clearly with stable IDs, originating reviewer, affected files or behavior, concrete reproduction steps, remediation acceptance criteria, and the exact regression test required to prove the fix; do not fix code or append issue-file entries in this step.
-- Do not mark a blocker resolved unless focused regression coverage reproduces its reported failure path and passes with the remediation.
+- Do not mark a blocker resolved unless focused regression coverage reproduces its frozen failure path and passes with the remediation.
+- When remediation is rejected repeatedly, require a materially different architecture in the next feasibility decision; do not preserve a blocker while expanding its frozen acceptance criteria.
 - Only when no blockers remain, append non-blocking findings to docs/ISSUE.md using that file's existing style and avoid duplicates.
 - If you find no issues, state that explicitly.
 - Begin with the authoritative ROUND 1, ROUND 2, or CONVERGENCE label and end with exactly one decision: "blocking findings remain", "only non-blocking issues recorded", or "no review issues found".`,
