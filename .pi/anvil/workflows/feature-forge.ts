@@ -162,6 +162,7 @@ Requirements:
 - Keep CLI command behavior, README documentation, workflow examples, and TypeScript contracts in sync when the requested feature affects them.
 - Run the plan's most focused affected tests and type checks first; fix those failures before spending time on the full repository check and coverage suite.
 - Then run and fix the full test suite until all tests pass and coverage is at least 85%.
+- After all verification passes and before finishing this step, create a new local Git commit containing the implementation and its tests. Use a Conventional Commit message (for example, feat: ..., fix: ..., or test: ...), do not amend an earlier commit, and do not push. On each review-remediation retry, create a separate new local Conventional Commit after verifying that iteration.
 - Address any feedback from failed verification or review checks before finishing.`,
 			checks: [
 				{
