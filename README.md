@@ -45,7 +45,9 @@ Workflows live in:
 
 Use `/anvil list` to see available workflows, `/anvil validate` to check that one is ready, and `/anvil run` to start a workflow with whatever task input you want to give it.
 
-Use `/anvil history [name]` to list recent runs in the current Pi session, optionally for one workflow. Use `/anvil report [run-id-prefix]` for the latest run or a detailed persisted artifact for one run: check commands and outcomes, timeouts, Git workspace snapshot, changed files, and subagent session paths. The final workflow summary links to the same report. Run reports are session-scoped because they read Anvil's append-only checkpoint entries.
+Use `/anvil history [name]` to list recent runs in the current Pi session, optionally for one workflow. History shows each run's state, duration, last or failing step, and check summary. Use `/anvil report [run-id-prefix]` for the latest run or a detailed report for one run, including reconstructed per-step status, retries, timing, deterministic and agent-check verdicts, Git workspace evidence, changed files, and subagent session paths. The final workflow summary links to the same report.
+
+History and reports are session-scoped and presentation-only: they read bounded recent windows of Anvil's append-only checkpoint entries and never open recorded paths. Persisted display fields are treated as untrusted, size-capped, Markdown-neutralized, and redacted for supported credential and sensitive-path patterns. A truncation notice appears when older entries or report details are omitted.
 
 Anvil captures a Git snapshot before the run, after every successful deterministic check, and after each agent approval. If an agent approval reports pass after the workspace changed since the most recent successful deterministic verification, Anvil fails that approval as stale. This prevents a review from approving code that is different from what was verified; workflows should rerun deterministic verification after intentional changes.
 

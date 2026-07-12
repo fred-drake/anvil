@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { RunSummary, StepRunState } from "../src/engine.ts";
-import type { RunReport } from "../src/history.ts";
+import { buildRunReports, type RunReport } from "../src/history.ts";
 import { formatStatus, formatStepWidget, renderRunHistoryTable, renderRunReport, renderSummaryMarkdown } from "../src/ui.ts";
 
 describe("formatStatus", () => {
@@ -152,7 +152,10 @@ describe("run report renderers", () => {
 			checksRun: 1,
 			checksFailed: 0,
 			loopTotals: {},
+			truncation: [],
+			steps: [{ id: "verify", index: 0, status: "passed", startCount: 1, retryCount: 0, durationMs: 1000, checks: [{ id: "check", type: "deterministic", pass: true, command: "npm test", reason: "command exited 0", timeoutMs: 300000 }] }],
 			subagentSessions: ["/tmp/review.jsonl"],
+			workspaceState: { head: "abc", fingerprint: "123456789012345", changedFiles: ["src/report.ts"], changedFileCount: 1 },
 			checkpoints: [
 				{
 					runId: "run-1", workflowName: "forge", input: "feature", phase: "check_result", timestamp: "2026-07-10T10:00:01.000Z",
@@ -170,5 +173,70 @@ describe("run report renderers", () => {
 		expect(rendered).toContain("`npm test`");
 		expect(rendered).toContain("- `src/report.ts`");
 		expect(rendered).toContain("- `/tmp/review.jsonl`");
+	});
+
+	it("renders a per-step report table with reconstructed status, retries, timings, and deterministic and agent verdicts", () => {
+		const [report] = buildRunReports([
+			{ customType: "anvil-run", data: { runId: "run", workflowName: "forge", input: "task", phase: "step_start", timestamp: "2026-01-01T00:00:00Z", stepId: "verify", stepIndex: 0 } },
+			{ customType: "anvil-run", data: { runId: "run", workflowName: "forge", input: "task", phase: "step_start", timestamp: "2026-01-01T00:00:01Z", stepId: "verify", stepIndex: 0 } },
+			{ customType: "anvil-run", data: { runId: "run", workflowName: "forge", input: "task", phase: "check_result", timestamp: "2026-01-01T00:00:02Z", stepId: "verify", checkId: "tests", checkType: "deterministic", pass: true, command: "npm test" } },
+			{ customType: "anvil-run", data: { runId: "run", workflowName: "forge", input: "task", phase: "check_result", timestamp: "2026-01-01T00:00:03Z", stepId: "verify", checkId: "review", checkType: "agent", pass: true, reason: "approved" } },
+			{ customType: "anvil-run", data: { runId: "run", workflowName: "forge", input: "task", phase: "step_pass", timestamp: "2026-01-01T00:00:04Z", stepId: "verify", stepIndex: 0 } },
+		]);
+		const rendered = renderRunReport(report!);
+
+		expect(rendered).toContain("| Step | Status | Retries | Timing | Checks |");
+		expect(rendered).toMatch(/verify.*passed.*1.*4\.0s.*tests.*deterministic.*review.*agent/s);
+	});
+
+	it("shows the last or failing step in each history row and reports bounded-history truncation", () => {
+		const history = renderRunHistoryTable([{
+			runId: "run", workflowName: "forge", input: "task", finalState: "failed", stepsStarted: 1, lastStepId: "verify", failingStepId: "verify",
+			checksRun: 1, checksFailed: 1, loopTotals: {}, truncation: ["Older session entries were omitted before folding."],
+		}]);
+
+		expect(history).toContain("Last/failing step");
+		expect(history).toContain("verify");
+		expect(history).toContain("Older session entries were omitted before folding.");
+	});
+
+	it("renders incomplete and malformed runs with safe defaults instead of throwing", () => {
+		const [report] = buildRunReports([{ customType: "anvil-run", data: { runId: "run", workflowName: "forge", input: "", phase: "step_start", stepId: "one" } }]);
+		expect(() => renderRunReport(report!)).not.toThrow();
+		expect(renderRunReport(report!)).toMatch(/in progress|incomplete|unknown/);
+	});
+
+	it("prevents hostile checkpoint Markdown, backticks, pipes, newlines, controls, links, and HTML from altering table structure", () => {
+		const hostile = "x`|\n<script>[click](javascript:bad)\u0000";
+		const [report] = buildRunReports([{ customType: "anvil-run", data: { runId: hostile, workflowName: hostile, input: hostile, phase: "step_start", timestamp: hostile, stepId: hostile } }]);
+		const rendered = renderRunReport(report!);
+
+		expect(rendered).not.toMatch(/<script>|javascript:|\u0000/);
+		expect(rendered).not.toContain("x`|");
+		expect(rendered).toContain("x'¦");
+	});
+
+	it("redacts secret-like inputs, commands, reasons, workspace paths, session paths, and raw provider or child diagnostics", () => {
+		const [report] = buildRunReports([{ customType: "anvil-run", data: {
+			runId: "run", workflowName: "forge", input: "TOKEN=input-secret", phase: "run_end", timestamp: "2026-01-01T00:00:00Z", finalState: "failed",
+			reason: "provider error raw child diagnostic TOKEN=reason-secret", sessionFiles: ["/home/me/.ssh/id_rsa"],
+			workspaceState: { head: "abc", fingerprint: "hash", changedFiles: [".env"], changedFileCount: 1 },
+		} }]);
+		const rendered = renderRunReport(report!);
+
+		expect(rendered).not.toMatch(/input-secret|reason-secret|id_rsa|\.env/);
+		expect(rendered).toContain("[external diagnostic redacted]");
+		expect(rendered).toContain("[sensitive path redacted]");
+	});
+
+	it("caps rendered strings, check rows, changed files, and session paths while showing a truncation notice", () => {
+		const report = buildRunReports(Array.from({ length: 2_010 }, (_, index) => ({ customType: "anvil-run", data: {
+			runId: "run", workflowName: "forge", input: "task", phase: "check_result", timestamp: "2026-01-01T00:00:00Z", stepId: "verify",
+			checkId: `check-${index}`, checkType: "deterministic", pass: true, sessionFiles: Array.from({ length: 30 }, (__, path) => `/tmp/${path}`),
+		} })))[0]!;
+		const rendered = renderRunReport(report);
+
+		expect(rendered).toContain("Truncated report data");
+		expect(rendered.length).toBeLessThan(50_000);
 	});
 });

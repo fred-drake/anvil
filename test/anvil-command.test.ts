@@ -365,6 +365,91 @@ describe("/anvil history and report commands", () => {
 			expect.objectContaining({ triggerTurn: false }),
 		);
 	});
+
+	it("filters mixed-workflow history strictly by workflow name", async () => {
+		const entries = [
+			...demoRunEntries("failed"),
+			{ type: "custom", customType: "anvil-run", data: { runId: "other-run", workflowName: "other", input: "other task", phase: "run_end", timestamp: "2026-07-08T00:00:00.000Z", finalState: "succeeded" } },
+		];
+		const { command, pi } = registerAnvilCommand(entries);
+		const ctx = commandContext("/project", entries);
+
+		await command!.handler("history demo", ctx);
+
+		const output = String(pi.sendMessage.mock.calls[0]?.[0].content);
+		expect(output).toContain("run-prev");
+		expect(output).not.toContain("other-run");
+	});
+
+	it("notifies for empty sessions and named history or report misses without rendering", async () => {
+		const entries: Array<Record<string, unknown>> = [];
+		const { command, pi } = registerAnvilCommand(entries);
+		const ctx = commandContext("/project", entries);
+
+		await command!.handler("history", ctx);
+		await command!.handler("report", ctx);
+		await command!.handler("history missing", ctx);
+		await command!.handler("report missing-run", ctx);
+
+		expect(ctx.ui.notify).toHaveBeenCalledWith("No Anvil runs recorded in this session.", "info");
+		expect(ctx.ui.notify).toHaveBeenCalledWith('No Anvil runs recorded for workflow "missing" in this session.', "info");
+		expect(ctx.ui.notify).toHaveBeenCalledWith('No Anvil run matches "missing-run" in this session.', "info");
+		expect(pi.sendMessage).not.toHaveBeenCalled();
+	});
+
+	it("reports an ambiguous run-id prefix without rendering a report and defaults to the newest bounded session run", async () => {
+		const entries = [
+			...demoRunEntries("failed"),
+			{ type: "custom", customType: "anvil-run", data: { runId: "run-present", workflowName: "demo", input: "newest", phase: "run_end", timestamp: "2026-07-08T00:00:00.000Z", finalState: "succeeded" } },
+		];
+		const { command, pi } = registerAnvilCommand(entries);
+		const ctx = commandContext("/project", entries);
+
+		await command!.handler("report run-p", ctx);
+		expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringMatching(/ambiguous/i), "warning");
+		expect(pi.sendMessage).not.toHaveBeenCalledWith(expect.objectContaining({ customType: "anvil-report" }), expect.anything());
+
+		await command!.handler("report", ctx);
+		expect(pi.sendMessage).toHaveBeenCalledWith(
+			expect.objectContaining({ customType: "anvil-report", content: expect.stringContaining("newest") }),
+			expect.objectContaining({ triggerTurn: false }),
+		);
+	});
+
+	it("keeps history and reports session-scoped when entries contain hostile checkpoint payloads", async () => {
+		const secret = "TOKEN=session-secret`|\n<script>[x](javascript:bad)";
+		const entries = [{ type: "custom", customType: "anvil-run", data: {
+			runId: "hostile-run", workflowName: "demo", input: secret, phase: "run_end", timestamp: "2026-07-08T00:00:00.000Z",
+			finalState: "failed", reason: "provider error child diagnostic TOKEN=reason-secret",
+		} }];
+		const { command, pi } = registerAnvilCommand(entries);
+		const ctx = commandContext("/project", entries);
+
+		await command!.handler("history", ctx);
+		await command!.handler("report hostile", ctx);
+		const output = pi.sendMessage.mock.calls.map(([message]) => String(message.content)).join("\n");
+		expect(output).not.toMatch(/session-secret|reason-secret|<script>|javascript:/);
+		expect(output).toContain("[external diagnostic redacted]");
+	});
+
+	it("posts sanitized, bounded reports without reading reported paths, resolving symlinks, or launching subprocesses", async () => {
+		const entries = Array.from({ length: 2_010 }, (_, index) => ({ type: "custom", customType: "anvil-run", data: {
+			runId: "bounded-run", workflowName: "demo", input: "task", phase: "check_result", timestamp: "2026-07-08T00:00:00.000Z",
+			stepId: "verify", checkId: `check-${index}`, checkType: "deterministic", pass: true,
+			sessionFiles: ["../../etc/passwd", "/does/not/exist", "/home/me/.ssh/id_rsa"],
+		} }));
+		const { command, pi } = registerAnvilCommand(entries);
+		const ctx = commandContext("/project", entries);
+
+		await command!.handler("report", ctx);
+		const output = String(pi.sendMessage.mock.calls[0]?.[0].content);
+		expect(output).toContain("Truncated report data");
+		expect(output).not.toContain("id_rsa");
+		expect(output.length).toBeLessThan(50_000);
+		expect(pi.exec).not.toHaveBeenCalled();
+		expect(pi.sendUserMessage).not.toHaveBeenCalled();
+		expect(pi.appendEntry).not.toHaveBeenCalled();
+	});
 });
 
 describe("/anvil resume command", () => {
@@ -446,6 +531,27 @@ describe("/anvil resume command", () => {
 		expect(instruction).toContain("Implement Resume task; retry 3");
 		expect(instruction).not.toContain("Plan Resume task");
 		expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining('Resumed Anvil workflow "demo"'), "info");
+	});
+
+	it("resumes with the byte-for-byte original input instead of presentation-sanitized checkpoint text", async () => {
+		root = await mkdtemp(join(tmpdir(), "anvil-command-"));
+		const project = join(root, "project");
+		await writeDemoWorkflow(project);
+		const entries = demoRunEntries("failed").map((checkpoint) => ({
+			...checkpoint,
+			data: { ...(checkpoint.data as Record<string, unknown>), input: "TOKEN=original-value" },
+		}));
+		const { command, pi } = registerAnvilCommand(entries);
+		const ctx = commandContext(project, entries);
+
+		await command!.handler("resume", ctx);
+		expect(String(pi.sendMessage.mock.calls[0]?.[0].content)).not.toContain("original-value");
+
+		await command!.handler("resume 2", ctx);
+		await waitUntil(() => pi.sendUserMessage.mock.calls.length > 0);
+
+		const instruction = pi.sendUserMessage.mock.calls[0]![0] as string;
+		expect(instruction).toContain("Implement TOKEN=original-value");
 	});
 
 	it("allows resuming a run that stopped after a breaker failure", async () => {

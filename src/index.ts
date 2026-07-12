@@ -6,7 +6,7 @@ import { defineTool, type ExtensionAPI, type ExtensionCommandContext } from "@ea
 import { discoverWorkflows, type DiscoveredWorkflow } from "./discovery.ts";
 import { type EngineHost, newRunId, runWorkflow, type StepModelSelection, type WorkspaceState } from "./engine.ts";
 import { AnvilAbortError } from "./errors.ts";
-import { buildRunHistory, buildRunReports, toAnvilCheckpoint } from "./history.ts";
+import { buildRunHistory, buildRunReports, rawInputFromTerminalCheckpoint, toAnvilCheckpoint } from "./history.ts";
 import { VerdictBus } from "./gates.ts";
 import { buildSubagentResultMessage, workflowSubagentBackends } from "./prompts.ts";
 import { cmuxUnavailableMessage, isCmuxAvailable } from "./subagent/cmux.ts";
@@ -33,6 +33,7 @@ type ResumableRun = {
 	runId: string;
 	workflowName: string;
 	input: string;
+	displayInput: string;
 	finalState: "failed" | "aborted";
 	timestamp: string;
 	lastStepIndex?: number;
@@ -802,13 +803,15 @@ function findLatestResumableRun(entries: unknown[]): ResumableRun | undefined {
 		}
 		if (checkpoint.phase !== "run_end") continue;
 		if (checkpoint.finalState !== "aborted" && checkpoint.finalState !== "failed") continue;
-		if (!checkpoint.workflowName || checkpoint.input === undefined) continue;
+		const rawInput = rawInputFromTerminalCheckpoint(entry);
+		if (!checkpoint.workflowName || rawInput === undefined) continue;
 		const startedStep = lastStartedStep.get(checkpoint.runId);
 		const failure = lastFailure.get(checkpoint.runId);
 		latest = {
 			runId: checkpoint.runId,
 			workflowName: checkpoint.workflowName,
-			input: checkpoint.input,
+			input: rawInput,
+			displayInput: checkpoint.input,
 			finalState: checkpoint.finalState,
 			timestamp: checkpoint.timestamp ?? "",
 			lastStepIndex: startedStep?.index,
@@ -827,7 +830,7 @@ function formatResumeStepMap(run: ResumableRun, workflow: WorkflowDefinition): s
 		`# Resume Anvil workflow \`${workflow.name}\``,
 		"",
 		`Latest resumable run: \`${run.runId}\` (${run.finalState}, ${formatResumeTimestamp(run.timestamp)})`,
-		`Task input: ${run.input || "_(empty)_"}`,
+		`Task input: ${run.displayInput || "_(empty)_"}`,
 		`Last started step: ${formatResumeStepReference(suggestedStepNumber, suggestedStep)} at ${formatResumeTimestamp(run.lastStepStartedAt)}`,
 		`Failure reason: ${run.lastFailureReason?.trim() || "_(not recorded)_"}${run.lastFailureTimestamp ? ` (${formatResumeTimestamp(run.lastFailureTimestamp)})` : ""}`,
 		"",

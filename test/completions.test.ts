@@ -63,6 +63,11 @@ describe("getAnvilCompletions", () => {
 		expect(await getAnvilCompletions("hist", project)).toEqual([{ value: "history", label: "history" }]);
 	});
 
+	it("keeps report as a bare subcommand completion and does not expose cross-session run identifiers", async () => {
+		expect(await getAnvilCompletions("rep", project)).toEqual([{ value: "report", label: "report" }]);
+		expect(await getAnvilCompletions("report run-", project)).toBeNull();
+	});
+
 	it("completes workflow names for history", async () => {
 		const completions = await getAnvilCompletions("history feature", project);
 

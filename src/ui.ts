@@ -1,5 +1,5 @@
 import type { RunSummary, StepRunState, WorkspaceState } from "./engine.ts";
-import type { RunHistoryEntry, RunReport } from "./history.ts";
+import { HISTORY_LIMITS, type RunHistoryEntry, type RunReport } from "./history.ts";
 
 export interface StatusInfo {
 	workflowName: string;
@@ -94,34 +94,50 @@ export function renderSummaryMarkdown(summary: RunSummary): string {
 
 export function renderRunHistoryTable(entries: RunHistoryEntry[], limit = 20): string {
 	const recent = entries.slice(-limit).reverse();
-	const lines = ["# Anvil run history", "", "| Run | Workflow | Started | Duration | State | Checks |", "| --- | --- | --- | --- | --- | --- |"];
+	const lines = [
+		"# Anvil run history",
+		"",
+		"| Run | Workflow | Started | Duration | State | Last/failing step | Checks |",
+		"| --- | --- | --- | --- | --- | --- | --- |",
+	];
 	for (const entry of recent) {
 		const state = entry.finalState === "succeeded" ? "✅" : entry.finalState === "failed" ? "❌" : entry.finalState === "aborted" ? "⏹" : "▶";
+		const step = entry.failingStepId ?? entry.lastStepId ?? (entry.lastStepIndex === undefined ? "—" : `#${entry.lastStepIndex + 1}`);
 		lines.push(
-			`| \`${escapePipes(entry.runId)}\` | \`${escapePipes(entry.workflowName)}\` | ${escapePipes(entry.startedAt ?? "unknown")} | ${formatDuration(entry.durationMs)} | ${state} | ${entry.checksRun - entry.checksFailed}/${entry.checksRun} |`,
+			`| \`${escapePipes(entry.runId)}\` | \`${escapePipes(entry.workflowName)}\` | ${escapePipes(entry.startedAt ?? "unknown")} | ${formatDuration(entry.durationMs)} | ${state} | \`${escapePipes(step)}\` | ${entry.checksRun - entry.checksFailed}/${entry.checksRun} |`,
 		);
 	}
 	if (entries.length > limit) lines.push("", `Showing the ${limit} most recent of ${entries.length} runs.`);
+	const notices = [...new Set(recent.flatMap((entry) => entry.truncation ?? []))];
+	if (notices.length > 0) lines.push("", `Truncated history data: ${notices.map(escapePipes).join(" ")}`);
 	return lines.join("\n");
 }
 
 export function renderRunReport(report: RunReport): string {
 	const state = report.finalState === "succeeded" ? "✅" : report.finalState === "failed" ? "❌" : report.finalState === "aborted" ? "⏹" : "▶";
 	const lines = [
-		`# ${state} Anvil run \`${report.runId}\``,
+		`# ${state} Anvil run \`${escapePipes(report.runId)}\``,
 		"",
-		`Workflow: \`${report.workflowName}\``,
-		`Started: ${report.startedAt ?? "unknown"}`,
-		`Ended: ${report.endedAt ?? "in progress"}`,
+		`Workflow: \`${escapePipes(report.workflowName)}\``,
+		`Started: ${escapePipes(report.startedAt ?? "unknown")}`,
+		`Ended: ${escapePipes(report.endedAt ?? "in progress")}`,
 		`Duration: ${formatDuration(report.durationMs)}`,
-		`Task input: ${report.input || "_(empty)_"}`,
+		`Task input: ${escapePipes(report.input) || "_(empty)_"}`,
 		"",
-		"## Checks",
+		"## Steps",
 		"",
-		"| Step | Check | Type | Result | Evidence |",
+		"| Step | Status | Retries | Timing | Checks |",
 		"| --- | --- | --- | --- | --- |",
 	];
-	const checks = report.checkpoints.filter((checkpoint) => checkpoint.phase === "check_result");
+	const steps = report.steps.slice(0, HISTORY_LIMITS.checkCount);
+	if (steps.length === 0) lines.push("| — | incomplete | 0 | unknown | No steps recorded |");
+	for (const step of steps) {
+		const checks = step.checks.map((check) => `${escapePipes(check.id)} (${check.type}) ${check.pass ? "✔" : "✖"}`).join("<br>");
+		lines.push(`| \`${escapePipes(step.id)}\` | ${step.status} | ${step.retryCount} | ${formatDuration(step.durationMs)} | ${checks || "—"} |`);
+	}
+
+	lines.push("", "## Checks", "", "| Step | Check | Type | Result | Evidence |", "| --- | --- | --- | --- | --- |");
+	const checks = steps.flatMap((step) => step.checks.map((check) => ({ stepId: step.id, ...check }))).slice(0, HISTORY_LIMITS.checkCount);
 	if (checks.length === 0) lines.push("| — | — | — | — | No checks recorded |");
 	for (const check of checks) {
 		const evidence = [
@@ -129,15 +145,18 @@ export function renderRunReport(report: RunReport): string {
 			check.timeoutMs ? `${check.timeoutMs}ms timeout` : undefined,
 			check.reason ? escapePipes(check.reason) : undefined,
 		].filter(Boolean).join("<br>");
-		lines.push(`| \`${escapePipes(check.stepId ?? "unknown")}\` | \`${escapePipes(check.checkId ?? "unknown")}\` | ${check.checkType ?? "unknown"} | ${check.pass ? "✔ pass" : "✖ fail"} | ${evidence || "—"} |`);
+		lines.push(`| \`${escapePipes(check.stepId)}\` | \`${escapePipes(check.id)}\` | ${check.type} | ${check.pass ? "✔ pass" : "✖ fail"} | ${evidence || "—"} |`);
 	}
-	const endCheckpoint = [...report.checkpoints].reverse().find((checkpoint) => checkpoint.phase === "run_end");
-	lines.push("", "## Workspace", formatWorkspaceState(endCheckpoint?.workspaceState));
-	if (endCheckpoint?.workspaceState?.changedFiles.length) {
-		lines.push("Workspace files changed (may include pre-existing changes):", ...endCheckpoint.workspaceState.changedFiles.map((file) => `- \`${file}\``));
+
+	lines.push("", "## Workspace", formatWorkspaceState(report.workspaceState));
+	if (report.workspaceState?.changedFiles.length) {
+		lines.push("Workspace files changed (may include pre-existing changes):", ...report.workspaceState.changedFiles.slice(0, HISTORY_LIMITS.pathCount).map((file) => `- \`${escapePipes(file)}\``));
 	}
-	if (report.subagentSessions.length > 0) lines.push("", "## Subagent sessions", ...report.subagentSessions.map((file) => `- \`${file}\``));
-	if (report.failureReason) lines.push("", `Failure: ${report.failureReason}`);
+	if (report.subagentSessions.length > 0) {
+		lines.push("", "## Subagent sessions", ...report.subagentSessions.slice(0, HISTORY_LIMITS.pathCount).map((file) => `- \`${escapePipes(file)}\``));
+	}
+	if (report.failureReason) lines.push("", `Failure: ${escapePipes(report.failureReason)}`);
+	if (report.truncation.length > 0) lines.push("", "## Truncated report data", ...report.truncation.map((notice) => `- ${escapePipes(notice)}`));
 	return lines.join("\n");
 }
 
