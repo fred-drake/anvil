@@ -16,69 +16,6 @@ at the bottom.
 
 ---
 
-## 3. Mid-run reload and id-based resume
-
-📄 **Detailed plan:** [`features/03-mid-run-reload.md`](features/03-mid-run-reload.md)
-
-**Why:** Two related gaps, one already latent and one new. First, resume is silently
-unsafe across edits: `findLatestResumableRun` (`src/index.ts`) and `resolveResumeState`
-(`src/engine.ts`) locate the resume point purely by numeric step index and never match it
-back to a step id, so inserting, removing, or reordering steps between a failed run and
-its resume drops you onto the wrong step with no error. Resume also starts `outputs` and
-`feedbackByStep` empty, so a resumed run loses every prior step's captured output — and
-now that step outputs (shipped) landed, that is real lost state, not just cosmetics.
-Second, there is no way to edit a *running* workflow and have the engine pick up the
-change: the definition is imported once at run start and never re-read, so tuning a
-workflow means aborting and restarting. Closing both turns Anvil into something you can
-train as you use it.
-
-**Implementation status:** Phase 1 shipped in `c5d4623`. Phase 2 is now implemented as explicit `/anvil run --watch`, with canonical single-source reload, stable-id state reconciliation, and checkpoint definition provenance.
-
-**Original state:** The loader already re-reads fresh — jiti with
-`moduleCache: false, fsCache: false` (`src/discovery.ts`) — and every run/resume path
-discovers with `useCache: false`, so re-importing to pick up edits is already solved at
-the loader level. The obstacle is entirely in the engine: `runWorkflow` closes over
-`options.workflow` and reads `options.workflow.steps[stepIndex]` each iteration but never
-re-fetches, and the parallel `steps: StepRunState[]` array plus `stepIndex` are
-index-addressed while all durable state (`loopCounts`, `outputs`, `feedbackByStep`,
-checkpoints, `onFail.goto`) is keyed by `step.id`. No id↔index reconciliation exists
-anywhere.
-
-**Design sketch:**
-- **Phase 1 — id-based resume (the priority).** Match the resume point by the last
-  started step's id (checkpoints already carry `stepId`) against the current on-disk
-  definition, instead of trusting `stepNumber - 1`. Rebuild the `StepRunState[]` array by
-  id, preserving status/loops for surviving ids and marking genuinely new steps pending.
-  Rehydrate `outputs` (and optionally feedback) for already-completed steps by folding the
-  checkpoint stream — the same reader #2 builds. Fail with a clear message when the
-  resume-target id no longer exists. Keep the existing positional `/anvil resume <n>`
-  working for back-compat.
-- **Phase 2 — dev-mode reload.** An opt-in (e.g. `/anvil run --watch` or a
-  `reloadBetweenSteps` dev flag) that, at the top of the run loop — the one safe boundary,
-  before the next step is read — re-discovers the workflow, re-runs `validateWorkflow`,
-  and swaps `options.workflow` only if valid, keeping the previous definition and warning
-  on a broken or mid-edit file. Reload takes effect only at step boundaries, never
-  mid-step or mid-`forEach` item. Revalidate `onFail.goto` targets against the new
-  definition and stamp a definition-version marker into each checkpoint so history and
-  resume stay coherent across an edited run.
-
-**Files:** `src/engine.ts` (id-based `resolveResumeState`, rebuild-`StepRunState`-by-id,
-the reload hook at the loop head), `src/index.ts` (resume matching by id, output
-rehydration shared with #2's reader, run/resume arg + flag parsing), `src/discovery.ts`
-(re-discovery helper keyed by the existing mtime signature), `src/validate.ts`,
-`src/types.ts` (only if a dev flag is surfaced on the definition), tests in
-`test/engine.test.ts` and `test/anvil-command.test.ts`, `README.md`,
-`skills/anvil-workflow-builder/SKILL.md`.
-
-**Risks:** Phase 1 touches the resume/replay contract — it must stay backward compatible
-with index-based `/anvil resume <n>` while adding id matching. Phase 2 is in real tension
-with Anvil's deterministic, unattended thesis: a run stops being defined by (file +
-input), so keep it strictly opt-in and dev-facing, and never let a reload of a broken file
-corrupt a live run. Sequence after #2, whose checkpoint-folding reader is the natural
-substrate for both id matching and output rehydration.
-
----
-
 ## 4. `/anvil status`
 
 📄 **Detailed plan:** [`features/04-status-command.md`](features/04-status-command.md)
@@ -242,9 +179,6 @@ widen the trust surface.
 
 The list above is already in build order. The dependencies driving it:
 
-- **#3 (mid-run reload / id-based resume)** reuses the shipped history reader to match
-  resume by step id and rehydrate step outputs; its dev-mode reload phase remains strictly
-  opt-in.
 - **#4 (status)** can also share the history reader.
 - **#5 (dry-run), #8 (hooks), #9 (budget)** are largely independent quality-of-life —
   orderable to taste.
@@ -265,6 +199,10 @@ Features that have landed. Kept here so the cross-references above (and inside
 [`docs/features/`](features/)) still resolve; their detailed plans remain as design
 records.
 
+- **Mid-run reload and id-based resume** — Phase 1 shipped in `c5d4623`; opt-in
+  `/anvil run --watch` Phase 2 shipped in `310cecf`. Resume reconciles by stable step id
+  and rehydrates outputs; watch reloads only valid, canonical workflow changes between
+  outer steps. Plan: [`features/03-mid-run-reload.md`](features/03-mid-run-reload.md).
 - **Step outputs / data passing between steps** — shipped in `8efa1b7`.
   `WorkflowContext.outputs` (keyed by step id), `{outputs.<id>}` / `ctx.outputs`
   templating, and `outputFrom` deterministic capture. Plan:
