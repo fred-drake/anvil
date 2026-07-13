@@ -32,7 +32,9 @@ change: the definition is imported once at run start and never re-read, so tunin
 workflow means aborting and restarting. Closing both turns Anvil into something you can
 train as you use it.
 
-**Current state:** The loader already re-reads fresh — jiti with
+**Implementation status:** Phase 1 shipped in `c5d4623`. Phase 2 is now implemented as explicit `/anvil run --watch`, with canonical single-source reload, stable-id state reconciliation, and checkpoint definition provenance.
+
+**Original state:** The loader already re-reads fresh — jiti with
 `moduleCache: false, fsCache: false` (`src/discovery.ts`) — and every run/resume path
 discovers with `useCache: false`, so re-importing to pick up edits is already solved at
 the loader level. The obstacle is entirely in the engine: `runWorkflow` closes over

@@ -3,7 +3,12 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Type, type Api, type Model } from "@earendil-works/pi-ai";
 import { defineTool, type ExtensionAPI, type ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
-import { discoverWorkflows, type DiscoveredWorkflow } from "./discovery.ts";
+import {
+	discoverWorkflows,
+	pinWorkflowSource,
+	reloadPinnedWorkflow,
+	type DiscoveredWorkflow,
+} from "./discovery.ts";
 import { type EngineHost, newRunId, runWorkflow, type StepModelSelection, type WorkspaceState } from "./engine.ts";
 import { AnvilAbortError } from "./errors.ts";
 import {
@@ -196,9 +201,9 @@ export default function piAnvil(pi: ExtensionAPI) {
 			return;
 		}
 
-		const { name, input } = parseRunArgs(rest);
-		if (!name) {
-			ctx.ui.notify("Usage: /anvil run <workflow-name> <task input>", "warning");
+		const { name, input, watch, error } = parseRunArgs(rest);
+		if (error || !name) {
+			ctx.ui.notify(error ?? "Usage: /anvil run [--watch] <workflow-name> <task input>", "warning");
 			return;
 		}
 
@@ -216,6 +221,7 @@ export default function piAnvil(pi: ExtensionAPI) {
 				postCommandMessage(piApi, "anvil-validate", formatWorkflowErrors(workflow));
 				return;
 			}
+			const pinnedSource = watch ? await pinWorkflowSource(workflow) : undefined;
 
 			if (!preflightSubagentBackends(workflow.workflow, ctx)) return;
 
@@ -233,7 +239,7 @@ export default function piAnvil(pi: ExtensionAPI) {
 				runCmuxReviewSubagent,
 			);
 			launched = true;
-			ctx.ui.notify(`Started Anvil workflow "${workflow.workflow.name}" (${runId}).`, "info");
+			ctx.ui.notify(`Started Anvil workflow "${workflow.workflow.name}"${watch ? " in watch mode" : ""} (${runId}).`, "info");
 
 			void runWorkflow({
 				workflow: workflow.workflow,
@@ -242,6 +248,7 @@ export default function piAnvil(pi: ExtensionAPI) {
 				host,
 				runId,
 				signal: controller.signal,
+				reload: pinnedSource ? () => reloadPinnedWorkflow(pinnedSource) : undefined,
 			})
 				.catch((error) => {
 					ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
@@ -783,9 +790,17 @@ function parseAnvilArgs(args: string): { subcommand: string; rest: string } {
 	return { subcommand: match?.[1] ?? "list", rest: match?.[2] ?? "" };
 }
 
-function parseRunArgs(rest: string): { name: string; input: string } {
-	const match = /^(\S+)(?:\s+([\s\S]*))?$/.exec(rest.trim());
-	return { name: match?.[1] ?? "", input: match?.[2] ?? "" };
+function parseRunArgs(rest: string): { name: string; input: string; watch: boolean; error?: string } {
+	const trimmed = rest.trim();
+	if (!trimmed) return { name: "", input: "", watch: false };
+	const watch = trimmed === "--watch" || trimmed.startsWith("--watch ");
+	const value = watch ? trimmed.slice("--watch".length).trimStart() : trimmed;
+	if (!watch && value.startsWith("--")) {
+		return { name: "", input: "", watch: false, error: "Usage: /anvil run [--watch] <workflow-name> <task input>" };
+	}
+	const match = /^(\S+)(?:\s+([\s\S]*))?$/.exec(value);
+	if (!match) return { name: "", input: "", watch, error: "Usage: /anvil run [--watch] <workflow-name> <task input>" };
+	return { name: match[1]!, input: match[2] ?? "", watch };
 }
 
 function parseResumeArgs(rest: string): { stepNumber?: number; retryCount?: number; error?: string } {

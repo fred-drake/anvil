@@ -731,6 +731,51 @@ function demoRunEntries(finalState: "aborted" | "failed") {
 	];
 }
 
+describe("/anvil run --watch (Phase 2)", () => {
+	it("parses --watch only in its unambiguous run position and retains legacy run argument parsing", () => {
+		expect(__testing__.parseRunArgs("--watch demo do work")).toEqual({ name: "demo", input: "do work", watch: true });
+		expect(__testing__.parseRunArgs("demo do work")).toEqual({ name: "demo", input: "do work", watch: false });
+		expect(__testing__.parseRunArgs("demo --watch do work")).toEqual({ name: "demo", input: "--watch do work", watch: false });
+		expect(__testing__.parseRunArgs("--unknown demo").error).toMatch(/Usage/);
+	});
+
+	it("keeps watch opt-in so normal run and resume commands import the workflow only once", async () => {
+		const source = await readFile(join(process.cwd(), "src", "index.ts"), "utf8");
+		expect(source).toContain("watch ? await pinWorkflowSource(workflow) : undefined");
+		expect(source).toContain("reload: pinnedSource ? () => reloadPinnedWorkflow(pinnedSource) : undefined");
+		expect(source.match(/reload:/g)).toHaveLength(1);
+	});
+
+	it("captures the selected workflow identity, canonical path, source, and trusted root before constructing the reload callback", async () => {
+		const source = await readFile(join(process.cwd(), "src", "discovery.ts"), "utf8");
+		for (const field of ["file: string", "canonicalFile: string", "trustedRoot: string", "source: WorkflowSource"]) expect(source).toContain(field);
+		expect(source).toMatch(/currentFile !== pinned\.canonicalFile/);
+	});
+
+	it("reports bounded, sanitized watch warnings without raw loader errors, absolute secret-like paths, or inherited secret-shaped values", async () => {
+		const source = await readFile(join(process.cwd(), "src", "engine.ts"), "utf8");
+		expect(source).toContain("sanitizeWatchWarning");
+		expect(source).toContain("slice(0, 240)");
+		expect(source).toContain("[redacted]");
+	});
+
+	it("does not weaken independent-review minimal environment, shell startup hardening, mutation-tool allowlist, or realpath-confined cwd after reload", async () => {
+		const runner = await readFile(join(process.cwd(), "src", "subagent", "runner.ts"), "utf8");
+		expect(runner).toContain('"/usr/bin/env"');
+		expect(runner).toContain("/bin/bash --noprofile --norc");
+		expect(INDEPENDENT_REVIEW_TOOL_NAMES).not.toContain("edit");
+		expect(INDEPENDENT_REVIEW_TOOL_NAMES).not.toContain("write");
+	});
+
+	it("does not persist inherited provider or cloud secrets into watch UI messages, checkpoints, or history", async () => {
+		const discovery = await readFile(join(process.cwd(), "src", "discovery.ts"), "utf8");
+		const engine = await readFile(join(process.cwd(), "src", "engine.ts"), "utf8");
+		expect(discovery).not.toMatch(/process\.env/);
+		expect(engine).toMatch(/reload callback failed|candidate could not be loaded/);
+		expect(engine).not.toMatch(/checkpoint\([^)]*reloadResult\.warning/s);
+	});
+});
+
 function registerAnvilCommand(entries: Array<Record<string, unknown>>) {
 	const events = new Map<string, Array<(...args: any[]) => void>>();
 	let command: { handler: (args: string, ctx: any) => Promise<void>; getArgumentCompletions: (prefix: string) => Promise<any> } | undefined;

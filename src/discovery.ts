@@ -1,5 +1,5 @@
-import { readdir, stat } from "node:fs/promises";
-import { basename, extname, join } from "node:path";
+import { readdir, realpath, stat } from "node:fs/promises";
+import { basename, dirname, extname, isAbsolute, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createJiti } from "jiti";
 import type { AnvilPathOptions } from "./paths.ts";
@@ -15,6 +15,21 @@ export interface DiscoveredWorkflow {
 	source: WorkflowSource;
 	workflow?: WorkflowDefinition;
 	errors?: string[];
+}
+
+export interface PinnedWorkflowSource {
+	/** Original selected path, retained only for canonical identity checks. */
+	file: string;
+	canonicalFile: string;
+	trustedRoot: string;
+	source: WorkflowSource;
+	/** Last observed trusted-root input signature; advanced before each changed load attempt. */
+	observedSignature: string;
+}
+
+export interface WatchedWorkflowReloadResult {
+	workflow?: WorkflowDefinition;
+	warning?: string;
 }
 
 const WORKFLOW_EXTENSIONS = new Set([".ts", ".js", ".mjs"]);
@@ -48,6 +63,38 @@ export async function discoverWorkflows(options: WorkflowDiscoveryOptions = {}):
 	return workflows;
 }
 
+export async function pinWorkflowSource(selected: DiscoveredWorkflow): Promise<PinnedWorkflowSource> {
+	const trustedRoot = await realpath(dirname(selected.file));
+	const canonicalFile = await realpath(selected.file);
+	if (!isWithinRoot(canonicalFile, trustedRoot)) throw new Error("Selected workflow is outside its trusted workflow root.");
+	return {
+		file: selected.file,
+		canonicalFile,
+		trustedRoot,
+		source: selected.source,
+		observedSignature: await workflowRootSignature(trustedRoot),
+	};
+}
+
+/** Fresh-load exactly one initially selected source after fail-closed canonical-path checks. */
+export async function reloadPinnedWorkflow(pinned: PinnedWorkflowSource): Promise<WatchedWorkflowReloadResult> {
+	try {
+		const [currentRoot, currentFile] = await Promise.all([realpath(dirname(pinned.file)), realpath(pinned.file)]);
+		if (currentRoot !== pinned.trustedRoot || currentFile !== pinned.canonicalFile || !isWithinRoot(currentFile, pinned.trustedRoot)) {
+			return { warning: "selected workflow source identity changed" };
+		}
+		const signature = await workflowRootSignature(pinned.trustedRoot);
+		if (signature === pinned.observedSignature) return {};
+		// Advance on every changed attempt so an unchanged invalid edit is not repeatedly imported or warned about.
+		pinned.observedSignature = signature;
+		const loaded = await loadWorkflowFile(pinned.canonicalFile, pinned.source);
+		if (!loaded.workflow || loaded.errors?.length) return { warning: "candidate could not be loaded or validated" };
+		return { workflow: loaded.workflow };
+	} catch {
+		return { warning: "selected workflow source is unavailable" };
+	}
+}
+
 export async function loadWorkflowFile(file: string, source: WorkflowSource): Promise<DiscoveredWorkflow> {
 	let loaded: unknown;
 	try {
@@ -78,6 +125,24 @@ export async function loadWorkflowFile(file: string, source: WorkflowSource): Pr
 		source,
 		errors: validation.errors,
 	};
+}
+
+async function workflowRootSignature(root: string): Promise<string> {
+	const parts: string[] = [];
+	const visit = async (dir: string): Promise<void> => {
+		const entries = await readdir(dir, { withFileTypes: true });
+		for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+			const file = join(dir, entry.name);
+			if (entry.isDirectory()) {
+				await visit(file);
+			} else if (entry.isFile() && WORKFLOW_EXTENSIONS.has(extname(entry.name))) {
+				const info = await stat(file);
+				parts.push(`${relative(root, file)}:${info.mtimeMs}:${info.size}`);
+			}
+		}
+	};
+	await visit(root);
+	return parts.join("|");
 }
 
 async function workflowDirsSignature(dirs: { user: string; project: string }): Promise<string> {
@@ -156,6 +221,11 @@ async function loadWorkflowDir(dir: string, source: WorkflowSource): Promise<Dis
 		.map((entry) => join(dir, entry));
 
 	return Promise.all(files.map((file) => loadWorkflowFile(file, source)));
+}
+
+function isWithinRoot(file: string, root: string): boolean {
+	const child = relative(root, file);
+	return child !== "" && !child.startsWith("..") && !isAbsolute(child);
 }
 
 function workflowNameFromFile(file: string): string {

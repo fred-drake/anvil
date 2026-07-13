@@ -139,6 +139,13 @@ export interface ResumeWorkflowOptions {
 	outputs?: Record<string, string>;
 }
 
+export interface WorkflowReloadResult {
+	/** A freshly loaded and validated candidate. Omit it to retain the active definition. */
+	workflow?: WorkflowDefinition;
+	/** Display-safe diagnostic code or message. The engine bounds and redacts it again. */
+	warning?: string;
+}
+
 export interface RunWorkflowOptions {
 	workflow: WorkflowDefinition;
 	input: string;
@@ -147,6 +154,8 @@ export interface RunWorkflowOptions {
 	runId?: string;
 	resume?: ResumeWorkflowOptions;
 	signal?: AbortSignal;
+	/** Opt-in development hook. Called only before binding the next outer-loop step. */
+	reload?: () => Promise<WorkflowReloadResult>;
 }
 
 export type StepRunStatus = "pending" | "running" | "passed" | "failed" | "skipped" | "continued";
@@ -192,6 +201,8 @@ export interface AnvilCheckpoint {
 	phase: AnvilCheckpointPhase;
 	timestamp: string;
 	workflowFile?: string;
+	/** Monotonic in-memory definition revision; presentation metadata only. */
+	definitionRevision?: number;
 	stepId?: string;
 	stepIndex?: number;
 	checkId?: string;
@@ -215,22 +226,25 @@ interface FailureDecision {
 	kind: "stop" | "continue" | "goto";
 	reason?: string;
 	targetIndex?: number;
+	targetId?: string;
 }
 
 type CheckpointFn = (entry: Omit<AnvilCheckpoint, "runId" | "workflowName" | "input" | "timestamp">) => void;
 
-export async function runWorkflow(options: RunWorkflowOptions): Promise<RunSummary> {
+export async function runWorkflow(initialOptions: RunWorkflowOptions): Promise<RunSummary> {
+	const options: RunWorkflowOptions = { ...initialOptions };
 	const runId = options.runId ?? newRunId();
+	let activeWorkflow = options.workflow;
 	const startedAt = new Date().toISOString();
 	const loopCounts: Record<string, number> = {};
 	const outputs = Object.create(null) as Record<string, string>;
 	const feedbackByStep = new Map<string, string>();
 	const attempts = new Map<string, number>();
-	const workflowHasModelSelectionOverrides = hasWorkflowModelSelectionOverrides(options.workflow);
+	let workflowHasModelSelectionOverrides = hasWorkflowModelSelectionOverrides(activeWorkflow);
 	const evidence: RunEvidence = { subagentSessions: [] };
 	const freshness: { lastVerificationWorkspace?: WorkspaceState } = {};
 	let shouldRestoreModelSelection = false;
-	const steps = options.workflow.steps.map<StepRunState>((step) => ({
+	let steps = activeWorkflow.steps.map<StepRunState>((step) => ({
 		id: step.id,
 		title: step.title,
 		status: "pending",
@@ -238,14 +252,17 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<RunSumma
 		checks: [],
 	}));
 	const resume = resolveResumeState(options, loopCounts, outputs, steps);
+	let definitionRevision = 0;
+	let pendingGotoTargetId: string | undefined;
 
 	const checkpoint = (entry: Omit<AnvilCheckpoint, "runId" | "workflowName" | "input" | "timestamp">) => {
 		options.host.checkpoint({
 			runId,
-			workflowName: options.workflow.name,
+			workflowName: activeWorkflow.name,
 			input: options.input,
 			timestamp: new Date().toISOString(),
 			loopCounts: { ...loopCounts },
+			definitionRevision,
 			...entry,
 		});
 	};
@@ -265,7 +282,7 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<RunSumma
 		evidence.workspaceEnd = await captureWorkspaceState(options);
 		const summary: RunSummary = {
 			runId,
-			workflowName: options.workflow.name,
+			workflowName: activeWorkflow.name,
 			input: options.input,
 			state,
 			startedAt,
@@ -282,7 +299,7 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<RunSumma
 			workspaceState: evidence.workspaceEnd,
 			sessionFiles: evidence.subagentSessions,
 		});
-		options.host.setStatus(formatStatus({ workflowName: options.workflow.name, phase: state === "succeeded" ? "done" : state }));
+		options.host.setStatus(formatStatus({ workflowName: activeWorkflow.name, phase: state === "succeeded" ? "done" : state }));
 		options.host.setWidget(formatStepWidget(steps, undefined, undefined, state === "failed" ? failureReason : undefined));
 		await options.host.postSummary(summary);
 		return summary;
@@ -290,17 +307,44 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<RunSumma
 
 	try {
 		throwIfAborted(options.signal);
-		options.host.setStatus(formatStatus({ workflowName: options.workflow.name, phase: "starting" }));
+		options.host.setStatus(formatStatus({ workflowName: activeWorkflow.name, phase: "starting" }));
 		options.host.setWidget(formatStepWidget(steps));
 		evidence.workspaceStart = await captureWorkspaceState(options);
 		checkpoint({ phase: "run_start", workspaceState: evidence.workspaceStart });
 		if (resume.error) return finish("failed", resume.error);
 
 		let stepIndex = resume.startIndex;
-		while (stepIndex < options.workflow.steps.length) {
+		while (nextPendingStepIndex(steps) >= 0) {
 			throwIfAborted(options.signal);
-			const step = options.workflow.steps[stepIndex]!;
+			if (options.reload) {
+				let reloadResult: WorkflowReloadResult;
+				try {
+					reloadResult = await options.reload();
+				} catch {
+					reloadResult = { warning: "reload callback failed" };
+				}
+				if (reloadResult.warning) options.host.notify(`Watch reload skipped: ${sanitizeWatchWarning(reloadResult.warning)}`, "warning");
+				if (reloadResult.workflow) {
+					activeWorkflow = reloadResult.workflow;
+					options.workflow = activeWorkflow;
+					definitionRevision = Math.min(definitionRevision + 1, 1_000_000);
+					steps = reconcileSteps(activeWorkflow, steps, outputs, feedbackByStep, loopCounts);
+					workflowHasModelSelectionOverrides = hasWorkflowModelSelectionOverrides(activeWorkflow);
+				}
+			}
+			if (pendingGotoTargetId) {
+				const targetIndex = activeWorkflow.steps.findIndex((candidate) => candidate.id === pendingGotoTargetId);
+				if (targetIndex < 0) return finish("failed", `goto target "${pendingGotoTargetId}" was removed by watch reload`);
+				pendingGotoTargetId = undefined;
+			}
+			stepIndex = nextPendingStepIndex(steps);
+			if (stepIndex < 0) break;
+			const step = activeWorkflow.steps[stepIndex]!;
 			const stepState = steps[stepIndex]!;
+			if (stepState.status === "passed" || stepState.status === "skipped" || stepState.status === "continued") {
+				stepIndex += 1;
+				continue;
+			}
 			if (resume.precompletedStepIds?.delete(step.id)) {
 				stepIndex += 1;
 				continue;
@@ -594,11 +638,20 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<RunSumma
 					break;
 				}
 
-				stepState.status = "pending";
 				updateStepUi(options, steps, stepIndex, "loop");
 				clearOutputsFromStep(options.workflow, outputs, decision.targetIndex!);
+				if (decision.targetIndex! <= stepIndex) {
+					for (let resetIndex = decision.targetIndex!; resetIndex <= stepIndex; resetIndex += 1) {
+						steps[resetIndex]!.status = "pending";
+					}
+				} else {
+					stepState.status = "continued";
+					for (let skippedIndex = stepIndex + 1; skippedIndex < decision.targetIndex!; skippedIndex += 1) {
+						steps[skippedIndex]!.status = "skipped";
+					}
+				}
 				resume.precompletedStepIds?.delete(options.workflow.steps[decision.targetIndex!]!.id);
-				stepIndex = decision.targetIndex!;
+				pendingGotoTargetId = decision.targetId;
 				jumpedOrAdvanced = true;
 				break;
 			}
@@ -618,6 +671,43 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<RunSumma
 		}
 		return finish("failed", isWorkflowInfrastructureError(error) ? error.message : error instanceof Error ? error.message : String(error));
 	}
+}
+
+function reconcileSteps(
+	workflow: WorkflowDefinition,
+	previous: StepRunState[],
+	outputs: Record<string, string>,
+	feedbackByStep: Map<string, string>,
+	loopCounts: Record<string, number>,
+): StepRunState[] {
+	const survivingIds = new Set(workflow.steps.map((step) => step.id));
+	const priorById = new Map(previous.map((state) => [state.id, state]));
+	for (const id of Object.keys(outputs)) if (!survivingIds.has(id)) delete outputs[id];
+	for (const id of feedbackByStep.keys()) if (!survivingIds.has(id.split("#", 1)[0]!)) feedbackByStep.delete(id);
+	for (const key of Object.keys(loopCounts)) {
+		const target = key.includes("->") ? key.slice(key.lastIndexOf("->") + 2) : undefined;
+		if (target && !survivingIds.has(target)) delete loopCounts[key];
+	}
+	return workflow.steps.map((step) => {
+		const prior = priorById.get(step.id);
+		return prior
+			? { ...prior, title: step.title, checks: [...prior.checks] }
+			: { id: step.id, title: step.title, status: "pending", loops: 0, checks: [] };
+	});
+}
+
+function nextPendingStepIndex(steps: StepRunState[]): number {
+	return steps.findIndex((step) => step.status === "pending" || step.status === "running");
+}
+
+function sanitizeWatchWarning(value: string): string {
+	const plain = value
+		.replace(/[\u0000-\u001f\u007f]+/g, " ")
+		.replace(/\b(?:api[_-]?key|access[_-]?token|authorization|password|secret|token)\s*[:=]\s*\S+/gi, "$1=[redacted]")
+		.replace(/\b(?:sk-[A-Za-z0-9_-]{16,}|gh[opusr]_[A-Za-z0-9]{16,}|AKIA[A-Z0-9]{16})\b/g, "[redacted]")
+		.replace(/(?:\/[\w.@+-]+){2,}/g, "[path redacted]")
+		.trim();
+	return (plain || "candidate could not be loaded or validated").slice(0, 240);
 }
 
 function infrastructureFailure(message: string, error: unknown, signal?: AbortSignal): Error {
@@ -723,7 +813,7 @@ function resolveFailure(args: {
 	const feedbackKey = args.itemIndex === undefined ? policy.goto : `${policy.goto}${itemSuffix}`;
 	if (policy.feedback !== false) args.feedbackByStep.set(feedbackKey, args.result.reason);
 	args.host.notify(`Anvil check failed; returning to step "${policy.goto}" (${nextCount}/${maxLoops}).`, "warning");
-	return { kind: "goto", targetIndex };
+	return { kind: "goto", targetIndex, targetId: policy.goto };
 }
 
 async function resolveForEachItems(options: RunWorkflowOptions, step: WorkflowStep, ctx: WorkflowContext): Promise<string[]> {

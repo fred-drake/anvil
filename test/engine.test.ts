@@ -1,3 +1,6 @@
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
 	runWorkflow,
@@ -12,9 +15,10 @@ import {
 	type SubagentStepRunRequest,
 	type SubagentStepRunResult,
 } from "../src/engine.ts";
+import { pinWorkflowSource, reloadPinnedWorkflow, loadWorkflowFile } from "../src/discovery.ts";
 import { ReviewSubagentUnavailableError } from "../src/errors.ts";
 import type { Verdict } from "../src/gates.ts";
-import { recoverResumeState } from "../src/history.ts";
+import { recoverResumeState, toAnvilCheckpoint } from "../src/history.ts";
 import { INDEPENDENT_REVIEW_FAIL_REASON } from "../src/subagent/child.ts";
 import { MAX_STEP_OUTPUT_BYTES } from "../src/step-output.ts";
 import type { WorkflowDefinition } from "../src/types.ts";
@@ -2159,6 +2163,212 @@ describe("runWorkflow", () => {
 			["tests", true],
 			["lint", true],
 		]);
+	});
+
+	describe("watch reload (Phase 2)", () => {
+		it("does not invoke the reload hook during ordinary deterministic runs", async () => {
+			const host = new FakeHost();
+			await runWorkflow({ workflow: workflow([{ id: "one", prompt: "one" }]), input: "task", cwd: "/tmp", host });
+			expect(host.instructions).toEqual([expect.stringContaining("one")]);
+		});
+
+		it("reloads only at outer step boundaries and applies a valid definition to the next step", async () => {
+			const host = new FakeHost();
+			let calls = 0;
+			const changed = workflow([
+				{ id: "one", prompt: "old one" },
+				{ id: "two", prompt: "new two" },
+			]);
+			const summary = await runWorkflow({
+				workflow: workflow([{ id: "one", prompt: "old one" }, { id: "two", prompt: "old two" }]),
+				input: "task",
+				cwd: "/tmp",
+				host,
+				reload: async () => ({ workflow: calls++ === 0 ? undefined : changed }),
+			});
+			expect(host.instructions).toEqual([expect.stringContaining("old one"), expect.stringContaining("new two")]);
+			expect(summary.steps.map((step) => step.id)).toEqual(["one", "two"]);
+		});
+
+		it("never reloads while a step or an individual forEach item is executing", async () => {
+			const host = new FakeHost();
+			let reloads = 0;
+			await runWorkflow({
+				workflow: workflow([{ id: "fan", prompt: "item {item}", forEach: { items: () => ["a", "b"] } }]),
+				input: "task",
+				cwd: "/tmp",
+				host,
+				reload: async () => { reloads += 1; return {}; },
+			});
+			expect(reloads).toBe(1);
+			expect(host.instructions).toHaveLength(2);
+		});
+		it("reconciles inserted, removed, and reordered steps by stable id while preserving completed state and outputs", async () => {
+			const host = new FakeHost();
+			host.stepOutputQueue.push("one-output", undefined, undefined);
+			let calls = 0;
+			const initial = workflow([{ id: "one", prompt: "one" }, { id: "removed", prompt: "removed" }, { id: "two", prompt: "old two" }]);
+			const changed = workflow([{ id: "inserted", prompt: "insert {outputs.one}" }, { id: "two", prompt: "new two" }, { id: "one", prompt: "must not rerun" }]);
+			const summary = await runWorkflow({ workflow: initial, input: "task", cwd: "/tmp", host, reload: async () => ({ workflow: calls++ === 0 ? undefined : changed }) });
+			expect(host.instructions.join("\n")).toContain("insert one-output");
+			expect(host.instructions.join("\n")).not.toContain("removed");
+			expect(summary.steps.map((step) => [step.id, step.status])).toEqual([["inserted", "passed"], ["two", "passed"], ["one", "passed"]]);
+		});
+
+		it("runs newly inserted pending steps before the current target in deterministic order", async () => {
+			const host = new FakeHost();
+			let calls = 0;
+			const changed = workflow([{ id: "new", prompt: "new" }, { id: "one", prompt: "one" }, { id: "two", prompt: "two" }]);
+			await runWorkflow({ workflow: workflow([{ id: "one", prompt: "one" }, { id: "two", prompt: "two" }]), input: "task", cwd: "/tmp", host, reload: async () => ({ workflow: calls++ ? changed : undefined }) });
+			expect(host.instructions.map((text) => text.match(/(?:one|new|two)/)?.[0])).toEqual(["one", "new", "two"]);
+		});
+
+		it("handles removal of the current or next target explicitly and deterministically", async () => {
+			const host = new FakeHost();
+			let calls = 0;
+			const summary = await runWorkflow({ workflow: workflow([{ id: "one", prompt: "one" }, { id: "two", prompt: "two" }]), input: "task", cwd: "/tmp", host, reload: async () => ({ workflow: calls++ ? workflow([{ id: "one", prompt: "one" }]) : undefined }) });
+			expect(summary.state).toBe("succeeded");
+			expect(host.instructions).toHaveLength(1);
+			expect(summary.steps.map((step) => step.id)).toEqual(["one"]);
+		});
+
+		it("retains the active definition and execution state when reload loading, parsing, schema, or goto validation fails", async () => {
+			const host = new FakeHost();
+			const summary = await runWorkflow({ workflow: workflow([{ id: "one", prompt: "one" }]), input: "task", cwd: "/tmp", host, reload: async () => ({ warning: "candidate could not be loaded or validated" }) });
+			expect(summary.state).toBe("succeeded");
+			expect(summary.steps[0]?.status).toBe("passed");
+			expect(host.notifications).toEqual([expect.stringMatching(/reload skipped.*validated/i)]);
+		});
+
+		it("uses the active definition for goto targets, model selection, summaries, status, widget titles, and step totals", async () => {
+			const host = new FakeHost();
+			let calls = 0;
+			const changed: WorkflowDefinition = { name: "changed", steps: [{ id: "one", title: "One", prompt: "one" }, { id: "two", title: "Changed Two", prompt: "two", model: "provider/model" }] };
+			const summary = await runWorkflow({ workflow: workflow([{ id: "one", prompt: "one" }, { id: "two", prompt: "old" }]), input: "task", cwd: "/tmp", host, reload: async () => ({ workflow: calls++ ? changed : undefined }) });
+			expect(summary.workflowName).toBe("changed");
+			expect(host.modelSelections).toContainEqual({ model: "provider/model" });
+			expect(host.statuses.join(" ")).toContain("changed");
+			expect(host.widgets.flat().join(" ")).toContain("Changed Two");
+		});
+
+		it("preserves a forward goto target by stable id when a reload occurs before it executes", async () => {
+			const host = new FakeHost();
+			host.execQueue.push({ stdout: "", stderr: "b failed", code: 1 });
+			let calls = 0;
+			const initial = workflow([
+				{ id: "a", prompt: "a" },
+				{ id: "b", prompt: "b", checks: [{ type: "deterministic", command: "false", onFail: { goto: "d", maxLoops: 1 } }] },
+				{ id: "c", prompt: "c" },
+				{ id: "d", prompt: "d" },
+			]);
+			const changed = workflow([
+				{ id: "a", prompt: "changed a" },
+				{ id: "b", prompt: "changed b" },
+				{ id: "c", prompt: "changed c" },
+				{ id: "d", prompt: "changed d" },
+			]);
+
+			await runWorkflow({ workflow: initial, input: "task", cwd: "/tmp", host, reload: async () => ({ workflow: ++calls === 3 ? changed : undefined }) });
+
+			expect(host.instructions[0]).toContain("a");
+			expect(host.instructions[1]).toContain("b");
+			expect(host.instructions[2]).toContain("changed d");
+		});
+
+		it("reruns every reset survivor in active definition order after a backward-goto reload reorder", async () => {
+			const host = new FakeHost();
+			host.execQueue.push(
+				{ stdout: "", stderr: "c failed", code: 1 },
+				{ stdout: "", stderr: "", code: 0 },
+			);
+			let reloads = 0;
+			const retryingC = {
+				id: "c",
+				prompt: "execute c",
+				checks: [{ type: "deterministic" as const, command: "test-c", onFail: { goto: "a", maxLoops: 1 } }],
+			};
+			const initial = workflow([
+				{ id: "a", prompt: "execute a" },
+				{ id: "b", prompt: "execute b" },
+				{ id: "d", prompt: "execute d" },
+				retryingC,
+			]);
+			const reordered = workflow([
+				{ id: "d", prompt: "execute d" },
+				{ id: "a", prompt: "execute a" },
+				{ id: "b", prompt: "execute b" },
+				retryingC,
+			]);
+
+			const summary = await runWorkflow({
+				workflow: initial,
+				input: "task",
+				cwd: "/tmp",
+				host,
+				reload: async () => ({ workflow: ++reloads === 5 ? reordered : undefined }),
+			});
+
+			expect(summary.state).toBe("succeeded");
+			expect(host.instructions.map((instruction) => instruction.match(/execute ([abdc])/)?.[1])).toEqual([
+				"a", "b", "d", "c", "d", "a", "b", "c",
+			]);
+			expect(summary.steps.map((step) => [step.id, step.status])).toEqual([
+				["d", "passed"],
+				["a", "passed"],
+				["b", "passed"],
+				["c", "passed"],
+			]);
+			expect(summary.steps.every((step) => step.status !== "pending" && step.status !== "running")).toBe(true);
+		});
+
+		it("rejects a real dangling-goto candidate and keeps the original next step active", async () => {
+			const root = await mkdtemp(join(tmpdir(), "anvil-watch-invalid-"));
+			try {
+				const dir = join(root, ".pi", "anvil", "workflows");
+				const file = join(dir, "watched.ts");
+				await mkdir(dir, { recursive: true });
+				await writeFile(file, `export default { name: "watched", steps: [{ id: "one", prompt: "one" }, { id: "two", prompt: "original two" }] };`);
+				const selected = await loadWorkflowFile(file, "project");
+				const pinned = await pinWorkflowSource(selected);
+				const host = new FakeHost();
+				host.onWait = async () => {
+					if (host.instructions.length === 1) await writeFile(file, `export default { name: "watched", steps: [{ id: "one", prompt: "changed" }, { id: "two", prompt: "unsafe", onFail: { goto: "missing" } }] };`);
+				};
+				const summary = await runWorkflow({ workflow: selected.workflow!, input: "task", cwd: root, host, reload: () => reloadPinnedWorkflow(pinned) });
+				expect(summary.steps.map((step) => [step.id, step.status])).toEqual([["one", "passed"], ["two", "passed"]]);
+				expect(host.instructions[1]).toContain("original two");
+				expect(host.notifications).toContainEqual(expect.stringMatching(/reload skipped/i));
+			} finally {
+				await rm(root, { recursive: true, force: true });
+			}
+		});
+
+		it("persists only revision provenance independent of secret-shaped workflow content", async () => {
+			const sequences: number[][] = [];
+			for (const secret of ["sk-aaaaaaaaaaaaaaaaaaaa", "sk-bbbbbbbbbbbbbbbbbbbb"]) {
+				const host = new FakeHost();
+				let calls = 0;
+				await runWorkflow({ workflow: workflow([{ id: "one", prompt: "one" }, { id: "two", prompt: "two" }]), input: "task", cwd: "/tmp", host, reload: async () => ({ workflow: ++calls === 2 ? workflow([{ id: "one", prompt: "one" }, { id: "two", prompt: secret }]) : undefined }) });
+				sequences.push(host.checkpoints.map((entry) => entry.definitionRevision ?? -1));
+				expect(host.checkpoints.every((entry) => !("definitionFingerprint" in entry))).toBe(true);
+			}
+			expect(sequences[0]).toEqual(sequences[1]);
+		});
+
+		it("increments a bounded definition revision only after successful swaps", async () => {
+			const host = new FakeHost();
+			let calls = 0;
+			const changed = workflow([{ id: "one", prompt: "one" }, { id: "two", prompt: "changed" }]);
+			await runWorkflow({ workflow: workflow([{ id: "one", prompt: "one" }, { id: "two", prompt: "two" }]), input: "task", cwd: "/tmp", host, reload: async () => calls++ === 1 ? ({ workflow: changed }) : ({ warning: calls > 2 ? "invalid" : undefined }) });
+			expect(new Set(host.checkpoints.map((entry) => entry.definitionRevision))).toEqual(new Set([0, 1]));
+		});
+
+		it("does not let persisted malformed revision metadata affect execution", () => {
+			const parsed = toAnvilCheckpoint({ customType: "anvil-run", data: { runId: "r", workflowName: "w", input: "i", phase: "run_start", timestamp: "now", definitionRevision: Number.MAX_VALUE, definitionFingerprint: "../../secret" } });
+			expect(parsed).toBeDefined();
+			expect(parsed?.definitionRevision).toBeUndefined();
+			expect(parsed).not.toHaveProperty("definitionFingerprint");
+		});
 	});
 });
 

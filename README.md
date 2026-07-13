@@ -37,6 +37,7 @@ Workflows live in:
 /anvil list
 /anvil validate <name>
 /anvil run <name> <free-form task input>
+/anvil run --watch <name> <free-form task input>
 /anvil history [name]
 /anvil report [run-id-prefix]
 /anvil resume <step> [retry-number]
@@ -44,6 +45,10 @@ Workflows live in:
 ```
 
 Use `/anvil list` to see available workflows, `/anvil validate` to check that one is ready, and `/anvil run` to start a workflow with whatever task input you want to give it.
+
+`/anvil run --watch <name> <input>` is an opt-in, nondeterministic development mode for trusted workflows. Before each next outer workflow step, Anvil checks a filesystem signature for the canonical-path-pinned source and local workflow-root TypeScript/JavaScript inputs. When that signature changes, it fresh-imports only the originally selected, canonical-path-pinned workflow module and validates the complete candidate (including every `onFail.goto` target); unchanged boundaries do not re-import it. It never reloads during a step or between `forEach` items. A load, parse, validation, or source-identity failure emits a bounded, redacted warning and retains the last valid definition and execution state. A valid changed definition reconciles state by stable step id: completed/skipped surviving steps and their outputs remain, removed outputs are discarded, newly inserted pending steps run in current-definition order, and an explicit pending `goto` remains targeted by id. Status, widgets, delegation, model selection, goto routing, and the final summary use the active definition. Checkpoints carry only a bounded monotonic definition revision; this history provenance never includes definition content and never drives execution.
+
+Watch mode repeatedly executes trusted TypeScript module top-level code and allows edits to change future commands or delegation, so it amplifies the existing trusted-project boundary. It is disabled for ordinary runs and resume, does not discover or execute sibling workflow modules, and does not weaken independent-review process, environment, tool, shell-startup, or filesystem isolation. Use it only for local workflow development, never as a deterministic unattended-run guarantee.
 
 Use `/anvil history [name]` to list recent runs in the current Pi session, optionally for one workflow. History shows each run's state, duration, last or failing step, and check summary. Use `/anvil report [run-id-prefix]` for the latest run or a detailed report for one run, including reconstructed per-step status, retries, timing, deterministic and agent-check verdicts, Git workspace evidence, changed files, and subagent session paths. The final workflow summary links to the same report.
 

@@ -11,6 +11,12 @@ describe("index internals", () => {
 		expect(parseRunArgs("demo   build the thing with spaces")).toEqual({
 			name: "demo",
 			input: "build the thing with spaces",
+			watch: false,
+		});
+		expect(parseRunArgs("--watch demo build the thing")).toEqual({
+			name: "demo",
+			input: "build the thing",
+			watch: true,
 		});
 	});
 

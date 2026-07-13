@@ -96,6 +96,9 @@ export function toAnvilCheckpoint(entry: unknown): AnvilCheckpoint | undefined {
 		timestamp: isString(data.timestamp) ? sanitizeDisplay(data.timestamp) : "unknown",
 	};
 	copyString(data, checkpoint, "workflowFile", true);
+	if (Number.isInteger(data.definitionRevision) && (data.definitionRevision as number) >= 0 && (data.definitionRevision as number) <= 1_000_000) {
+		checkpoint.definitionRevision = data.definitionRevision as number;
+	}
 	copyString(data, checkpoint, "stepId");
 	copyInteger(data, checkpoint, "stepIndex");
 	copyString(data, checkpoint, "checkId");

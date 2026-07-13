@@ -373,6 +373,45 @@ describe("workflow public contract", () => {
 		expect(combined).not.toContain("Omit `retry-number` for no retries");
 		expect(combined).toMatch(/no retry count (?:is )?seeded|starts? \{loop\} at 0/i);
 	});
+
+	describe("watch reload public contract (Phase 2)", () => {
+		it("exposes the opt-in engine reload contract and bounded checkpoint revision metadata", () => {
+			const engine = readFileSync(new URL("../src/engine.ts", import.meta.url), "utf8");
+			expect(engine).toMatch(/reload\?: \(\) => Promise<WorkflowReloadResult>/);
+			expect(engine).toMatch(/definitionRevision\?: number/);
+			expect(engine).not.toMatch(/definitionFingerprint\?: string/);
+		});
+
+		it("documents /anvil run --watch as nondeterministic trusted-project development behavior", () => {
+			const readme = readFileSync(new URL("../README.md", import.meta.url), "utf8");
+			expect(readme).toMatch(/\/anvil run --watch/);
+			expect(readme).toMatch(/opt-in, nondeterministic development mode for trusted workflows/i);
+			expect(readme).toMatch(/disabled for ordinary runs and resume/i);
+			expect(readme).toMatch(/unchanged boundaries do not re-import/i);
+			expect(readme).toMatch(/revision.*never includes definition content/i);
+		});
+
+		it("documents that reload executes only the originally selected trusted workflow module, not broad discovery", () => {
+			const readme = readFileSync(new URL("../README.md", import.meta.url), "utf8");
+			expect(readme).toMatch(/only the originally selected, canonical-path-pinned workflow module/i);
+			expect(readme).toMatch(/does not discover or execute sibling workflow modules/i);
+		});
+
+		it("documents reload failure retention, stable-id reconciliation, and active-definition summaries", () => {
+			const readme = readFileSync(new URL("../README.md", import.meta.url), "utf8");
+			expect(readme).toMatch(/failure[^.]+retains the last valid definition and execution state/i);
+			expect(readme).toMatch(/reconciles state by stable step id/i);
+			expect(readme).toMatch(/final summary use the active definition/i);
+		});
+
+		it("keeps workflow-builder guidance and examples aligned with watch safety restrictions", () => {
+			const skill = readFileSync(new URL("../skills/anvil-workflow-builder/SKILL.md", import.meta.url), "utf8");
+			const example = readFileSync(new URL("../examples/workflows/demo.ts", import.meta.url), "utf8");
+			expect(skill).toMatch(/watch mode is nondeterministic/i);
+			expect(skill).toMatch(/not a workflow schema field/i);
+			expect(example).not.toMatch(/watch\s*:/);
+		});
+	});
 });
 
 type AutoSubagentEnv = Partial<Record<"HERDR_ENV" | "CMUX_SHELL_INTEGRATION", string>>;
