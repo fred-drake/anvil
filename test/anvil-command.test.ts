@@ -245,6 +245,168 @@ describe("/anvil run command", () => {
 	});
 });
 
+describe("/anvil status command", () => {
+	it("notifies exactly when no active run exists and has no execution or mutation side effects", async () => {
+		const entries: Array<Record<string, unknown>> = [];
+		const { command, pi } = registerAnvilCommand(entries);
+		const ctx = commandContext("/project", entries);
+
+		await command!.handler("status", ctx);
+
+		expect(ctx.ui.notify).toHaveBeenCalledWith("No Anvil workflow is running.", "info");
+		expect(pi.sendMessage).not.toHaveBeenCalled();
+		expect(pi.exec).not.toHaveBeenCalled();
+		expect(pi.sendUserMessage).not.toHaveBeenCalled();
+		expect(pi.appendEntry).not.toHaveBeenCalled();
+		expect(ctx.abort).not.toHaveBeenCalled();
+	});
+
+	it("reports only the safe loading identity while a run reservation is resolving", async () => {
+		const entries: Array<Record<string, unknown>> = [{
+			type: "custom",
+			customType: "anvil-run",
+			data: {
+				runId: "foreign-run",
+				workflowName: "TOKEN=checkpoint-secret `| <script>",
+				input: "/home/me/.ssh/id_rsa",
+				phase: "step_start",
+				stepId: "outside-step",
+				stepIndex: 999_999,
+				loopCounts: { "outside-step": 999_999_999 },
+				reason: "provider child diagnostic TOKEN=reason-secret",
+			},
+		}];
+		const { command, pi } = registerAnvilCommand(entries);
+		const ctx = commandContext("/project-that-does-not-exist", entries);
+
+		const starting = command!.handler("run user-controlled-name task", ctx);
+		await command!.handler("status", ctx);
+		await starting;
+
+		const status = pi.sendMessage.mock.calls.find(([message]) => message.customType === "anvil-status")?.[0];
+		expect(status?.content).toMatch(/loading|starting/i);
+		expect(status?.content).not.toMatch(/user-controlled-name|checkpoint-secret|reason-secret|id_rsa|<script>|`\|/);
+		expect(pi.exec).not.toHaveBeenCalled();
+		expect(pi.sendUserMessage).not.toHaveBeenCalled();
+		expect(pi.appendEntry).not.toHaveBeenCalled();
+	});
+
+	it("posts engine-authoritative active progress without consulting stale session checkpoints", async () => {
+		root = await mkdtemp(join(tmpdir(), "anvil-status-"));
+		const project = join(root, "project");
+		await mkdir(join(project, ".pi", "anvil", "workflows"), { recursive: true });
+		await writeFile(join(project, ".pi", "anvil", "workflows", "forge.ts"), `export default { name: "forge", steps: [{ id: "plan", title: "Plan", prompt: "plan" }, { id: "implement", title: "Implement", prompt: "implement" }] };`, "utf8");
+		const entries: Array<Record<string, unknown>> = [];
+		const { command, pi, events } = registerAnvilCommand(entries);
+		const ctx = commandContext(project, entries);
+		const now = vi.spyOn(Date, "now").mockReturnValue(1_000);
+		// Keep the first engine turn blocked so status observes live progress.
+		pi.sendUserMessage.mockImplementation(() => {
+			for (const callback of events.get("agent_start") ?? []) callback();
+		});
+
+		await command!.handler("run forge task", ctx);
+		await waitUntil(() => pi.sendUserMessage.mock.calls.length === 1);
+		entries.push(
+			{ customType: "anvil-run", data: { runId: "foreign", workflowName: "forge", input: "task", phase: "step_start", stepId: "implement", stepIndex: 1, loopCounts: { "tests->implement": 99 } } },
+			{ customType: "anvil-run", data: { runId: "stale", workflowName: "forge", input: "task", phase: "step_start", stepId: "implement", stepIndex: 1, loopCounts: { "tests->implement": 2 } } },
+		);
+		now.mockReturnValue(3_500);
+		const execCallsBeforeStatus = pi.exec.mock.calls.length;
+		const entryAppendsBeforeStatus = pi.appendEntry.mock.calls.length;
+		await command!.handler("status", ctx);
+
+		const statuses = pi.sendMessage.mock.calls.filter(([message]) => message.customType === "anvil-status");
+		const content = statuses.at(-1)?.[0].content as string;
+		expect(content).toContain("forge");
+		expect(content).toMatch(/1\/2.*Plan/s);
+		expect(content).toMatch(/Retry count: 0/);
+		expect(content).toContain("2.5s");
+		expect(pi.exec).toHaveBeenCalledTimes(execCallsBeforeStatus);
+		expect(pi.appendEntry).toHaveBeenCalledTimes(entryAppendsBeforeStatus);
+		expect(pi.sendUserMessage).toHaveBeenCalledOnce();
+
+		await command!.handler("abort", ctx);
+		for (const callback of events.get("agent_end") ?? []) callback();
+		now.mockRestore();
+	});
+
+	it("ignores foreign, malformed, out-of-range, mismatched, and huge loop-count checkpoints", async () => {
+		root = await mkdtemp(join(tmpdir(), "anvil-status-"));
+		const project = join(root, "project");
+		await mkdir(join(project, ".pi", "anvil", "workflows"), { recursive: true });
+		await writeFile(join(project, ".pi", "anvil", "workflows", "safe.ts"), `export default { name: "safe", steps: [{ id: "plan", title: "Plan", prompt: "plan" }, { id: "verify", title: "Verify", prompt: "verify" }] };`, "utf8");
+		const entries: Array<Record<string, unknown>> = [];
+		const { command, pi } = registerAnvilCommand(entries);
+		const ctx = commandContext(project, entries);
+		const idleGate = deferred<void>();
+		ctx.isIdle.mockReturnValue(false);
+		ctx.waitForIdle.mockImplementation(() => idleGate.promise);
+		const starting = command!.handler("run safe task", ctx);
+		await waitUntil(() => ctx.waitForIdle.mock.calls.length === 1);
+		await command!.handler("status", ctx);
+		const initial = pi.sendMessage.mock.calls.find(([message]) => message.customType === "anvil-status")?.[0].content as string;
+		const runId = /Run ID: `([^`]+)`/.exec(initial)?.[1];
+		const base = { runId, workflowName: "safe", input: "task", timestamp: "2026-07-12T00:00:00.000Z", phase: "step_start" };
+		entries.push(
+			{ customType: "anvil-run", data: { ...base, stepId: "plan", stepIndex: 0 } },
+			{ customType: "anvil-run", data: { ...base, runId: "foreign", stepId: "verify", stepIndex: 1, reason: "provider diagnostic TOKEN=reason-secret" } },
+			{ customType: "anvil-run", data: { ...base, stepId: "plan", stepIndex: 1, input: "/home/me/.ssh/id_rsa" } },
+			{ customType: "anvil-run", data: { ...base, stepId: "outside", stepIndex: 999_999, loopCounts: { "TOKEN=checkpoint-secret->outside": 1 } } },
+			{ customType: "anvil-run", data: { ...base, stepId: "plan", stepIndex: 0, loopCounts: { arbitrary: 10, "tests->verify": 3, "tests->plan": Number.MAX_SAFE_INTEGER }, command: "<script>bad</script>" } },
+			{ customType: "anvil-run", data: { runId } },
+		);
+		await command!.handler("status", ctx);
+
+		const statuses = pi.sendMessage.mock.calls.filter(([message]) => message.customType === "anvil-status");
+		const content = statuses.at(-1)?.[0].content as string;
+		expect(content).toContain("Current step: waiting to start");
+		expect(content).toContain("Retry count: 0");
+		expect(content).not.toMatch(/reason-secret|checkpoint-secret|id_rsa|<script>|999999/);
+		expect(pi.exec).not.toHaveBeenCalled();
+		expect(pi.sendUserMessage).not.toHaveBeenCalled();
+		expect(pi.appendEntry).not.toHaveBeenCalled();
+
+		await command!.handler("abort", ctx);
+		idleGate.resolve();
+		await starting;
+	});
+
+	it("shows only accepted reloaded workflow metadata during the next blocked watch step", async () => {
+		root = await mkdtemp(join(tmpdir(), "anvil-status-watch-"));
+		const project = join(root, "project");
+		const workflowFile = join(project, ".pi", "anvil", "workflows", "watched.ts");
+		await mkdir(join(project, ".pi", "anvil", "workflows"), { recursive: true });
+		await writeFile(workflowFile, `export default { name: "before", steps: [{ id: "one", title: "Old One", prompt: "one" }, { id: "old-two", title: "Old Two", prompt: "two" }] };`);
+		const entries: Array<Record<string, unknown>> = [];
+		const { command, pi, events } = registerAnvilCommand(entries);
+		const ctx = commandContext(project, entries);
+		pi.sendUserMessage.mockImplementation(() => {
+			for (const callback of events.get("agent_start") ?? []) callback();
+		});
+
+		await command!.handler("run --watch before task", ctx);
+		await waitUntil(() => pi.sendUserMessage.mock.calls.length === 1);
+		await writeFile(workflowFile, `export default { name: "after", steps: [{ id: "inserted", title: "Inserted New", prompt: "new" }, { id: "one", title: "Renamed One", prompt: "one" }, { id: "two-new", title: "Changed Two", prompt: "two" }] };`);
+		const future = new Date(Date.now() + 2_000);
+		await utimes(workflowFile, future, future);
+		for (const callback of events.get("agent_end") ?? []) callback();
+		await new Promise((resolve) => setTimeout(resolve, 100));
+		expect({ sends: pi.sendUserMessage.mock.calls.length, notifications: ctx.ui.notify.mock.calls, entries }).toMatchObject({ sends: 2 });
+		expect(ctx.ui.notify.mock.calls).not.toEqual(expect.arrayContaining([[expect.stringMatching(/failed|reload skipped/i), expect.anything()]]));
+
+		await command!.handler("status", ctx);
+		const statuses = pi.sendMessage.mock.calls.filter(([message]) => message.customType === "anvil-status");
+		const content = statuses.at(-1)?.[0].content as string;
+		expect(content).toContain("Workflow: `after`");
+		expect(content).toMatch(/1\/3.*Inserted New/s);
+		expect(content).not.toMatch(/before|Old One|old-two|Old Two/);
+
+		await command!.handler("abort", ctx);
+		for (const callback of events.get("agent_end") ?? []) callback();
+	});
+});
+
 describe("/anvil independent-review preflight", () => {
 	it("ignores an unavailable backend for a check with main fallback when another review is required", () => {
 		process.env.CMUX_SOCKET_PATH = "/tmp/cmux.sock";
@@ -800,7 +962,7 @@ function registerAnvilCommand(entries: Array<Record<string, unknown>>) {
 		setModel: vi.fn(async () => true),
 	} as any;
 	piAnvil(pi);
-	return { command, pi };
+	return { command, pi, events };
 }
 
 function commandContext(project: string, entries: Array<Record<string, unknown>>) {

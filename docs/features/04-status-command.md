@@ -15,36 +15,21 @@ A running workflow updates a status line and a step widget (`setStatus` / `setWi
 `src/ui.ts:14`/`:36`), but there is no command to query progress on demand — for example
 after scrolling away, reattaching to a mux session, or when the widget is not visible.
 
-## Current state (grounding)
+## Current state
 
-- Active-run state is tracked in the extension closure: `activeRun`
-  (`src/index.ts:78`) of type `ActiveRun = { controller, runId }` (`src/index.ts:19`),
-  set/cleared in `handleRun` / `handleResume` (`src/index.ts:132`, `:211`, etc.).
-- The `abort` subcommand already reads `activeRun` directly in the handler switch
-  (`src/index.ts:122`), so `status` has the same access.
-- Per-step progress currently lives only in the engine's local `steps: StepRunState[]`
-  (`src/engine.ts:151`) and the checkpoint stream; `ActiveRun` does not yet hold live step
-  detail. The most recent checkpoints in the session log
-  (`getSessionEntries` → `toAnvilCheckpoint`, `src/index.ts:593`/`:632`) reveal the last
-  `step_start` (current step) and any recent `check_result`.
+- Active-run state is tracked in the extension closure with its controller, generated run
+  ID, start time, and latest `RunProgressSnapshot`.
+- The `abort` and `status` subcommands read that state directly in the command switch.
+- The engine publishes progress from its active validated workflow and reconciled step state;
+  editable session checkpoints are not a status input.
 
 ## Design
 
-Two implementation options; recommend a hybrid.
-
-1. **Minimal (in-memory only).** Report from `activeRun`: run id, plus workflow name and
-   start time if we enrich `ActiveRun`. Enrich the `ActiveRun` type to carry
-   `workflowName`, `input`, and `startedAt` (set where it is constructed in `handleRun` /
-   `handleResume`). This gives run-level status with no dependency on the checkpoint log.
-
-2. **Detailed (fold latest checkpoints).** For the *current step* and *retry count*, fold
-   the session checkpoints for `activeRun.runId` — the last `step_start` gives the current
-   `stepIndex`; `loopCounts` on the latest checkpoint gives retry progress. This reuses the
-   same folding approach as `findLatestResumableRun` (`src/index.ts:599`) and the Feature 2
-   `buildRunHistory` reader (share code if Feature 2 lands first).
-
-**Recommended hybrid:** enrich `ActiveRun` for run-level fields (always accurate) and fold
-recent checkpoints for step/retry detail (best-effort, may lag by one checkpoint).
+Use in-memory state end to end. The host reserves a safe loading state with only the generated
+run ID and start time. Once validation succeeds, it stores initial workflow metadata. During
+execution, the engine publishes immutable snapshots containing the active workflow name,
+step IDs/titles, current step index, and retry count. Publishing after accepted watch reload
+reconciliation prevents stale definition metadata from reaching status.
 
 ### `/anvil status` → `handleStatus`
 
@@ -60,15 +45,16 @@ recent checkpoints for step/retry detail (best-effort, may lag by one checkpoint
 Add `"status"` to the `subcommands` array (`src/index.ts:544`). No argument completion
 needed.
 
-## Implementation steps
+## Implementation
 
-1. `src/index.ts`: extend `ActiveRun` (`src/index.ts:19`) with `workflowName`, `input`,
-   `startedAt`; set these where `setActiveRun({...})` is called in `handleRun` /
-   `handleResume`.
-2. `src/ui.ts`: add `renderRunStatus(active, latestCheckpoints)`.
-3. `src/index.ts`: add `handleStatus`; wire `case "status":` into the switch
-   (`src/index.ts:115`); add `"status"` to subcommands.
-4. Tests + README.
+1. `src/engine.ts` publishes immutable `RunProgressSnapshot` values from the authoritative
+   active workflow definition and centralized step UI updates. Accepted watch reloads publish
+   their reconciled workflow name, step IDs/titles, current index, total, and retry count.
+2. `src/index.ts` keeps the generated run ID, start time, and latest engine snapshot in
+   `ActiveRun`. The loading reservation never includes user-supplied workflow or task text.
+3. `src/ui.ts` renders deterministic elapsed time and bounded progress, with final-boundary
+   redaction and Markdown neutralization for every displayed text field.
+4. `src/index.ts` wires `case "status":` into the switch and adds `"status"` to subcommands.
 
 ## Testing
 
@@ -86,16 +72,13 @@ needed.
 - `README.md`: add `/anvil status` to Commands. No schema change; skip `types.ts` / skill /
   example.
 
-## Risks & open questions
+## Runtime properties
 
-- **Staleness.** Checkpoint-derived step detail can lag the true engine state by one
-  checkpoint. Run-level fields from the enriched `ActiveRun` are always current; document
-  that step detail is best-effort.
-- **Single active run.** Anvil enforces one active run per session (`handleRun` guards at
-  `src/index.ts:157`), so `status` never has to disambiguate.
-- **Elapsed-time source of truth.** Prefer computing elapsed from the enriched
-  `ActiveRun.startedAt`; avoid clock reads inside pure formatters for testability.
-- **Open question:** should `status` also echo the live step widget lines
-  (`formatStepWidget`)? Those are engine-local and not currently exposed to the command
-  layer; wiring them out would require the engine to publish `steps` to the host. Start
-  with checkpoint-derived detail and consider promoting live `steps` later.
+- **Authoritative progress.** Status does not fold editable session checkpoints. Engine
+  snapshots update from the accepted active definition, including watch-mode reconciliation.
+- **Single active run.** Anvil enforces one active run per session, so `status` never has to
+  disambiguate.
+- **Elapsed-time source of truth.** Elapsed time is computed from in-memory
+  `ActiveRun.startedAt`; the pure formatter does not read the clock.
+- **Read-only boundary.** Status reads only active in-memory state and posts UI output. It
+  does not execute commands, launch agents, append entries, or inspect filesystem paths.

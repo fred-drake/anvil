@@ -7,6 +7,13 @@ import { workflowSubagentBackends } from "../src/prompts.ts";
 import { defineWorkflow, type WorkflowDefinition } from "../src/types.ts";
 
 describe("workflow public contract", () => {
+	it("documents the status command as a read-only current-run query", () => {
+		const readme = readFileSync(new URL("../README.md", import.meta.url), "utf8");
+
+		expect(readme).toContain("/anvil status");
+		expect(readme).toMatch(/\/anvil status[\s\S]{0,300}(?:running workflow|current progress|current run|active run)/i);
+	});
+
 	it("exposes per-step model selection fields", () => {
 		const workflow: WorkflowDefinition = defineWorkflow({
 			name: "model-contract",

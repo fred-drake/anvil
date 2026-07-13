@@ -1,7 +1,20 @@
 import { describe, expect, it } from "vitest";
 import type { RunSummary, StepRunState } from "../src/engine.ts";
 import { buildRunReports, type RunReport } from "../src/history.ts";
+import * as ui from "../src/ui.ts";
 import { formatStatus, formatStepWidget, renderRunHistoryTable, renderRunReport, renderSummaryMarkdown } from "../src/ui.ts";
+
+const renderRunStatus = (ui as unknown as {
+	renderRunStatus?: (status: {
+		runId: string;
+		workflowName?: string;
+		stepIndex?: number;
+		stepTotal?: number;
+		stepTitle?: string;
+		retryCount?: number;
+		elapsedMs?: number;
+	}) => string;
+}).renderRunStatus;
 
 describe("formatStatus", () => {
 	it("formats lifecycle and step/check status text", () => {
@@ -94,6 +107,73 @@ describe("formatStepWidget", () => {
 			"✔ before",
 			"▶ fanout — Stubs — item 3/5",
 		]);
+	});
+});
+
+describe("renderRunStatus", () => {
+	it("renders deterministic active-run identity, progress, retries, and elapsed duration", () => {
+		expect(renderRunStatus).toBeTypeOf("function");
+		const rendered = renderRunStatus!({
+			runId: "run-current",
+			workflowName: "feature-forge",
+			stepIndex: 1,
+			stepTotal: 3,
+			stepTitle: "Write unit tests",
+			retryCount: 2,
+			elapsedMs: 2_500,
+		});
+
+		expect(rendered).toContain("run-current");
+		expect(rendered).toContain("feature-forge");
+		expect(rendered).toMatch(/2\/3.*Write unit tests/s);
+		expect(rendered).toMatch(/retry.*2/i);
+		expect(rendered).toContain("2.5s");
+	});
+
+	it("renders a safe loading state without fabricating progress", () => {
+		expect(renderRunStatus).toBeTypeOf("function");
+		const rendered = renderRunStatus!({ runId: "run-loading", elapsedMs: 0 });
+
+		expect(rendered).toContain("run-loading");
+		expect(rendered).toMatch(/loading|starting/i);
+		expect(rendered).not.toMatch(/\b\d+\/\d+\b/);
+	});
+
+	it("redacts credential assignments, sensitive options, URL userinfo, paths, and Markdown in every display field", () => {
+		expect(renderRunStatus).toBeTypeOf("function");
+		const rendered = renderRunStatus!({
+			runId: "run` --token cli-token https://url-user:url-pass@example.test/private C:\\Users\\me\\secret.txt",
+			workflowName: "PASSWORD=workflow-pass --secret workflow-secret /var/private/workflow.env",
+			stepIndex: 0,
+			stepTotal: 1,
+			stepTitle: "TOKEN=title-secret --password option-pass https://alice:hunter2@example.test /home/me/project/.env <script>[link](javascript:bad) \u0000",
+			retryCount: Number.MAX_SAFE_INTEGER,
+			elapsedMs: Number.POSITIVE_INFINITY,
+		});
+
+		expect(rendered).not.toMatch(/cli-token|url-user|url-pass|workflow-pass|workflow-secret|title-secret|option-pass|alice|hunter2|Users|secret\.txt|\/var\/private|\/home\/me|\.env|<script>|javascript:|\u0000/i);
+		expect(rendered).not.toContain("`|");
+		expect(rendered).toMatch(/redacted/i);
+		expect(rendered.length).toBeLessThan(5_000);
+	});
+
+	it("redacts api-key and access-token option variants across every displayed text field", () => {
+		const rendered = renderRunStatus!({
+			runId: "run --api-key run-secret --access-token=\"run quoted secret\"",
+			workflowName: "forge --api-key='workflow quoted secret' --access-token workflow-secret",
+			stepIndex: 0,
+			stepTotal: 1,
+			stepTitle: "verify --api-key=step-secret --access-token 'step quoted secret'",
+		});
+
+		expect(rendered).not.toMatch(/run-secret|run quoted secret|workflow quoted secret|workflow-secret|step-secret|step quoted secret/);
+		expect(rendered).toMatch(/--api-key ［redacted］/);
+		expect(rendered).toMatch(/--access-token ［redacted］/);
+	});
+
+	it("formats every finite non-negative safe elapsed duration independently of progress bounds", () => {
+		expect(renderRunStatus!({ runId: "run", elapsedMs: 1_000_001 })).toContain("1000s");
+		expect(renderRunStatus!({ runId: "run", elapsedMs: 9_007_199_254_740_000 })).toMatch(/Elapsed: (?!unknown)/);
 	});
 });
 

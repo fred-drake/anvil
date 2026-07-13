@@ -9,7 +9,7 @@ import {
 	reloadPinnedWorkflow,
 	type DiscoveredWorkflow,
 } from "./discovery.ts";
-import { type EngineHost, newRunId, runWorkflow, type StepModelSelection, type WorkspaceState } from "./engine.ts";
+import { type EngineHost, newRunId, runWorkflow, type RunProgressSnapshot, type StepModelSelection, type WorkspaceState } from "./engine.ts";
 import { AnvilAbortError } from "./errors.ts";
 import {
 	buildRunHistory,
@@ -32,7 +32,7 @@ import {
 	runHerdrSubagent,
 } from "./subagent/runner.ts";
 import type { WorkflowDefinition, WorkflowSubagentBackend } from "./types.ts";
-import { renderRunHistoryTable, renderRunReport, renderSummaryMarkdown } from "./ui.ts";
+import { renderRunHistoryTable, renderRunReport, renderRunStatus, renderSummaryMarkdown } from "./ui.ts";
 
 const baseDir = dirname(fileURLToPath(import.meta.url));
 const builderSkillPath = join(baseDir, "..", "skills", "anvil-workflow-builder", "SKILL.md");
@@ -40,6 +40,8 @@ const builderSkillPath = join(baseDir, "..", "skills", "anvil-workflow-builder",
 type ActiveRun = {
 	controller: AbortController;
 	runId: string;
+	startedAtMs: number;
+	progress?: RunProgressSnapshot;
 };
 
 type ResumableRun = {
@@ -161,6 +163,13 @@ export default function piAnvil(pi: ExtensionAPI) {
 					case "report":
 						await handleReport(pi, ctx, rest);
 						return;
+					case "status":
+						if (!activeRun) {
+							ctx.ui.notify("No Anvil workflow is running.", "info");
+							return;
+						}
+						postCommandMessage(pi, "anvil-status", renderActiveRunStatus(activeRun, Date.now()));
+						return;
 					case "abort":
 						if (!activeRun) {
 							ctx.ui.notify("No Anvil workflow is running.", "info");
@@ -181,7 +190,7 @@ export default function piAnvil(pi: ExtensionAPI) {
 						});
 						return;
 					default:
-						ctx.ui.notify("Usage: /anvil <run|list|validate|history|report|abort|resume> ...", "warning");
+						ctx.ui.notify("Usage: /anvil <run|list|validate|history|report|status|abort|resume> ...", "warning");
 				}
 			} catch (error) {
 				ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
@@ -209,7 +218,7 @@ export default function piAnvil(pi: ExtensionAPI) {
 
 		const controller = new AbortController();
 		const runId = newRunId();
-		setActiveRun({ controller, runId });
+		setActiveRun({ controller, runId, startedAtMs: Date.now() });
 		let launched = false;
 		try {
 			const workflow = await findWorkflow(ctx.cwd, name);
@@ -221,6 +230,12 @@ export default function piAnvil(pi: ExtensionAPI) {
 				postCommandMessage(piApi, "anvil-validate", formatWorkflowErrors(workflow));
 				return;
 			}
+			setActiveRun({
+				controller,
+				runId,
+				startedAtMs: getActiveRun()?.startedAtMs ?? Date.now(),
+				progress: initialRunProgress(workflow.workflow),
+			});
 			const pinnedSource = watch ? await pinWorkflowSource(workflow) : undefined;
 
 			if (!preflightSubagentBackends(workflow.workflow, ctx)) return;
@@ -237,6 +252,7 @@ export default function piAnvil(pi: ExtensionAPI) {
 				turnWaiters,
 				runCmuxSubagent,
 				runCmuxReviewSubagent,
+				(snapshot) => updateActiveRunProgress(getActiveRun, setActiveRun, runId, snapshot),
 			);
 			launched = true;
 			ctx.ui.notify(`Started Anvil workflow "${workflow.workflow.name}"${watch ? " in watch mode" : ""} (${runId}).`, "info");
@@ -300,7 +316,7 @@ export default function piAnvil(pi: ExtensionAPI) {
 
 		const controller = new AbortController();
 		const runId = newRunId();
-		setActiveRun({ controller, runId });
+		setActiveRun({ controller, runId, startedAtMs: Date.now() });
 		let launched = false;
 		try {
 			const workflow = await findWorkflow(ctx.cwd, previousRun.workflowName);
@@ -317,6 +333,12 @@ export default function piAnvil(pi: ExtensionAPI) {
 				postCommandMessage(piApi, "anvil-resume", formatResumeStepMap(previousRun, workflow.workflow));
 				return;
 			}
+			setActiveRun({
+				controller,
+				runId,
+				startedAtMs: getActiveRun()?.startedAtMs ?? Date.now(),
+				progress: initialRunProgress(workflow.workflow),
+			});
 
 			if (!preflightSubagentBackends(workflow.workflow, ctx)) return;
 
@@ -332,6 +354,7 @@ export default function piAnvil(pi: ExtensionAPI) {
 				turnWaiters,
 				runCmuxSubagent,
 				runCmuxReviewSubagent,
+				(snapshot) => updateActiveRunProgress(getActiveRun, setActiveRun, runId, snapshot),
 			);
 			launched = true;
 			ctx.ui.notify(`Resumed Anvil workflow "${workflow.workflow.name}" from step ${parsed.stepNumber} (${runId}).`, "info");
@@ -456,6 +479,7 @@ function createEngineHost(
 	turnWaiters: Set<TurnWaiter>,
 	runCmuxSubagent: typeof runHerdrSubagent,
 	runCmuxReviewSubagent: typeof runHerdrReviewSubagent,
+	setRunProgress: (snapshot: RunProgressSnapshot) => void,
 ): EngineHost {
 	let pendingTurn: Promise<void> | undefined;
 	const defaultModel = ctx.model;
@@ -473,6 +497,7 @@ function createEngineHost(
 	}
 
 	return {
+		setRunProgress,
 		async applyStepModelSelection(selection) {
 			if (!selection) {
 				await applyModelAndThinking(defaultModel, defaultThinkingLevel);
@@ -708,6 +733,37 @@ async function findWorkflow(cwd: string, name: string): Promise<DiscoveredWorkfl
 	return workflows.find((workflow) => workflow.name === name);
 }
 
+function initialRunProgress(workflow: WorkflowDefinition): RunProgressSnapshot {
+	return {
+		workflowName: workflow.name,
+		steps: workflow.steps.map(({ id, title }) => ({ id, title })),
+	};
+}
+
+function updateActiveRunProgress(
+	getActiveRun: () => ActiveRun | undefined,
+	setActiveRun: (run: ActiveRun | undefined) => void,
+	runId: string,
+	progress: RunProgressSnapshot,
+): void {
+	const current = getActiveRun();
+	if (current?.runId === runId) setActiveRun({ ...current, progress });
+}
+
+function renderActiveRunStatus(activeRun: ActiveRun, nowMs: number): string {
+	const progress = activeRun.progress;
+	const step = progress?.stepIndex === undefined ? undefined : progress.steps[progress.stepIndex];
+	return renderRunStatus({
+		runId: activeRun.runId,
+		workflowName: progress?.workflowName,
+		stepIndex: progress?.stepIndex,
+		stepTotal: progress?.steps.length,
+		stepTitle: step?.title ?? step?.id,
+		retryCount: progress?.retryCount,
+		elapsedMs: Math.max(0, nowMs - activeRun.startedAtMs),
+	});
+}
+
 function postCommandMessage(pi: ExtensionAPI, customType: string, content: string): void {
 	pi.sendMessage({ customType, content, display: true }, { triggerTurn: false });
 }
@@ -758,7 +814,7 @@ function extractAnvilArgumentText(textBeforeCursor: string): string | undefined 
 }
 
 export async function getAnvilCompletions(argumentPrefix: string, cwd?: string) {
-	const subcommands = ["run", "list", "validate", "history", "report", "abort", "resume"];
+	const subcommands = ["run", "list", "validate", "history", "report", "status", "abort", "resume"];
 	const trimmedStart = argumentPrefix.trimStart();
 	const parts = trimmedStart.split(/\s+/);
 	if (parts.length <= 1 && !trimmedStart.endsWith(" ")) {

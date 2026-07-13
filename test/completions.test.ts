@@ -61,6 +61,7 @@ describe("getAnvilCompletions", () => {
 
 		expect(completions).toEqual([{ value: "validate", label: "validate" }]);
 		expect(await getAnvilCompletions("hist", project)).toEqual([{ value: "history", label: "history" }]);
+		expect(await getAnvilCompletions("stat", project)).toEqual([{ value: "status", label: "status" }]);
 	});
 
 	it("keeps report as a bare subcommand completion and does not expose cross-session run identifiers", async () => {

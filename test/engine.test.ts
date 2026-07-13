@@ -9,6 +9,7 @@ import {
 	type EngineExecResult,
 	type ReviewSubagentRunRequest,
 	type ReviewSubagentRunResult,
+	type RunProgressSnapshot,
 	type RunSummary,
 	type StepModelSelection,
 	type WorkspaceState,
@@ -46,6 +47,7 @@ class FakeHost implements EngineHost {
 	execQueue: EngineExecResult[] = [];
 	workspaceStates: Array<WorkspaceState | undefined> = [];
 	modelSelections: Array<StepModelSelection | undefined> = [];
+	progressSnapshots: RunProgressSnapshot[] = [];
 	activeModelSelection: StepModelSelection | undefined;
 	verdictModelSelections: Array<StepModelSelection | undefined> = [];
 	verdictTimeouts: number[] = [];
@@ -115,6 +117,10 @@ class FakeHost implements EngineHost {
 
 	setStatus(text: string | undefined): void {
 		this.statuses.push(text);
+	}
+
+	setRunProgress(snapshot: RunProgressSnapshot): void {
+		this.progressSnapshots.push(snapshot);
 	}
 
 	setWidget(lines: string[] | undefined): void {
@@ -2240,15 +2246,41 @@ describe("runWorkflow", () => {
 			expect(host.notifications).toEqual([expect.stringMatching(/reload skipped.*validated/i)]);
 		});
 
-		it("uses the active definition for goto targets, model selection, summaries, status, widget titles, and step totals", async () => {
+		it("publishes authoritative status metadata after a watch reload changes the workflow definition", async () => {
 			const host = new FakeHost();
 			let calls = 0;
-			const changed: WorkflowDefinition = { name: "changed", steps: [{ id: "one", title: "One", prompt: "one" }, { id: "two", title: "Changed Two", prompt: "two", model: "provider/model" }] };
-			const summary = await runWorkflow({ workflow: workflow([{ id: "one", prompt: "one" }, { id: "two", prompt: "old" }]), input: "task", cwd: "/tmp", host, reload: async () => ({ workflow: calls++ ? changed : undefined }) });
+			const changed: WorkflowDefinition = {
+				name: "changed",
+				steps: [
+					{ id: "inserted", title: "Inserted", prompt: "inserted" },
+					{ id: "one", title: "Renamed One", prompt: "one" },
+					{ id: "two-new", title: "Changed Two", prompt: "two", model: "provider/model" },
+				],
+			};
+			const summary = await runWorkflow({
+				workflow: workflow([{ id: "one", prompt: "one" }, { id: "two", prompt: "old" }]),
+				input: "task",
+				cwd: "/tmp",
+				host,
+				reload: async () => ({ workflow: calls++ ? changed : undefined }),
+			});
+			const reloadedProgress = host.progressSnapshots.find((snapshot) => snapshot.workflowName === "changed" && snapshot.stepIndex === 2);
+
 			expect(summary.workflowName).toBe("changed");
 			expect(host.modelSelections).toContainEqual({ model: "provider/model" });
 			expect(host.statuses.join(" ")).toContain("changed");
 			expect(host.widgets.flat().join(" ")).toContain("Changed Two");
+			expect(reloadedProgress).toEqual({
+				workflowName: "changed",
+				steps: [
+					{ id: "inserted", title: "Inserted" },
+					{ id: "one", title: "Renamed One" },
+					{ id: "two-new", title: "Changed Two" },
+				],
+				stepIndex: 2,
+				retryCount: 0,
+			});
+			expect(JSON.stringify(reloadedProgress)).not.toMatch(/\"two\"|\"old\"/);
 		});
 
 		it("preserves a forward goto target by stable id when a reload occurs before it executes", async () => {

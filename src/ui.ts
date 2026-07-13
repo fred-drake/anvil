@@ -1,6 +1,38 @@
 import type { RunSummary, StepRunState, WorkspaceState } from "./engine.ts";
 import { HISTORY_LIMITS, type RunHistoryEntry, type RunReport } from "./history.ts";
 
+export interface RunStatusInfo {
+	runId: string;
+	workflowName?: string;
+	stepIndex?: number;
+	stepTotal?: number;
+	stepTitle?: string;
+	retryCount?: number;
+	elapsedMs?: number;
+}
+
+export function renderRunStatus(status: RunStatusInfo): string {
+	const runId = sanitizeStatusDisplay(status.runId);
+	const elapsed = normalizeElapsedDuration(status.elapsedMs);
+	const lines = ["# Anvil run status", "", `Run ID: \`${runId}\``, `Elapsed: ${formatDuration(elapsed)}`];
+	if (!status.workflowName) {
+		lines.push("State: loading workflow");
+		return lines.join("\n");
+	}
+
+	lines.splice(3, 0, `Workflow: \`${sanitizeStatusDisplay(status.workflowName)}\``);
+	const stepIndex = normalizeStatusNumber(status.stepIndex);
+	const stepTotal = normalizeStatusNumber(status.stepTotal);
+	if (stepIndex !== undefined && stepTotal !== undefined && stepIndex < stepTotal) {
+		const title = status.stepTitle ? ` — ${sanitizeStatusDisplay(status.stepTitle)}` : "";
+		lines.push(`Current step: ${stepIndex + 1}/${stepTotal}${title}`);
+	} else {
+		lines.push("Current step: waiting to start");
+	}
+	lines.push(`Retry count: ${normalizeStatusNumber(status.retryCount) ?? 0}`);
+	return lines.join("\n");
+}
+
 export interface StatusInfo {
 	workflowName: string;
 	stepIndex?: number;
@@ -168,6 +200,37 @@ function formatWorkspaceState(state: WorkspaceState | undefined): string {
 function durationMs(startedAt: string, endedAt: string): number | undefined {
 	const duration = Date.parse(endedAt) - Date.parse(startedAt);
 	return Number.isFinite(duration) && duration >= 0 ? duration : undefined;
+}
+
+function sanitizeStatusDisplay(value: string): string {
+	const redacted = value
+		.replace(/(--(?:api-key|access-token|password|token|secret))(?:\s*=\s*|\s+)(?:"[^"]*"|'[^']*'|[^\s,;]+)/gi, "$1 [redacted]")
+		.replace(/\b(api[_-]?key|access[_-]?token|auth(?:orization)?|password|secret|token)\s*[:=]\s*(?:bearer\s+)?[^\s,;]+/gi, "$1=[redacted]")
+		.replace(/\b(https?:\/\/)[^\s/@]+:[^\s/@]+@/gi, "$1[redacted]@")
+		.replace(/\b(?:sk-[A-Za-z0-9_-]{16,}|gh[opusr]_[A-Za-z0-9]{16,}|AKIA[A-Z0-9]{16})\b/g, "[redacted]")
+		.replace(/\b[A-Za-z]:\\[^\s,;]+/g, "[sensitive path redacted]")
+		.replace(/(^|[\s("'=])\/(?:[^\s,;<>|/]+\/)*[^\s,;<>|/]+/g, "$1[sensitive path redacted]")
+		.replace(/\S*(?:[/\\]\.ssh(?:[/\\]\S*)?|[/\\]id_(?:rsa|dsa|ecdsa|ed25519)(?:\.\S*)?)\S*/gi, "[sensitive path redacted]")
+		.replace(/\b(?:javascript|data|vbscript)\s*:/gi, "[unsafe scheme redacted]");
+	const plain = redacted
+		.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ")
+		.replaceAll("`", "'")
+		.replaceAll("|", "¦")
+		.replaceAll("<", "‹")
+		.replaceAll(">", "›")
+		.replaceAll("[", "［")
+		.replaceAll("]", "］")
+		.replace(/\s+/g, " ")
+		.trim();
+	return plain.slice(0, HISTORY_LIMITS.stringLength);
+}
+
+function normalizeStatusNumber(value: number | undefined): number | undefined {
+	return Number.isSafeInteger(value) && value! >= 0 && value! <= 1_000_000 ? value : undefined;
+}
+
+function normalizeElapsedDuration(value: number | undefined): number | undefined {
+	return Number.isSafeInteger(value) && value! >= 0 ? value : undefined;
 }
 
 function formatDuration(duration: number | undefined): string {

@@ -105,8 +105,17 @@ export interface RunEvidence {
 	subagentSessions: string[];
 }
 
+export interface RunProgressSnapshot {
+	readonly workflowName: string;
+	readonly steps: ReadonlyArray<Readonly<{ id: string; title?: string }>>;
+	readonly stepIndex?: number;
+	readonly retryCount?: number;
+}
+
 export interface EngineHost {
 	applyStepModelSelection?(selection: StepModelSelection | undefined): void | Promise<void>;
+	/** Publish presentation-only progress from the authoritative active workflow definition. */
+	setRunProgress?(snapshot: RunProgressSnapshot): void;
 	/** Run a subagent-delegated step to completion. Required for workflows using delegation: { subagent }. */
 	runSubagent?(request: SubagentStepRunRequest, signal?: AbortSignal): Promise<SubagentStepRunResult>;
 	/** Run an agent check in a fresh review-only child session. */
@@ -309,6 +318,7 @@ export async function runWorkflow(initialOptions: RunWorkflowOptions): Promise<R
 		throwIfAborted(options.signal);
 		options.host.setStatus(formatStatus({ workflowName: activeWorkflow.name, phase: "starting" }));
 		options.host.setWidget(formatStepWidget(steps));
+		publishRunProgress(options, steps);
 		evidence.workspaceStart = await captureWorkspaceState(options);
 		checkpoint({ phase: "run_start", workspaceState: evidence.workspaceStart });
 		if (resume.error) return finish("failed", resume.error);
@@ -330,6 +340,7 @@ export async function runWorkflow(initialOptions: RunWorkflowOptions): Promise<R
 					definitionRevision = Math.min(definitionRevision + 1, 1_000_000);
 					steps = reconcileSteps(activeWorkflow, steps, outputs, feedbackByStep, loopCounts);
 					workflowHasModelSelectionOverrides = hasWorkflowModelSelectionOverrides(activeWorkflow);
+					publishRunProgress(options, steps, nextPendingStepIndex(steps));
 				}
 			}
 			if (pendingGotoTargetId) {
@@ -1174,6 +1185,16 @@ async function executeCheck(args: {
 	});
 }
 
+function publishRunProgress(options: RunWorkflowOptions, steps: StepRunState[], stepIndex?: number): void {
+	const activeStep = stepIndex === undefined ? undefined : steps[stepIndex];
+	const snapshot: RunProgressSnapshot = Object.freeze({
+		workflowName: options.workflow.name,
+		steps: Object.freeze(options.workflow.steps.map(({ id, title }) => Object.freeze({ id, title }))),
+		...(activeStep ? { stepIndex, retryCount: activeStep.loops } : {}),
+	});
+	options.host.setRunProgress?.(snapshot);
+}
+
 function updateStepUi(
 	options: RunWorkflowOptions,
 	steps: StepRunState[],
@@ -1186,6 +1207,7 @@ function updateStepUi(
 	itemCount?: number,
 ): void {
 	const step = steps[stepIndex]!;
+	publishRunProgress(options, steps, stepIndex);
 	options.host.setStatus(
 		formatStatus({
 			workflowName: options.workflow.name,

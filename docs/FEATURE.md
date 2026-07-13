@@ -16,30 +16,6 @@ at the bottom.
 
 ---
 
-## 4. `/anvil status`
-
-📄 **Detailed plan:** [`features/04-status-command.md`](features/04-status-command.md)
-
-**Why:** A running workflow updates a live widget (`setWidget`/`formatStepWidget`), but
-there is no command to inspect current progress on demand, for example after scrolling
-away or reattaching.
-
-**Current state:** Progress exists only as the ambient widget/status; no query command.
-
-**Design sketch:**
-- Add `/anvil status` that reports the active run (id, workflow, current step, retry
-  count, elapsed) or states that nothing is running.
-- Derive from the active-run state already tracked in `src/index.ts`
-  (`getActiveRun`/`setActiveRun`) plus the latest checkpoints.
-
-**Files:** `src/index.ts`, `src/ui.ts`, `test/anvil-command.test.ts`,
-`test/completions.test.ts`, `README.md`.
-
-**Risks:** Low. Mostly reads existing in-memory state. Shares the checkpoint-folding
-reader with #2 — build it while that code is fresh.
-
----
-
 ## 5. `/anvil plan` (dry-run resolution)
 
 📄 **Detailed plan:** [`features/05-dry-run-plan.md`](features/05-dry-run-plan.md)
@@ -179,7 +155,6 @@ widen the trust surface.
 
 The list above is already in build order. The dependencies driving it:
 
-- **#4 (status)** can also share the history reader.
 - **#5 (dry-run), #8 (hooks), #9 (budget)** are largely independent quality-of-life —
   orderable to taste.
 - **#6 (named params)** is a `WorkflowDefinition` contract change and a prerequisite for
