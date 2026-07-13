@@ -563,12 +563,13 @@ describe("/anvil resume command", () => {
 		const ctx = commandContext(project, entries);
 
 		await command!.handler("resume 3", ctx);
-		await waitUntil(() => pi.sendUserMessage.mock.calls.length > 0);
+		await waitUntil(() => pi.sendUserMessage.mock.calls.length === 2);
 
-		const instruction = pi.sendUserMessage.mock.calls[0]![0] as string;
-		expect(instruction).toContain("step 3/3: Verify");
-		expect(instruction).toContain("Verify Resume task");
-		expect(instruction).not.toContain("retry 1");
+		expect(pi.sendUserMessage.mock.calls[0]![0]).toContain("step 2/3: Implement");
+		const targetInstruction = pi.sendUserMessage.mock.calls[1]![0] as string;
+		expect(targetInstruction).toContain("step 3/3: Verify");
+		expect(targetInstruction).toContain("Verify Resume task");
+		expect(targetInstruction).not.toContain("retry 1");
 	});
 
 	it("rejects an out-of-range step and repeats the numbered step map", async () => {
@@ -590,6 +591,98 @@ describe("/anvil resume command", () => {
 	});
 });
 
+describe("Feature 3 Phase 1 resume-across-edits", () => {
+	it("suggests and launches the historical last-started step id after insertion, removal, and reordering", async () => {
+		root = await mkdtemp(join(tmpdir(), "anvil-command-"));
+		const project = join(root, "project");
+		await writeWorkflowSource(project, `export default { name: "demo", steps: [
+			{ id: "verify", prompt: "verify" }, { id: "new", prompt: "new" },
+			{ id: "implement", title: "Implement moved", prompt: "implement" },
+		] };`);
+		const entries = demoRunEntries("failed");
+		const { command, pi } = registerAnvilCommand(entries);
+		const ctx = commandContext(project, entries);
+
+		await command!.handler("resume", ctx);
+		const map = String(pi.sendMessage.mock.calls[0]?.[0].content);
+		expect(map).toContain("3. Implement moved (`implement`) ← suggested resume point");
+		expect(map).toContain("/anvil resume 3");
+
+		await command!.handler("resume 3", ctx);
+		await waitUntil(() => pi.sendUserMessage.mock.calls.length === 3);
+		expect(pi.sendUserMessage.mock.calls.map(([instruction]) => String(instruction).match(/step \d+\/3: ([^\n]+)/)?.[1])).toEqual([
+			"verify",
+			"new",
+			"Implement moved",
+		]);
+	});
+
+	it("rejects a renamed or removed inferred target before idle wait, host creation, or instruction launch", async () => {
+		root = await mkdtemp(join(tmpdir(), "anvil-command-"));
+		const project = join(root, "project");
+		await writeWorkflowSource(project, `export default { name: "demo", steps: [{ id: "renamed", prompt: "renamed" }] };`);
+		const entries = demoRunEntries("failed");
+		const { command, pi } = registerAnvilCommand(entries);
+		const ctx = commandContext(project, entries);
+
+		await command!.handler("resume", ctx);
+		expect(ctx.ui.notify).toHaveBeenCalledWith("The prior run's last-started step is not present in the current workflow definition.", "error");
+		expect(String(pi.sendMessage.mock.calls[0]?.[0].content)).toContain("1. renamed (`renamed`)");
+		expect(ctx.waitForIdle).not.toHaveBeenCalled();
+		expect(pi.sendUserMessage).not.toHaveBeenCalled();
+		expect(pi.appendEntry).not.toHaveBeenCalled();
+	});
+
+	it("keeps /anvil resume N positional against the current definition and retains its retry seed", async () => {
+		root = await mkdtemp(join(tmpdir(), "anvil-command-"));
+		const project = join(root, "project");
+		await writeWorkflowSource(project, `export default { name: "demo", steps: [
+			{ id: "implement", prompt: "moved target {loop}" }, { id: "plan", title: "Current second", prompt: "current second {loop}" }
+		] };`);
+		const entries = demoRunEntries("failed");
+		const { command, pi } = registerAnvilCommand(entries);
+		const ctx = commandContext(project, entries);
+
+		await command!.handler("resume 2 3", ctx);
+		await waitUntil(() => pi.sendUserMessage.mock.calls.length === 2);
+		expect(pi.sendUserMessage.mock.calls[0]?.[0]).toContain("step 1/2: implement");
+		expect(pi.sendUserMessage.mock.calls[1]?.[0]).toContain("step 2/2: Current second");
+		expect(pi.sendUserMessage.mock.calls[1]?.[0]).toContain("current second 3");
+	});
+
+	it("does not expose hostile persisted output in notifications, maps, reports, errors, or summaries", async () => {
+		root = await mkdtemp(join(tmpdir(), "anvil-command-"));
+		const project = join(root, "project");
+		await writeWorkflowSource(project, `export default { name: "demo", steps: [
+			{ id: "plan", prompt: "plan" }, { id: "implement", prompt: "Use {outputs.plan}" }
+		] };`);
+		const secret = "TOKEN=resume-secret\\n# INJECT [link](javascript:bad) /home/me/.ssh/id_rsa";
+		const entries = demoRunEntries("failed");
+		(entries[2]!.data as Record<string, unknown>).output = secret;
+		const { command, pi } = registerAnvilCommand(entries);
+		const ctx = commandContext(project, entries);
+
+		await command!.handler("resume", ctx);
+		await command!.handler("history", ctx);
+		await command!.handler("report run-prev", ctx);
+		const presentation = pi.sendMessage.mock.calls.map(([message]) => String(message.content)).join("\n");
+		expect(presentation).not.toContain("resume-secret");
+
+		await command!.handler("resume 2", ctx);
+		await waitUntil(() => pi.sendMessage.mock.calls.some(([message]) => message.customType === "anvil-summary"));
+		expect(pi.sendUserMessage.mock.calls[0]?.[0]).toContain("resume-secret");
+		expect(ctx.ui.notify.mock.calls.flat().join("\n")).not.toContain("resume-secret");
+		const summaries = pi.sendMessage.mock.calls.filter(([message]) => message.customType === "anvil-summary").map(([message]) => String(message.content)).join("\n");
+		expect(summaries).not.toContain("resume-secret");
+	});
+
+	it("does not alter independent-review isolation boundaries during resume recovery", () => {
+		expect(INDEPENDENT_REVIEW_TOOL_NAMES).toContain("anvil_verdict");
+		expect(INDEPENDENT_REVIEW_TOOL_NAMES).not.toContain("bash");
+		expect(INDEPENDENT_REVIEW_MODE).toBe("review");
+	});
+});
+
 async function writeDemoWorkflow(project: string): Promise<void> {
 	const workflowsDir = join(project, ".pi", "anvil", "workflows");
 	await mkdir(workflowsDir, { recursive: true });
@@ -605,6 +698,12 @@ async function writeDemoWorkflow(project: string): Promise<void> {
 		};`,
 		"utf8",
 	);
+}
+
+async function writeWorkflowSource(project: string, source: string): Promise<void> {
+	const workflowsDir = join(project, ".pi", "anvil", "workflows");
+	await mkdir(workflowsDir, { recursive: true });
+	await writeFile(join(workflowsDir, "demo.ts"), source, "utf8");
 }
 
 function demoRunEntries(finalState: "aborted" | "failed") {

@@ -22,6 +22,7 @@ import type {
 	WorkflowThinkingLevel,
 } from "./types.ts";
 import { captureObservableStepResult, type ObservableStepResult } from "./observable-result.ts";
+import { truncateStepOutput } from "./step-output.ts";
 import { formatStatus, formatStepWidget } from "./ui.ts";
 
 export interface EngineExecOptions {
@@ -43,7 +44,6 @@ export interface StepModelSelection {
 }
 
 const THINKING_LEVELS = new Set<WorkflowThinkingLevel>(["off", "minimal", "low", "medium", "high", "xhigh"]);
-const MAX_STEP_OUTPUT_CHARS = 8 * 1024;
 
 export interface SubagentStepRunRequest {
 	runId: string;
@@ -129,10 +129,14 @@ export interface EngineHost {
 }
 
 export interface ResumeWorkflowOptions {
-	/** One-based workflow step number to resume from. */
+	/** One-based current-definition workflow step number to resume from. */
 	stepNumber: number;
 	/** Current retry/loop count for the resumed step. Defaults to 0. */
 	retryCount?: number;
+	/** Completed historical step ids recovered from the selected prior run. */
+	completedStepIds?: string[];
+	/** Bounded raw output snapshots recovered from completed historical steps. */
+	outputs?: Record<string, string>;
 }
 
 export interface RunWorkflowOptions {
@@ -203,6 +207,8 @@ export interface AnvilCheckpoint {
 	workspaceState?: WorkspaceState;
 	loopCounts?: Record<string, number>;
 	finalState?: RunSummary["state"];
+	/** Execution-only bounded snapshot. Presentation readers deliberately omit this field. */
+	output?: string;
 }
 
 interface FailureDecision {
@@ -217,7 +223,7 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<RunSumma
 	const runId = options.runId ?? newRunId();
 	const startedAt = new Date().toISOString();
 	const loopCounts: Record<string, number> = {};
-	const outputs: Record<string, string> = {};
+	const outputs = Object.create(null) as Record<string, string>;
 	const feedbackByStep = new Map<string, string>();
 	const attempts = new Map<string, number>();
 	const workflowHasModelSelectionOverrides = hasWorkflowModelSelectionOverrides(options.workflow);
@@ -231,7 +237,7 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<RunSumma
 		loops: 0,
 		checks: [],
 	}));
-	const resume = resolveResumeState(options, loopCounts, steps);
+	const resume = resolveResumeState(options, loopCounts, outputs, steps);
 
 	const checkpoint = (entry: Omit<AnvilCheckpoint, "runId" | "workflowName" | "input" | "timestamp">) => {
 		options.host.checkpoint({
@@ -295,6 +301,10 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<RunSumma
 			throwIfAborted(options.signal);
 			const step = options.workflow.steps[stepIndex]!;
 			const stepState = steps[stepIndex]!;
+			if (resume.precompletedStepIds?.delete(step.id)) {
+				stepIndex += 1;
+				continue;
+			}
 			// A rerun must not expose this step's previous attempt through {outputs.<step-id>}.
 			delete outputs[step.id];
 			const ctx = makeWorkflowContext(options.input, step, stepIndex, loopCounts, options.cwd, outputs);
@@ -384,7 +394,7 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<RunSumma
 					return finish("failed", failures[0]);
 				}
 				stepState.status = "passed";
-				checkpoint({ phase: "step_pass", stepId: step.id, stepIndex });
+				checkpoint({ phase: "step_pass", stepId: step.id, stepIndex, ...stepOutputSnapshot(outputs, step.id) });
 				updateStepUi(options, steps, stepIndex, "step");
 				stepIndex += 1;
 				continue;
@@ -578,7 +588,7 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<RunSumma
 
 				if (decision.kind === "continue") {
 					stepState.status = "continued";
-					checkpoint({ phase: "step_pass", stepId: step.id, stepIndex, reason: decision.reason ?? "continued" });
+					checkpoint({ phase: "step_pass", stepId: step.id, stepIndex, reason: decision.reason ?? "continued", ...stepOutputSnapshot(outputs, step.id) });
 					stepIndex += 1;
 					jumpedOrAdvanced = true;
 					break;
@@ -587,6 +597,7 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<RunSumma
 				stepState.status = "pending";
 				updateStepUi(options, steps, stepIndex, "loop");
 				clearOutputsFromStep(options.workflow, outputs, decision.targetIndex!);
+				resume.precompletedStepIds?.delete(options.workflow.steps[decision.targetIndex!]!.id);
 				stepIndex = decision.targetIndex!;
 				jumpedOrAdvanced = true;
 				break;
@@ -595,7 +606,7 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<RunSumma
 			if (jumpedOrAdvanced) continue;
 
 			stepState.status = "passed";
-			checkpoint({ phase: "step_pass", stepId: step.id, stepIndex, sessionFile: subagentSessionFile });
+			checkpoint({ phase: "step_pass", stepId: step.id, stepIndex, sessionFile: subagentSessionFile, ...stepOutputSnapshot(outputs, step.id) });
 			updateStepUi(options, steps, stepIndex, "step");
 			stepIndex += 1;
 		}
@@ -632,8 +643,9 @@ function workspaceChanged(baseline: WorkspaceState | undefined, current: Workspa
 function resolveResumeState(
 	options: RunWorkflowOptions,
 	loopCounts: Record<string, number>,
+	outputs: Record<string, string>,
 	steps: StepRunState[],
-): { startIndex: number; error?: string } {
+): { startIndex: number; error?: string; precompletedStepIds?: Set<string> } {
 	if (!options.resume) return { startIndex: 0 };
 
 	const { stepNumber, retryCount = 0 } = options.resume;
@@ -644,16 +656,31 @@ function resolveResumeState(
 		return { startIndex: 0, error: "resume retry count must be a non-negative integer" };
 	}
 
-	const startIndex = stepNumber - 1;
-	for (let index = 0; index < startIndex; index += 1) steps[index]!.status = "skipped";
-
-	if (retryCount > 0) {
-		const step = options.workflow.steps[startIndex]!;
-		loopCounts[`resume->${step.id}`] = retryCount;
-		steps[startIndex]!.loops = retryCount;
+	const selectedIndex = stepNumber - 1;
+	const completedIds = options.resume.completedStepIds === undefined ? undefined : new Set(options.resume.completedStepIds);
+	const precompletedStepIds = new Set<string>();
+	let startIndex = selectedIndex;
+	for (let index = 0; index < selectedIndex; index += 1) {
+		const step = options.workflow.steps[index]!;
+		if (completedIds === undefined || completedIds.has(step.id)) {
+			steps[index]!.status = "skipped";
+			precompletedStepIds.add(step.id);
+		} else if (startIndex === selectedIndex) {
+			startIndex = index;
+		}
+		if (completedIds?.has(step.id)) {
+			const recoveredOutput = options.resume.outputs?.[step.id];
+			if (typeof recoveredOutput === "string") outputs[step.id] = truncateStepOutput(recoveredOutput);
+		}
 	}
 
-	return { startIndex };
+	if (retryCount > 0) {
+		const step = options.workflow.steps[selectedIndex]!;
+		loopCounts[`resume->${step.id}`] = retryCount;
+		steps[selectedIndex]!.loops = retryCount;
+	}
+
+	return { startIndex, precompletedStepIds };
 }
 
 function resolveFailure(args: {
@@ -1114,8 +1141,8 @@ function checkMatchesOutputFrom(check: Check, outputFrom: string, checkIndex: nu
 	return (check.id ?? `check-${checkIndex + 1}`) === outputFrom;
 }
 
-function truncateStepOutput(output: string): string {
-	return output.length <= MAX_STEP_OUTPUT_CHARS ? output : output.slice(-MAX_STEP_OUTPUT_CHARS);
+function stepOutputSnapshot(outputs: Record<string, string>, stepId: string): { output?: string } {
+	return outputs[stepId] === undefined ? {} : { output: outputs[stepId] };
 }
 
 function makeRuntimeCheckId(

@@ -6,7 +6,15 @@ import { defineTool, type ExtensionAPI, type ExtensionCommandContext } from "@ea
 import { discoverWorkflows, type DiscoveredWorkflow } from "./discovery.ts";
 import { type EngineHost, newRunId, runWorkflow, type StepModelSelection, type WorkspaceState } from "./engine.ts";
 import { AnvilAbortError } from "./errors.ts";
-import { buildRunHistory, buildRunReports, rawInputFromTerminalCheckpoint, toAnvilCheckpoint } from "./history.ts";
+import {
+	buildRunHistory,
+	buildRunReports,
+	HISTORY_LIMITS,
+	rawInputFromTerminalCheckpoint,
+	recoverResumeState,
+	type ResumeRecoveryState,
+	toAnvilCheckpoint,
+} from "./history.ts";
 import { VerdictBus } from "./gates.ts";
 import { buildSubagentResultMessage, workflowSubagentBackends } from "./prompts.ts";
 import { cmuxUnavailableMessage, isCmuxAvailable } from "./subagent/cmux.ts";
@@ -37,7 +45,9 @@ type ResumableRun = {
 	finalState: "failed" | "aborted";
 	timestamp: string;
 	lastStepIndex?: number;
+	lastStepId?: string;
 	lastStepStartedAt?: string;
+	recovery: ResumeRecoveryState;
 	lastFailureReason?: string;
 	lastFailureTimestamp?: string;
 };
@@ -274,6 +284,9 @@ export default function piAnvil(pi: ExtensionAPI) {
 				return;
 			}
 			if (parsed.error) ctx.ui.notify(parsed.error, "error");
+			if (!parsed.error && resolveSuggestedStepNumber(previousRun, workflow.workflow) === undefined) {
+				ctx.ui.notify("The prior run's last-started step is not present in the current workflow definition.", "error");
+			}
 			postCommandMessage(piApi, "anvil-resume", formatResumeStepMap(previousRun, workflow.workflow));
 			return;
 		}
@@ -322,7 +335,12 @@ export default function piAnvil(pi: ExtensionAPI) {
 				cwd: ctx.cwd,
 				host,
 				runId,
-				resume: { stepNumber: parsed.stepNumber, retryCount: parsed.retryCount },
+				resume: {
+					stepNumber: parsed.stepNumber,
+					retryCount: parsed.retryCount,
+					completedStepIds: previousRun.recovery.completedStepIds,
+					outputs: previousRun.recovery.outputs,
+				},
 				signal: controller.signal,
 			})
 				.catch((error) => {
@@ -790,13 +808,15 @@ function getSessionEntries(ctx: ExtensionCommandContext): unknown[] {
 
 function findLatestResumableRun(entries: unknown[]): ResumableRun | undefined {
 	let latest: ResumableRun | undefined;
-	const lastStartedStep = new Map<string, { index: number; timestamp?: string }>();
+	const boundedEntries = entries.slice(-HISTORY_LIMITS.entryCount);
+	const lastStartedStep = new Map<string, { id?: string; index: number; timestamp?: string }>();
 	const lastFailure = new Map<string, { reason: string; timestamp?: string }>();
-	for (const entry of entries) {
+	for (let entryIndex = 0; entryIndex < boundedEntries.length; entryIndex += 1) {
+		const entry = boundedEntries[entryIndex];
 		const checkpoint = toAnvilCheckpoint(entry);
 		if (!checkpoint?.runId) continue;
 		if (checkpoint.phase === "step_start" && typeof checkpoint.stepIndex === "number") {
-			lastStartedStep.set(checkpoint.runId, { index: checkpoint.stepIndex, timestamp: checkpoint.timestamp });
+			lastStartedStep.set(checkpoint.runId, { id: checkpoint.stepId, index: checkpoint.stepIndex, timestamp: checkpoint.timestamp });
 		}
 		if ((checkpoint.phase === "check_result" || checkpoint.phase === "run_end") && checkpoint.reason) {
 			lastFailure.set(checkpoint.runId, { reason: checkpoint.reason, timestamp: checkpoint.timestamp });
@@ -804,7 +824,8 @@ function findLatestResumableRun(entries: unknown[]): ResumableRun | undefined {
 		if (checkpoint.phase !== "run_end") continue;
 		if (checkpoint.finalState !== "aborted" && checkpoint.finalState !== "failed") continue;
 		const rawInput = rawInputFromTerminalCheckpoint(entry);
-		if (!checkpoint.workflowName || rawInput === undefined) continue;
+		const recovery = recoverResumeState(boundedEntries, checkpoint.runId, entryIndex);
+		if (!checkpoint.workflowName || rawInput === undefined || !recovery) continue;
 		const startedStep = lastStartedStep.get(checkpoint.runId);
 		const failure = lastFailure.get(checkpoint.runId);
 		latest = {
@@ -815,7 +836,9 @@ function findLatestResumableRun(entries: unknown[]): ResumableRun | undefined {
 			finalState: checkpoint.finalState,
 			timestamp: checkpoint.timestamp ?? "",
 			lastStepIndex: startedStep?.index,
+			lastStepId: recovery.lastStepId,
 			lastStepStartedAt: startedStep?.timestamp,
+			recovery,
 			lastFailureReason: failure?.reason,
 			lastFailureTimestamp: failure?.timestamp,
 		};
@@ -824,7 +847,7 @@ function findLatestResumableRun(entries: unknown[]): ResumableRun | undefined {
 }
 
 function formatResumeStepMap(run: ResumableRun, workflow: WorkflowDefinition): string {
-	const suggestedStepNumber = run.lastStepIndex !== undefined ? run.lastStepIndex + 1 : undefined;
+	const suggestedStepNumber = resolveSuggestedStepNumber(run, workflow);
 	const suggestedStep = suggestedStepNumber !== undefined ? workflow.steps[suggestedStepNumber - 1] : undefined;
 	const lines = [
 		`# Resume Anvil workflow \`${workflow.name}\``,
@@ -846,6 +869,12 @@ function formatResumeStepMap(run: ResumableRun, workflow: WorkflowDefinition): s
 	lines.push("", "Run `/anvil resume <step> [retry-number]`.");
 	lines.push("Omit `retry-number` when no retry count should be seeded; when no retry count is seeded, normal workflow retry policies still apply.");
 	return lines.join("\n");
+}
+
+function resolveSuggestedStepNumber(run: ResumableRun, workflow: WorkflowDefinition): number | undefined {
+	if (!run.lastStepId) return undefined;
+	const index = workflow.steps.findIndex((step) => step.id === run.lastStepId);
+	return index === -1 ? undefined : index + 1;
 }
 
 function formatResumeStepReference(stepNumber: number | undefined, step: WorkflowDefinition["steps"][number] | undefined): string {

@@ -330,6 +330,18 @@ describe("workflow public contract", () => {
 		expect(readme).toMatch(/resume[\s\S]*(timestamp|failure reason)[\s\S]*(suggested resume point|last started step)/i);
 	});
 
+	it("documents id-based inferred resume, intentional positional overrides, and bounded output checkpoint trust", () => {
+		const readme = readFileSync(new URL("../README.md", import.meta.url), "utf8");
+		const skill = readFileSync(new URL("../skills/anvil-workflow-builder/SKILL.md", import.meta.url), "utf8");
+		const docs = `${readme}\n${skill}`;
+
+		expect(docs).toMatch(/historical[^\n]*step id/i);
+		expect(docs).toMatch(/explicit[^\n]*(positional|current definition)/i);
+		expect(docs).toMatch(/8 KiB[^\n]*UTF-8/i);
+		expect(docs).toMatch(/locally editable[^\n]*(not authenticated|trusted)/i);
+		expect(docs).toMatch(/maps[^\n]*history[^\n]*reports[^\n]*summaries[^\n]*diagnostics/i);
+	});
+
 	it("documents that main-session agent checks are self-graded", () => {
 		const readme = readFileSync(new URL("../README.md", import.meta.url), "utf8");
 

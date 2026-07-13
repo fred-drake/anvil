@@ -1,4 +1,5 @@
 import type { AnvilCheckpoint, RunSummary, WorkspaceState } from "./engine.ts";
+import { isBoundedStepOutput } from "./step-output.ts";
 
 export const HISTORY_LIMITS = {
 	entryCount: 2_000,
@@ -59,6 +60,12 @@ export interface RunReport extends RunHistoryEntry {
 	workspaceState?: WorkspaceState;
 }
 
+export interface ResumeRecoveryState {
+	lastStepId?: string;
+	completedStepIds: string[];
+	outputs: Record<string, string>;
+}
+
 const phases = new Set<AnvilCheckpoint["phase"]>(["run_start", "step_start", "check_result", "step_pass", "run_end"]);
 const finalStates = new Set<RunSummary["state"]>(["succeeded", "failed", "aborted"]);
 const diagnosticPattern = /\b(?:provider|child|reviewer|transport)\b[^\n]*(?:error|diagnostic|failure)|(?:error|diagnostic|failure)[^\n]*\b(?:provider|child|reviewer|transport)\b/i;
@@ -115,11 +122,41 @@ export function toAnvilCheckpoint(entry: unknown): AnvilCheckpoint | undefined {
  * resume execution does not consume display-redacted data.
  */
 export function rawInputFromTerminalCheckpoint(entry: unknown): string | undefined {
-	if (!isRecord(entry) || entry.customType !== "anvil-run") return undefined;
-	const data = isRecord(entry.data) ? entry.data : isRecord(entry.details) ? entry.details : undefined;
+	const data = rawCheckpointData(entry);
 	if (!data || data.phase !== "run_end") return undefined;
 	if (!isString(data.runId) || !isString(data.workflowName) || !isString(data.input)) return undefined;
 	return data.input;
+}
+
+/**
+ * Fold untrusted checkpoints into execution-only resume state through one selected terminal entry.
+ * Raw output is intentionally never routed through the presentation checkpoint parser.
+ */
+export function recoverResumeState(entries: unknown[], runId: string, terminalIndex: number): ResumeRecoveryState | undefined {
+	if (!Number.isInteger(terminalIndex) || terminalIndex < 0 || terminalIndex >= entries.length) return undefined;
+	const terminal = strictRawCheckpoint(entries[terminalIndex]);
+	if (!terminal || terminal.phase !== "run_end" || terminal.runId !== runId) return undefined;
+
+	const completed = new Set<string>();
+	const outputs = Object.create(null) as Record<string, string>;
+	let lastStepId: string | undefined;
+	const startIndex = Math.max(0, terminalIndex - HISTORY_LIMITS.entryCount + 1);
+	for (let index = startIndex; index <= terminalIndex; index += 1) {
+		const checkpoint = strictRawCheckpoint(entries[index]);
+		if (!checkpoint || checkpoint.runId !== runId || checkpoint.workflowName !== terminal.workflowName || checkpoint.input !== terminal.input) continue;
+		if (checkpoint.phase === "step_start" && checkpoint.stepId) {
+			lastStepId = checkpoint.stepId;
+			completed.delete(checkpoint.stepId);
+			delete outputs[checkpoint.stepId];
+		}
+		if (checkpoint.phase !== "step_pass" || !checkpoint.stepId) continue;
+		completed.add(checkpoint.stepId);
+		delete outputs[checkpoint.stepId];
+		if (typeof checkpoint.output === "string" && isBoundedStepOutput(checkpoint.output)) {
+			outputs[checkpoint.stepId] = checkpoint.output;
+		}
+	}
+	return { lastStepId, completedStepIds: [...completed], outputs };
 }
 
 /** Fold only the newest bounded checkpoint window into chronological per-run reports. */
@@ -343,6 +380,37 @@ function durationMs(startedAt: string | undefined, endedAt: string | undefined):
 	if (!startedAt || !endedAt) return undefined;
 	const duration = Date.parse(endedAt) - Date.parse(startedAt);
 	return Number.isFinite(duration) && duration >= 0 ? duration : undefined;
+}
+
+type RawCheckpoint = {
+	runId: string;
+	workflowName: string;
+	input: string;
+	phase: AnvilCheckpoint["phase"];
+	timestamp: string;
+	stepId?: string;
+	output?: unknown;
+};
+
+function strictRawCheckpoint(entry: unknown): RawCheckpoint | undefined {
+	const data = rawCheckpointData(entry);
+	if (!data || !isString(data.runId) || !isString(data.workflowName) || !isString(data.input) || !isString(data.timestamp)) return undefined;
+	if (!isString(data.phase) || !phases.has(data.phase as AnvilCheckpoint["phase"])) return undefined;
+	if ((data.phase === "step_start" || data.phase === "step_pass") && (!isString(data.stepId) || data.stepId.length === 0)) return undefined;
+	return {
+		runId: data.runId,
+		workflowName: data.workflowName,
+		input: data.input,
+		phase: data.phase as AnvilCheckpoint["phase"],
+		timestamp: data.timestamp,
+		stepId: isString(data.stepId) ? data.stepId : undefined,
+		output: data.output,
+	};
+}
+
+function rawCheckpointData(entry: unknown): Record<string, unknown> | undefined {
+	if (!isRecord(entry) || entry.customType !== "anvil-run") return undefined;
+	return isRecord(entry.data) ? entry.data : isRecord(entry.details) ? entry.details : undefined;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { buildRunHistory, buildRunReports, HISTORY_LIMITS } from "../src/history.ts";
+import { buildRunHistory, buildRunReports, HISTORY_LIMITS, recoverResumeState, toAnvilCheckpoint } from "../src/history.ts";
+import { MAX_STEP_OUTPUT_BYTES } from "../src/step-output.ts";
 import { renderRunReport } from "../src/ui.ts";
 
 const base = {
@@ -184,5 +185,69 @@ describe("run history", () => {
 			phase: "run_end", timestamp: "2026-07-10T10:00:00.000Z", finalState: "succeeded",
 			sessionFiles: ["/does/not/exist", "../../etc/passwd"],
 		})])).not.toThrow();
+	});
+});
+
+describe("Feature 3 Phase 1 raw resume recovery", () => {
+	it("folds only the selected run chronologically through its selected terminal run_end", () => {
+		const entries = [
+			entry({ phase: "step_start", timestamp: "2026-07-10T10:00:00Z", stepId: "plan" }),
+			entry({ phase: "step_pass", timestamp: "2026-07-10T10:00:01Z", stepId: "plan", output: "first" }),
+			entry({ phase: "step_start", timestamp: "2026-07-10T10:00:02Z", stepId: "implement" }),
+			entry({ phase: "run_end", timestamp: "2026-07-10T10:00:03Z", finalState: "failed" }),
+			entry({ phase: "step_pass", timestamp: "2026-07-10T10:00:04Z", stepId: "implement", output: "post-terminal" }),
+		];
+
+		expect(recoverResumeState(entries, "run-1", 3)).toEqual({
+			lastStepId: "implement",
+			completedStepIds: ["plan"],
+			outputs: { plan: "first" },
+		});
+	});
+
+	it("accepts only structurally valid primitive step_pass output within the 8 KiB UTF-8 cap", () => {
+		const entries = [
+			entry({ phase: "step_pass", timestamp: "2026-07-10T10:00:00Z", stepId: "ok", output: "🙂".repeat(MAX_STEP_OUTPUT_BYTES / 4) }),
+			entry({ phase: "step_pass", timestamp: "2026-07-10T10:00:01Z", stepId: "object", output: { secret: true } }),
+			entry({ phase: "step_pass", timestamp: "2026-07-10T10:00:02Z", stepId: "large", output: "🙂".repeat(MAX_STEP_OUTPUT_BYTES) }),
+			entry({ phase: "step_pass", timestamp: 7, stepId: "malformed", output: "ignored" }),
+			entry({ phase: "run_end", timestamp: "2026-07-10T10:00:04Z", finalState: "failed" }),
+		];
+
+		expect(recoverResumeState(entries, "run-1", 4)).toEqual({
+			completedStepIds: ["ok", "object", "large"],
+			outputs: { ok: "🙂".repeat(MAX_STEP_OUTPUT_BYTES / 4) },
+		});
+	});
+
+	it("uses the latest pass output and leaves no-output passes absent", () => {
+		const entries = [
+			entry({ phase: "step_pass", timestamp: "2026-07-10T10:00:00Z", stepId: "latest", output: "old" }),
+			entry({ phase: "step_pass", timestamp: "2026-07-10T10:00:01Z", stepId: "latest", output: "new" }),
+			entry({ phase: "step_pass", timestamp: "2026-07-10T10:00:02Z", stepId: "empty" }),
+			entry({ phase: "run_end", timestamp: "2026-07-10T10:00:03Z", finalState: "aborted" }),
+		];
+		expect(recoverResumeState(entries, "run-1", 3)?.outputs).toEqual({ latest: "new" });
+	});
+
+	it("ignores cross-run, post-terminal, and wrong-phase output records", () => {
+		const entries = [
+			entry({ runId: "other", phase: "step_pass", timestamp: "2026-07-10T10:00:00Z", stepId: "cross", output: "cross-run" }),
+			entry({ phase: "check_result", timestamp: "2026-07-10T10:00:01Z", stepId: "wrong", output: "wrong-phase" }),
+			entry({ phase: "run_end", timestamp: "2026-07-10T10:00:02Z", finalState: "failed" }),
+			entry({ phase: "step_pass", timestamp: "2026-07-10T10:00:03Z", stepId: "late", output: "late" }),
+		];
+		expect(recoverResumeState(entries, "run-1", 2)?.outputs).toEqual({});
+	});
+
+	it("never exposes raw recovered output through presentation checkpoints, reports, or diagnostics", () => {
+		const hostile = "TOKEN=resume-secret\n# injected\u0000 /home/me/.ssh/id_rsa";
+		const entries = [
+			entry({ phase: "step_pass", timestamp: "2026-07-10T10:00:00Z", stepId: "plan", output: hostile }),
+			entry({ phase: "run_end", timestamp: "2026-07-10T10:00:01Z", finalState: "failed" }),
+		];
+		expect(recoverResumeState(entries, "run-1", 1)?.outputs.plan).toBe(hostile);
+		expect(toAnvilCheckpoint(entries[0])).not.toHaveProperty("output");
+		expect(JSON.stringify(buildRunReports(entries))).not.toContain("resume-secret");
 	});
 });

@@ -14,7 +14,9 @@ import {
 } from "../src/engine.ts";
 import { ReviewSubagentUnavailableError } from "../src/errors.ts";
 import type { Verdict } from "../src/gates.ts";
+import { recoverResumeState } from "../src/history.ts";
 import { INDEPENDENT_REVIEW_FAIL_REASON } from "../src/subagent/child.ts";
+import { MAX_STEP_OUTPUT_BYTES } from "../src/step-output.ts";
 import type { WorkflowDefinition } from "../src/types.ts";
 
 const ORIGINAL_HERDR_ENV = process.env.HERDR_ENV;
@@ -1382,23 +1384,151 @@ describe("runWorkflow", () => {
 		expect(summary.failureReason).toBe("request aborted by upstream provider");
 	});
 
-	it("leaves outputs from skipped resume steps empty", async () => {
-		const host = new FakeHost();
-		const summary = await runWorkflow({
-			workflow: workflow([
-				{ id: "plan", prompt: "Plan {input}" },
-				{ id: "implement", prompt: "Implement from [{outputs.plan}]" },
-			]),
-			input: "resume feature",
-			cwd: "/tmp",
-			host,
-			runId: "run-resume-step-outputs",
-			resume: { stepNumber: 2 },
-		} as Parameters<typeof runWorkflow>[0] & { resume: { stepNumber: number } });
+	describe("Feature 3 Phase 1 id-based resume", () => {
+		it("executes inserted pre-target steps while reconciling surviving completed steps by id", async () => {
+			const host = new FakeHost();
+			const summary = await runWorkflow({
+				workflow: workflow([
+					{ id: "new", prompt: "new" },
+					{ id: "plan", prompt: "plan" },
+					{ id: "implement", prompt: "implement" },
+					{ id: "moved-complete", prompt: "moved" },
+				]),
+				input: "task", cwd: "/tmp", host,
+				resume: { stepNumber: 3, completedStepIds: ["plan", "removed", "moved-complete"] },
+			});
 
-		expect(summary.state).toBe("succeeded");
-		expect(host.instructions).toHaveLength(1);
-		expect(host.instructions[0]).toContain("Implement from []");
+			expect(host.instructions.map((instruction) => instruction.match(/step \d+\/4: ([^\n]+)/)?.[1])).toEqual(["new", "implement", "moved-complete"]);
+			expect(summary.steps.map(({ id, status }) => ({ id, status }))).toEqual([
+				{ id: "new", status: "passed" },
+				{ id: "plan", status: "skipped" },
+				{ id: "implement", status: "passed" },
+				{ id: "moved-complete", status: "passed" },
+			]);
+		});
+
+		it("rehydrates bounded passed output only for surviving completed steps before the rerun target", async () => {
+			const host = new FakeHost();
+			await runWorkflow({
+				workflow: workflow([
+					{ id: "plan", prompt: "plan" },
+					{ id: "missing", prompt: "missing" },
+					{ id: "implement", prompt: "Use {outputs.plan}|{outputs.missing}" },
+				]),
+				input: "task", cwd: "/tmp", host,
+				resume: { stepNumber: 3, completedStepIds: ["plan", "missing"], outputs: { plan: "latest plan" } },
+			});
+
+			expect(host.instructions[0]).toContain("Use latest plan|");
+		});
+
+		it("clears output for the rerun target and every later re-executed step", async () => {
+			const host = new FakeHost();
+			await runWorkflow({
+				workflow: workflow([
+					{ id: "plan", prompt: "plan" },
+					{ id: "target", prompt: "stale={outputs.target}; later={outputs.later}; plan={outputs.plan}" },
+					{ id: "later", prompt: "later" },
+				]),
+				input: "task", cwd: "/tmp", host,
+				resume: {
+					stepNumber: 2,
+					completedStepIds: ["plan", "target", "later"],
+					outputs: { plan: "fresh", target: "STALE_TARGET", later: "STALE_LATER" },
+				},
+			});
+
+			expect(host.instructions[0]).toContain("stale=; later=; plan=fresh");
+			expect(host.instructions[0]).not.toMatch(/STALE_TARGET|STALE_LATER/);
+		});
+
+		it("restores captured output from a step continued after a failed check", async () => {
+			const firstHost = new FakeHost();
+			firstHost.execQueue.push(
+				{ stdout: "captured-before-continue\n", stderr: "", code: 0 },
+				{ stdout: "", stderr: "product failure", code: 1 },
+				{ stdout: "", stderr: "later failure", code: 1 },
+			);
+			const firstSummary = await runWorkflow({
+				workflow: workflow([
+					{
+						id: "capture",
+						prompt: "capture",
+						outputFrom: "artifact",
+						checks: [
+							{ type: "deterministic", id: "artifact", command: "capture" },
+							{ type: "deterministic", id: "continue", command: "fail", onFail: "continue" },
+						],
+					},
+					{ id: "later", prompt: "later", checks: [{ type: "deterministic", command: "fail" }] },
+				]),
+				input: "task", cwd: "/tmp", host: firstHost, runId: "continued-run",
+			});
+			expect(firstSummary.steps[0]?.status).toBe("continued");
+			const continuedPass = firstHost.checkpoints.find((checkpoint) => checkpoint.phase === "step_pass" && checkpoint.stepId === "capture");
+			expect(continuedPass?.output).toContain("captured-before-continue");
+
+			const entries = firstHost.checkpoints.map((data) => ({ type: "custom", customType: "anvil-run", data }));
+			const recovery = recoverResumeState(entries, "continued-run", entries.length - 1);
+			expect(recovery?.outputs.capture).toContain("captured-before-continue");
+
+			const resumedHost = new FakeHost();
+			await runWorkflow({
+				workflow: workflow([
+					{ id: "capture", prompt: "capture" },
+					{ id: "later", prompt: "restored={outputs.capture}" },
+				]),
+				input: "task", cwd: "/tmp", host: resumedHost,
+				resume: { stepNumber: 2, completedStepIds: recovery?.completedStepIds, outputs: recovery?.outputs },
+			});
+			expect(resumedHost.instructions).toHaveLength(1);
+			expect(resumedHost.instructions[0]).toContain("restored=captured-before-continue");
+		});
+
+		it("persists a UTF-8-byte-bounded output snapshot only after terminal step_pass output settles", async () => {
+			const host = new FakeHost();
+			host.enableSubagents();
+			host.subagentQueue.push({ summary: "delegated summary", exitCode: 0 });
+			host.stepOutputQueue.push(`prefix-${"🙂".repeat(3_000)}`, undefined, "item result");
+			host.execQueue.push({ stdout: "artifact-path\n", stderr: "", code: 0 });
+			await runWorkflow({
+				workflow: workflow([
+					{ id: "main", prompt: "main", delegation: "none" },
+					{ id: "delegated", prompt: "delegated", delegation: { subagent: "cmux" } },
+					{ id: "artifact", prompt: "artifact", delegation: "none", outputFrom: "capture", checks: [{ type: "deterministic", id: "capture", command: "capture" }] },
+					{ id: "fanout", prompt: "item {item}", delegation: "none", forEach: { items: () => ["one"] } },
+				]),
+				input: "task", cwd: "/tmp", host,
+			});
+
+			const passed = Object.fromEntries(host.checkpoints.filter((checkpoint) => checkpoint.phase === "step_pass").map((checkpoint) => [checkpoint.stepId, checkpoint.output]));
+			expect(Buffer.byteLength(passed.main, "utf8")).toBeLessThanOrEqual(MAX_STEP_OUTPUT_BYTES);
+			expect(passed.main.startsWith("🙂")).toBe(true);
+			expect(passed.delegated).toBe("delegated summary");
+			expect(passed.artifact).toContain("artifact-path");
+			expect(passed.fanout).toContain("item result");
+		});
+
+		it("keeps explicit current-definition positional resume and retry seeding unchanged", async () => {
+			const host = new FakeHost();
+			const summary = await runWorkflow({
+				workflow: workflow([{ id: "historical-target", prompt: "first" }, { id: "current-two", prompt: "loop {loop}" }]),
+				input: "task", cwd: "/tmp", host,
+				resume: { stepNumber: 2, retryCount: 3, completedStepIds: ["historical-target"] },
+			});
+			expect(host.instructions[0]).toContain("loop 3");
+			expect(summary.steps.map((step) => step.status)).toEqual(["skipped", "passed"]);
+		});
+
+		it("preserves unedited-workflow resume state and numbered execution behavior", async () => {
+			const host = new FakeHost();
+			const summary = await runWorkflow({
+				workflow: workflow([{ id: "one", prompt: "one" }, { id: "two", prompt: "two" }]),
+				input: "task", cwd: "/tmp", host, resume: { stepNumber: 2 },
+			});
+			expect(host.instructions).toHaveLength(1);
+			expect(summary.steps.map((step) => step.status)).toEqual(["skipped", "passed"]);
+		});
 	});
 
 	it("resumes from a one-based step number without rerunning earlier steps", async () => {
@@ -1693,7 +1823,14 @@ describe("runWorkflow", () => {
 		// The 8 KiB observable-result budget includes its truncation marker; prompt framing is separate.
 		expect(Buffer.byteLength(task, "utf8")).toBeLessThanOrEqual(12 * 1024);
 		expect(Buffer.from(task, "utf8").toString("utf8")).toBe(task);
-		expect(JSON.stringify({ checkpoints: host.checkpoints, summaries: host.summaries, instructions: host.instructions })).not.toContain("DETERMINISTIC_TAIL");
+		const passCheckpoint = host.checkpoints.find((checkpoint) => checkpoint.phase === "step_pass");
+		expect(passCheckpoint?.output).toContain("DETERMINISTIC_TAIL");
+		expect(Buffer.byteLength(passCheckpoint?.output ?? "", "utf8")).toBeLessThanOrEqual(MAX_STEP_OUTPUT_BYTES);
+		expect(JSON.stringify({
+			checkpoints: host.checkpoints.filter((checkpoint) => checkpoint.phase !== "step_pass"),
+			summaries: host.summaries,
+			instructions: host.instructions,
+		})).not.toContain("DETERMINISTIC_TAIL");
 	});
 
 	it("does not let prior outputs or executor-only canaries enter an independent review", async () => {
