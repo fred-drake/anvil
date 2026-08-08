@@ -6,6 +6,7 @@ import { closeSurface, createSurface, herdrUnavailableMessage, isHerdrAvailable,
 
 const ORIGINAL_PATH = process.env.PATH;
 const ORIGINAL_HERDR_ENV = process.env.HERDR_ENV;
+const ORIGINAL_HERDR_BIN_PATH = process.env.HERDR_BIN_PATH;
 const ORIGINAL_HERDR_PANE_ID = process.env.HERDR_PANE_ID;
 const ORIGINAL_HERDR_WORKSPACE_ID = process.env.HERDR_WORKSPACE_ID;
 
@@ -16,6 +17,7 @@ function tempDir(): string {
 afterEach(() => {
 	process.env.PATH = ORIGINAL_PATH;
 	restoreEnv("HERDR_ENV", ORIGINAL_HERDR_ENV);
+	restoreEnv("HERDR_BIN_PATH", ORIGINAL_HERDR_BIN_PATH);
 	restoreEnv("HERDR_PANE_ID", ORIGINAL_HERDR_PANE_ID);
 	restoreEnv("HERDR_WORKSPACE_ID", ORIGINAL_HERDR_WORKSPACE_ID);
 	__testing__.resetState();
@@ -215,8 +217,10 @@ function installFakeHerdr(
 	logFile: string,
 	options: { malformedCreate?: boolean; screenOutput?: string; splitOutput?: string; hangingReadPidFile?: string } = {},
 ): void {
+	const herdrPath = join(dir, "herdr");
+	process.env.HERDR_BIN_PATH = herdrPath;
 	writeFileSync(
-		join(dir, "herdr"),
+		herdrPath,
 		`#!/bin/sh
 set -eu
 printf '%s\\n' "$*" >> ${shellQuote(logFile)}
