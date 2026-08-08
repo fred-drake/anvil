@@ -1123,7 +1123,7 @@ describe("runWorkflow", () => {
 		expect(host.instructions).toHaveLength(0);
 	});
 
-	it("hard-stops delegated transport failures without exposing provider diagnostics or applying retry policy", async () => {
+	it("hard-stops delegated transport failures with sanitized diagnostics without applying retry policy", async () => {
 		for (const mode of ["returned failure", "launcher rejection"] as const) {
 			const host = new FakeHost();
 			const providerDiagnostic = "provider overloaded: sk-proj-delegated-secret /private/provider.log";
@@ -1157,6 +1157,9 @@ describe("runWorkflow", () => {
 			expect(host.subagentRequests).toHaveLength(1);
 			expect(host.execQueue).toHaveLength(0);
 			expect(host.checkpoints.some((entry) => entry.phase === "check_result")).toBe(false);
+			expect(summary.failureReason).toContain("provider overloaded");
+			expect(summary.failureReason).toContain("[redacted]");
+			expect(summary.failureReason).toContain("[path redacted]");
 			expect(JSON.stringify({ summary, checkpoints: host.checkpoints, notifications: host.notifications })).not.toContain(providerDiagnostic);
 		}
 	});
@@ -1193,6 +1196,8 @@ describe("runWorkflow", () => {
 			expect(host.subagentRequests[0]?.task).toContain("first-secret-item.ts");
 			expect(host.checkpoints.some((entry) => entry.phase === "check_result")).toBe(false);
 			expect(summary.steps[0]).toMatchObject({ status: "failed", checks: [], loops: 0 });
+			expect(summary.failureReason).toContain("child transport failed");
+			expect(summary.failureReason).toContain("[path redacted]");
 			expect(JSON.stringify({ summary, checkpoints: host.checkpoints, notifications: host.notifications })).not.toContain(diagnostic);
 			expect(JSON.stringify(summary)).not.toContain("first-secret-item.ts");
 		}

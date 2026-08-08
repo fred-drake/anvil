@@ -507,7 +507,7 @@ export async function runWorkflow(initialOptions: RunWorkflowOptions): Promise<R
 				if (result.errorMessage || result.exitCode !== 0) {
 					stepState.status = "failed";
 					updateStepUi(options, steps, stepIndex, "failed");
-					throw new WorkflowInfrastructureError("Delegated step infrastructure failed.");
+					throw delegatedStepFailure(result);
 				}
 				outputs[step.id] = truncateStepOutput(result.summary);
 				observableResult = captureObservableStepResult(result.summary);
@@ -725,7 +725,27 @@ function infrastructureFailure(message: string, error: unknown, signal?: AbortSi
 	throwIfAborted(signal);
 	if (isAnvilAbortError(error)) return error;
 	if (isWorkflowInfrastructureError(error)) return error;
-	return new WorkflowInfrastructureError(message);
+	return new WorkflowInfrastructureError(`${message} ${sanitizeInfrastructureDiagnostic(error)}`);
+}
+
+function delegatedStepFailure(result: SubagentStepRunResult): WorkflowInfrastructureError {
+	const exitDetail = `Subagent exited with code ${result.exitCode}.`;
+	const diagnostic = result.errorMessage
+		? ` ${sanitizeInfrastructureDiagnostic(result.errorMessage)}`
+		: " Child output was unavailable.";
+	return new WorkflowInfrastructureError(`Delegated step infrastructure failed. ${exitDetail}${diagnostic}`);
+}
+
+/** Keeps launch diagnostics actionable without persisting raw child/provider output or secrets. */
+function sanitizeInfrastructureDiagnostic(error: unknown): string {
+	const value = error instanceof Error ? error.message : typeof error === "string" ? error : "";
+	const plain = value
+		.replace(/[\u0000-\u001f\u007f]+/g, " ")
+		.replace(/\b(?:api[_-]?key|access[_-]?token|authorization|password|secret|token)\s*[:=]\s*\S+/gi, "$1=[redacted]")
+		.replace(/\b(?:sk-[A-Za-z0-9_-]{16,}|gh[opusr]_[A-Za-z0-9]{16,}|AKIA[A-Z0-9]{16})\b/g, "[redacted]")
+		.replace(/(?:\/[\w.@+-]+){2,}/g, "[path redacted]")
+		.trim();
+	return `${(plain || "No additional diagnostic was available.").slice(0, 240)}.`.replace(/\.\.+$/, ".");
 }
 
 async function captureWorkspaceState(options: RunWorkflowOptions): Promise<WorkspaceState | undefined> {
@@ -1004,7 +1024,9 @@ async function runItemDelegation(args: ForEachItemArgs & { ctx: WorkflowContext 
 
 	if (delegation.mode === "subagent") {
 		if (!options.host.runSubagent) {
-			throw new WorkflowInfrastructureError("Delegated step infrastructure failed.");
+			throw new WorkflowInfrastructureError(
+				`Delegated step infrastructure failed. This host cannot run the ${delegation.backend} subagent backend.`,
+			);
 		}
 		const task = await buildSubagentStepTask({
 			workflow: options.workflow,
@@ -1041,7 +1063,7 @@ async function runItemDelegation(args: ForEachItemArgs & { ctx: WorkflowContext 
 		}
 		throwIfAborted(options.signal);
 		if (result.errorMessage || result.exitCode !== 0) {
-			throw new WorkflowInfrastructureError("Delegated step infrastructure failed.");
+			throw delegatedStepFailure(result);
 		}
 		if (result.sessionFile && !args.evidence.subagentSessions.includes(result.sessionFile)) {
 			args.evidence.subagentSessions.push(result.sessionFile);
