@@ -11,6 +11,9 @@ coverage/
 dist/
 *.tsbuildinfo
 
+# Local worktrees
+.worktrees/
+
 # Local secrets/config
 .env
 .env.*
