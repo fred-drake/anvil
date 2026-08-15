@@ -14,7 +14,7 @@ function entry(data: Record<string, unknown>) {
 }
 
 describe("run history", () => {
-	it("folds automatic check evidence, workspace state, and subagent sessions into a report", () => {
+	it("folds automatic check evidence and workspace state into a report", () => {
 		const entries = [
 			entry({ phase: "run_start", timestamp: "2026-07-10T10:00:00.000Z" }),
 			entry({ phase: "step_start", timestamp: "2026-07-10T10:00:01.000Z", stepId: "implement", stepIndex: 0 }),
@@ -35,7 +35,6 @@ describe("run history", () => {
 				timestamp: "2026-07-10T10:00:05.000Z",
 				finalState: "succeeded",
 				workspaceState: { head: "abc", fingerprint: "hash", changedFiles: ["src/history.ts"], changedFileCount: 1 },
-				sessionFiles: ["/tmp/review.jsonl"],
 			}),
 		];
 
@@ -47,7 +46,6 @@ describe("run history", () => {
 			checksRun: 1,
 			checksFailed: 0,
 			finalState: "succeeded",
-			subagentSessions: ["/tmp/review.jsonl"],
 		});
 		expect(report?.checkpoints[2]).toMatchObject({ command: "npm test", checkType: "deterministic", timeoutMs: 300000 });
 		expect(buildRunHistory(entries)[0]).not.toHaveProperty("checkpoints");
@@ -55,6 +53,20 @@ describe("run history", () => {
 
 	it("ignores unrelated or malformed session entries", () => {
 		expect(buildRunHistory([{ customType: "other", data: base }, entry({ timestamp: "2026-07-10T10:00:00.000Z" })])).toEqual([]);
+	});
+
+	it("ignores hostile legacy child-session evidence in checkpoints and reports", () => {
+		const legacyEntry = entry({
+			phase: "run_end",
+			timestamp: "2026-07-10T10:00:00.000Z",
+			finalState: "succeeded",
+			sessionFile: "/home/me/.ssh/id_rsa",
+			sessionFiles: ["../../etc/passwd", "/tmp/review.jsonl"],
+		});
+
+		expect(toAnvilCheckpoint(legacyEntry)).not.toHaveProperty("sessionFile");
+		expect(toAnvilCheckpoint(legacyEntry)).not.toHaveProperty("sessionFiles");
+		expect(buildRunReports([legacyEntry])[0]).not.toHaveProperty("subagentSessions");
 	});
 
 	it("reconstructs each step's passed, failed, and incomplete status with start/end timing and the last failing step", () => {
@@ -112,7 +124,7 @@ describe("run history", () => {
 		expect(reports[0]?.steps[0]?.status).toBe("incomplete");
 	});
 
-	it("bounds raw entries before folding and caps runs, checkpoints, checks, changed files, session paths, and display strings with truncation metadata", () => {
+	it("bounds raw entries before folding and caps runs, checkpoints, checks, changed files, and display strings with truncation metadata", () => {
 		const oversized = "x".repeat(HISTORY_LIMITS.stringLength * 2);
 		const entries = Array.from({ length: HISTORY_LIMITS.entryCount + 20 }, (_, index) => entry({
 			runId: `run-${index}`,
@@ -120,14 +132,12 @@ describe("run history", () => {
 			timestamp: "2026-07-10T10:00:00.000Z",
 			finalState: "failed",
 			reason: oversized,
-			sessionFiles: Array.from({ length: HISTORY_LIMITS.pathCount + 5 }, (__, pathIndex) => `/tmp/${pathIndex}.jsonl`),
 			workspaceState: { head: "abc", fingerprint: "hash", changedFiles: Array.from({ length: HISTORY_LIMITS.pathCount + 5 }, (__, pathIndex) => `src/${pathIndex}.ts`), changedFileCount: 999 },
 		}));
 		const reports = buildRunReports(entries);
 
 		expect(reports).toHaveLength(HISTORY_LIMITS.runCount);
 		expect(reports.at(-1)?.failureReason?.length).toBeLessThanOrEqual(HISTORY_LIMITS.stringLength + 1);
-		expect(reports.at(-1)?.subagentSessions).toHaveLength(HISTORY_LIMITS.pathCount);
 		expect(reports.at(-1)?.workspaceState?.changedFiles).toHaveLength(HISTORY_LIMITS.pathCount);
 		expect(reports.at(-1)?.truncation.length).toBeGreaterThan(0);
 	});
@@ -135,25 +145,24 @@ describe("run history", () => {
 	it("discards wrong-typed checkpoint fields without throwing or retaining unbounded raw payloads", () => {
 		const [report] = buildRunReports([entry({
 			phase: "check_result", timestamp: "2026-07-10T10:00:00.000Z", stepId: 42, checkId: {}, checkType: "shell",
-			command: ["npm", "test"], reason: { secret: "value" }, timeoutMs: "forever", pass: "yes", sessionFiles: ["/ok", 7],
+			command: ["npm", "test"], reason: { secret: "value" }, timeoutMs: "forever", pass: "yes",
 			workspaceState: { head: 1, fingerprint: [], changedFiles: "all", changedFileCount: "many" }, loopCounts: { verify: "lots" },
 		})]);
 
-		expect(report).toMatchObject({ checksRun: 0, subagentSessions: [] });
+		expect(report).toMatchObject({ checksRun: 0 });
 		expect(report?.checkpoints[0]).not.toHaveProperty("command");
 		expect(report?.workspaceState).toBeUndefined();
 	});
 
-	it("sanitizes every checkpoint-derived field and redacts credential-shaped values and secret-like workspace or session paths", () => {
+	it("sanitizes every checkpoint-derived field and redacts credential-shaped values and secret-like workspace paths", () => {
 		const hostile = "bad`|\n<script>[x](javascript:alert(1)) TOKEN=top-secret\u0000";
 		const [report] = buildRunReports([{ customType: "anvil-run", data: {
 			runId: hostile, workflowName: hostile, input: hostile, phase: "run_end", timestamp: hostile,
-			finalState: "failed", reason: hostile, sessionFiles: ["/home/me/.ssh/id_rsa", "/tmp/safe.jsonl"],
+			finalState: "failed", reason: hostile,
 			workspaceState: { head: hostile, fingerprint: hostile, changedFiles: [".env", "src/safe.ts"], changedFileCount: 2 },
 		} }]);
 
-		expect(JSON.stringify(report)).not.toMatch(/top-secret|<script>|javascript:|id_rsa|\.env/);
-		expect(report?.subagentSessions).toEqual(["[sensitive path redacted]", "/tmp/safe.jsonl"]);
+		expect(JSON.stringify(report)).not.toMatch(/top-secret|<script>|javascript:|\.env/);
 		expect(report?.workspaceState?.changedFiles).toEqual(["[sensitive path redacted]", "src/safe.ts"]);
 	});
 
@@ -183,7 +192,7 @@ describe("run history", () => {
 	it("remains a presentation-only reader without filesystem traversal, realpath resolution, symlink access, or subprocess execution", () => {
 		expect(() => buildRunReports([entry({
 			phase: "run_end", timestamp: "2026-07-10T10:00:00.000Z", finalState: "succeeded",
-			sessionFiles: ["/does/not/exist", "../../etc/passwd"],
+			workspaceState: { head: "abc", fingerprint: "hash", changedFiles: ["/does/not/exist", "../../etc/passwd"], changedFileCount: 2 },
 		})])).not.toThrow();
 	});
 });

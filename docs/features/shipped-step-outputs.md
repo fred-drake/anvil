@@ -2,6 +2,10 @@
 
 > **Status: shipped** in `8efa1b7`. This plan is retained as a design record; see
 > [Shipped](../FEATURE.md#shipped) in the backlog.
+>
+> **Current runtime:** harness turns populate a step output only by calling
+> `anvil_output`; prompt-requested child summaries are not captured automatically.
+> `outputFrom` remains the deterministic capture path.
 
 Back to [Feature backlog](../FEATURE.md#shipped).
 
@@ -26,13 +30,9 @@ produced.
   templating in `renderTemplatable` / `renderTemplateString` (`src/prompts.ts:21`/`:31`)
   and to command templating in `renderCommandTemplateString` (`src/prompts.ts:35`), which
   today only understands `{input}` and `{loop}`.
-- Subagent steps already produce a textual result: `SubagentStepRunResult.summary`
-  (`src/engine.ts:51`), returned from `runSubagentWithBackend` via
-  `extractLastAssistantText` (`src/subagent/runner.ts:74`). The engine has this value in
-  hand at `src/engine.ts:249` (`result`).
-- Main-session steps do **not** currently capture a return value: the engine calls
-  `host.sendInstruction` then `host.waitForTurnComplete` (`src/engine.ts:302`) with no
-  text captured.
+- Harness turns do **not** expose an implicit return value: the engine calls
+  `host.sendInstruction` then `host.waitForTurnComplete`; explicit `anvil_output`
+  reporting supplies text to capture.
 - Deterministic checks already produce `output` on their `GateResult`
   (`src/gates.ts:101`, field defined at `src/gates.ts:18`).
 
@@ -58,22 +58,10 @@ unaffected; string templates gain a new placeholder (below).
 
 Per step, decide what "the output" is:
 
-1. **Subagent-delegated step** (`delegation.mode === "subagent"`): capture
-   `result.summary` (already available at `src/engine.ts:249`). This is the natural
-   output — the child's final message is designed to be the step outcome
-   (`buildSubagentStepTask`, `src/prompts.ts:138`).
-2. **Main-session step** (`runInMain` or auto/skill executed in main): no return value is
-   captured today. Options, in order of preference:
-   - **(a) Explicit opt-in via a tool.** Register an `anvil_output` tool (sibling of
-     `anvil_verdict`, `src/index.ts:311`) that the agent calls to record its output for
-     the current step. The engine sets the active step id before `sendInstruction` and
-     reads the recorded value after `waitForTurnComplete`. Clean and explicit, but relies
-     on the agent calling it.
-   - **(b) Last assistant text of the turn.** Requires host support to read the main
-     session's last message; heavier and less predictable. Defer.
-   - Recommendation: ship (a); document that `runInMain` steps only populate `outputs`
-     when they call `anvil_output` (or when a deterministic capture check is used, below).
-3. **Deterministic capture (optional).** Allow a step to designate that a named check's
+1. **Explicit harness capture.** The active harness calls `anvil_output` to record text
+   for the current step. This remains required when the prompt asks the harness to use
+   subagents: Anvil does not inspect or automatically capture child summaries.
+2. **Deterministic capture (optional).** Allow a step to designate that a named check's
    stdout becomes the step output, e.g. `outputFrom: "<checkId>"`, reading the
    `GateResult.output` already produced (`src/gates.ts:114`). Useful for "run a script,
    feed its stdout to the next step."
@@ -122,9 +110,9 @@ latest attempt. State this explicitly and cover it in tests — it is the behavi
 
 1. `src/types.ts`: add `outputs` to `WorkflowContext`; optional `outputFrom` on
    `WorkflowStep`.
-2. `src/engine.ts`: maintain `outputs` map; capture subagent summary at
-   `src/engine.ts:249`; spread into `makeWorkflowContext` (`src/engine.ts:577`); if
-   `outputFrom`, capture the matching check's `GateResult.output` after checks run.
+2. `src/engine.ts`: maintain the `outputs` map; capture explicit `anvil_output` reports;
+   spread outputs into `makeWorkflowContext`; if `outputFrom`, capture the matching
+   check's `GateResult.output` after checks run.
 3. `src/index.ts`: register `anvil_output` tool; host stores/returns the recorded output
    for the current step (parallels `anvil_verdict`/`VerdictBus`).
 4. `src/prompts.ts`: `{outputs.<id>}` in string + command templating.
@@ -138,12 +126,12 @@ latest attempt. State this explicitly and cover it in tests — it is the behavi
 - `test/gates.test.ts` (where command-template rendering is covered today) or
   `test/engine.test.ts`: `{outputs.x}` renders in string and command templates with
   correct shell quoting; missing id → empty.
-- `test/engine.test.ts`: subagent summary is captured into `outputs`; a later step's
-  rendered prompt/command sees it; `outputFrom` captures deterministic stdout; resume
-  leaves skipped-step outputs empty.
+- `test/engine.test.ts`: explicit `anvil_output` text is captured into `outputs`; a later
+  step's rendered prompt/command sees it; `outputFrom` captures deterministic stdout;
+  resume leaves skipped-step outputs empty.
 - Backward-compat: every existing workflow/test still passes with `outputs` present but
   unused.
-- Determinism per `AGENTS.md`: fake host, no real subagents.
+- Determinism per `AGENTS.md`: fake host, no real harness children.
 
 ## Docs to update
 

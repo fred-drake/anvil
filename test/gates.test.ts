@@ -9,14 +9,10 @@ import type {
 	EngineExecOptions,
 	EngineExecResult,
 	EngineHost,
-	ReviewSubagentRunRequest,
-	ReviewSubagentRunResult,
 	RunSummary,
 } from "../src/engine.ts";
-import { ReviewSubagentUnavailableError } from "../src/errors.ts";
 import { executeAgentCheck, executeDeterministicCheck, VerdictBus, type Verdict } from "../src/gates.ts";
-import { buildIndependentReviewTask, renderCommandTemplateString, renderTemplateString } from "../src/prompts.ts";
-import { INDEPENDENT_REVIEW_FAIL_REASON } from "../src/subagent/child.ts";
+import { renderCommandTemplateString, renderTemplateString } from "../src/prompts.ts";
 import type { AgentCheck, WorkflowDefinition } from "../src/types.ts";
 
 const execFileAsync = promisify(execFile);
@@ -29,8 +25,6 @@ class GateHost implements EngineHost {
 	verdictQueue: Array<Verdict | undefined> = [];
 	neverVerdict = false;
 	turns = 0;
-	reviewRequests: ReviewSubagentRunRequest[] = [];
-	runReviewSubagent?: (request: ReviewSubagentRunRequest, signal?: AbortSignal) => Promise<ReviewSubagentRunResult>;
 
 	sendInstruction(instruction: string): void {
 		this.instructions.push(instruction);
@@ -319,245 +313,25 @@ describe("executeDeterministicCheck", () => {
 });
 
 describe("executeAgentCheck", () => {
-	it("routes reviewed checks without self-grading or propagating reviewer prose", async () => {
+	it("passes prompt-requested review subagents through the normal verdict path", async () => {
 		const host = new GateHost();
-		const secret = "unmarked-reviewer-secret";
-		host.runReviewSubagent = async (request) => {
-			host.reviewRequests.push(request);
-			return { pass: false, reason: `missing regression test: ${secret}`, sessionFile: "/tmp/review.jsonl", exitCode: 0 };
-		};
-
+		host.verdict = { checkId: "ignored", pass: true, reason: "independent review passed" };
+		const definition = workflow();
 		const result = await executeAgentCheck({
 			host,
-			workflow: workflow(),
-			step: workflow().steps[0]!,
-			check: { type: "agent", prompt: "criteria", review: { subagent: "cmux" } },
-			ctx: ctx(),
-			checkId: "run:one:0:0",
-		});
-
-		expect(result).toMatchObject({
-			pass: false,
-			reason: INDEPENDENT_REVIEW_FAIL_REASON,
-			checkId: "run:one:0:0",
-			timeoutMs: 1_800_000,
-		});
-		expect(JSON.stringify(result)).not.toContain(secret);
-		expect(host.reviewRequests).toHaveLength(1);
-		expect(host.reviewRequests[0]?.timeoutMs).toBe(1_800_000);
-		expect(host.instructions).toEqual([]);
-		expect(host.turns).toBe(0);
-	});
-
-	it("bounds review request identities before crossing the launcher boundary", async () => {
-		const hostileIdentity = `${"identity\u0000\n\u001b[31m".repeat(150_000)}REQUEST_ID_CANARY`;
-		const host = new GateHost();
-		host.runReviewSubagent = async (request) => {
-			host.reviewRequests.push(request);
-			return { pass: true, reason: "review passed", sessionFile: "/tmp/review.jsonl", exitCode: 0 };
-		};
-		const definition = workflow();
-
-		await executeAgentCheck({
-			host,
-			workflow: { ...definition, name: hostileIdentity },
-			step: { ...definition.steps[0]!, id: hostileIdentity },
-			check: { type: "agent", prompt: "criteria", review: { subagent: "cmux" } },
-			ctx: ctx(),
-			checkId: `run:${hostileIdentity}:0:0`,
-			runId: hostileIdentity,
-		});
-
-		const request = host.reviewRequests[0]!;
-		for (const identity of [request.runId, request.workflowName, request.stepId, request.checkId]) {
-			expect(identity).toMatch(/^sha256:[a-f0-9]{64}$/u);
-			expect(Buffer.byteLength(identity, "utf8")).toBeLessThanOrEqual(256);
-			expect(identity).not.toMatch(/[\u0000-\u001f\u007f]/u);
-			expect(identity).not.toContain("REQUEST_ID_CANARY");
-		}
-		expect(Buffer.byteLength(request.task, "utf8")).toBeLessThan(20_000);
-	});
-
-	it("fails closed with a gate result when an independent review backend is unavailable, unless main fallback is explicit", async () => {
-		const unavailable = new GateHost();
-		const required = await executeAgentCheck({
-			host: unavailable,
-			workflow: workflow(),
-			step: workflow().steps[0]!,
-			check: { type: "agent", prompt: "criteria", review: { subagent: "herdr" } },
-			ctx: ctx(),
-			checkId: "required-review",
-		});
-		expect(required).toMatchObject({
-			checkId: "required-review",
-			pass: false,
-			reason: 'Independent review backend "herdr" is unavailable.',
-			timeoutMs: 1_800_000,
-		});
-		expect(unavailable.instructions).toEqual([]);
-
-		const automatic = await executeAgentCheck({
-			host: unavailable,
-			workflow: workflow(),
-			step: workflow().steps[0]!,
-			check: { type: "agent", prompt: "criteria", review: { subagent: "auto" } },
-			ctx: ctx(),
-			checkId: "automatic-review",
-		});
-		expect(automatic).toMatchObject({
-			pass: false,
-			reason: 'Independent review backend "auto" is unavailable.',
-		});
-
-		const fallback = new GateHost();
-		fallback.verdict = { checkId: "ignored", pass: true, reason: "explicit fallback" };
-		const optional = await executeAgentCheck({
-			host: fallback,
-			workflow: workflow(),
-			step: workflow().steps[0]!,
-			check: { type: "agent", prompt: "criteria", review: { subagent: "herdr" }, reviewFallback: "main" },
-			ctx: ctx(),
-			checkId: "fallback-review",
-		});
-		expect(optional).toMatchObject({ pass: true, reason: "explicit fallback" });
-		expect(fallback.instructions).toHaveLength(1);
-	});
-
-	it("returns a failed gate or uses explicit main fallback when the backend becomes unavailable at review launch", async () => {
-		const required = new GateHost();
-		required.runReviewSubagent = async () => {
-			throw new ReviewSubagentUnavailableError();
-		};
-		const requiredResult = await executeAgentCheck({
-			host: required,
-			workflow: workflow(),
-			step: workflow().steps[0]!,
-			check: { type: "agent", prompt: "criteria", review: { subagent: "cmux" }, timeoutMs: 4321 },
-			ctx: ctx(),
-			checkId: "required-runtime-review",
-		});
-		expect(requiredResult).toMatchObject({
-			checkId: "required-runtime-review",
-			pass: false,
-			reason: 'Independent review backend "cmux" is unavailable.',
-			timeoutMs: 4321,
-		});
-		expect(required.instructions).toEqual([]);
-
-		const host = new GateHost();
-		host.verdict = { checkId: "ignored", pass: true, reason: "explicit runtime fallback" };
-		host.runReviewSubagent = async () => {
-			throw new ReviewSubagentUnavailableError();
-		};
-
-		const result = await executeAgentCheck({
-			host,
-			workflow: workflow(),
-			step: workflow().steps[0]!,
-			check: { type: "agent", prompt: "criteria", review: { subagent: "cmux" }, reviewFallback: "main" },
-			ctx: ctx(),
-			checkId: "runtime-fallback",
-		});
-
-		expect(result).toMatchObject({ pass: true, reason: "explicit runtime fallback" });
-		expect(host.reviewRequests).toEqual([]);
-		expect(host.instructions).toHaveLength(1);
-		expect(host.turns).toBe(1);
-	});
-
-	it("does not self-grade review launch or transport failures", async () => {
-		const host = new GateHost();
-		host.verdict = { checkId: "ignored", pass: true, reason: "rubber stamp" };
-		host.runReviewSubagent = async () => {
-			throw new Error("Independent review verdict sidecar is malformed");
-		};
-
-		await expect(executeAgentCheck({
-			host,
-			workflow: workflow(),
-			step: workflow().steps[0]!,
-			check: { type: "agent", prompt: "criteria", review: { subagent: "cmux" }, reviewFallback: "main" },
-			ctx: ctx(),
-			checkId: "transport-failure",
-		})).rejects.toThrow("Independent review verdict sidecar is malformed");
-		expect(host.instructions).toEqual([]);
-		expect(host.turns).toBe(0);
-	});
-
-	it("builds an independent reviewer task with only the documented reviewer contract", async () => {
-		const definition = workflow();
-		const step = {
-			...definition.steps[0]!,
-			prompt: "EXECUTOR_PROMPT_MUST_NOT_REACH_REVIEWER",
-		};
-		const task = await buildIndependentReviewTask({
-			workflow: definition,
-			step,
-			check: { type: "agent", prompt: "Inspect {input}" },
-			ctx: ctx("checked-in artifacts"),
-			checkId: "run:one:0:0",
-		});
-
-		expect(task).toContain(`workflow "${definition.name}", step "${step.id}"`);
-		expect(task).toContain("Evaluation criteria:\nInspect checked-in artifacts");
-		expect(task).toMatch(/inspect artifacts directly/i);
-		expect(task).toMatch(/read-only filesystem tools/i);
-		expect(task).toMatch(/realpath-resolved workflow cwd/i);
-		expect(task).toMatch(/deny secret-like paths and symlink escapes/i);
-		expect(task).toContain("Submit exactly one `anvil_verdict` tool call");
-		expect(task).toContain("check_id `run:one:0:0`");
-		expect(task).toContain("pass true only when all criteria are satisfied");
-		expect(task).toContain("a concise reason");
-		expect(task).not.toContain("EXECUTOR_PROMPT_MUST_NOT_REACH_REVIEWER");
-		expect(task).not.toMatch(/executor (?:conversation|transcript)|internal reasoning/i);
-	});
-
-	it("sanitizes credentials in independent-review criteria and observable results", async () => {
-		const npmToken = "npm_super_secret_token_value_123456789";
-		const databaseUrls = [
-			"postgresql://admin:database-password@db.example.test/app",
-			"mysql://quoted-user:quoted-password@db.example.test/app",
-			"mongodb://json-user:json-password@db.example.test/app",
-		];
-		const secretInput = [
-			`NPM_TOKEN=${npmToken}`,
-			`DATABASE_URL=${databaseUrls[0]}`,
-			`DATABASE_URL=\"${databaseUrls[1]}\"`,
-			`{\"DATABASE_URL\": \"${databaseUrls[2]}\"}`,
-		].join("\n");
-		const definition = workflow();
-		const task = await buildIndependentReviewTask({
 			workflow: definition,
 			step: definition.steps[0]!,
-			check: { type: "agent", prompt: "Inspect {input}" },
-			ctx: ctx(secretInput),
-			checkId: "sanitized-review",
-			observableResult: { state: "present", text: secretInput },
-		});
-
-		expect(task).not.toContain(npmToken);
-		for (const databaseUrl of databaseUrls) expect(task).not.toContain(databaseUrl);
-		for (const password of ["database-password", "quoted-password", "json-password"]) {
-			expect(task).not.toContain(password);
-		}
-		expect(task.match(/\[REDACTED SECRET\]/g)?.length).toBeGreaterThanOrEqual(8);
-	});
-
-	it("bounds and sanitizes untrusted independent-review identity fields", async () => {
-		const hostileIdentity = `${"hostile\u0000\nidentity".repeat(150_000)}IDENTITY_CANARY`;
-		const definition = workflow();
-		const task = await buildIndependentReviewTask({
-			workflow: { ...definition, name: hostileIdentity },
-			step: { ...definition.steps[0]!, id: hostileIdentity },
-			check: { type: "agent", prompt: "Inspect artifacts" },
+			check: {
+				type: "agent",
+				prompt: "Use a fresh review subagent to verify the implementation.",
+			},
 			ctx: ctx(),
-			checkId: hostileIdentity,
+			checkId: "run:step:review",
 		});
 
-		expect(Buffer.byteLength(task, "utf8")).toBeLessThan(20_000);
-		expect(task).not.toContain("\u0000");
-		expect(task).not.toContain("IDENTITY_CANARY");
-		expect(task).toMatch(/check_id `sha256:[a-f0-9]{64}`/u);
+		expect(host.instructions[0]).toContain("Use a fresh review subagent");
+		expect(host.instructions[0]).toContain("check_id `run:step:review`");
+		expect(result).toMatchObject({ checkId: "run:step:review", pass: true, reason: "independent review passed" });
 	});
 
 	it("propagates verdict transport errors before a wait is canceled", async () => {

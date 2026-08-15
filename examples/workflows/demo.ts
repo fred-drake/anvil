@@ -8,9 +8,6 @@ export default defineWorkflow({
 	name: "demo",
 	description: "Create or update a file, then verify its contents with a retry loop.",
 	defaults: {
-		// Auto-detects HERDR_ENV=1 as herdr, then CMUX_SHELL_INTEGRATION=1 as cmux.
-		// Use { subagent: "cmux" }, { subagent: "herdr" }, { skill: "implementer" }, or "none" to override.
-		delegation: "auto",
 		maxLoops: 2,
 	},
 	steps: [
@@ -39,16 +36,13 @@ export default defineWorkflow({
 		{
 			id: "summarize",
 			title: "Summarize the result",
-			runInMain: true,
-			prompt: "Summarize what was done for: {input}\n\nThe verified file path from the previous step is: {outputs.create-file}",
+			prompt: "Do this directly in the main agent; do not delegate it. Summarize what was done for: {input}\n\nThe verified file path from the previous step is: {outputs.create-file}\n\nCall the anvil_output tool exactly once with step_id \"summarize\" and output set to the summary.",
 			checks: [
 				{
 					type: "agent",
 					id: "summary-quality",
-					// The independent review receives this step's bounded observable chat result.
 					name: "Useful summary",
-					prompt: "Pass if the summary clearly states what changed and any verification performed.",
-					review: { subagent: "auto" },
+					prompt: "Use a fresh review subagent through the active harness to assess the captured summary below. Pass if the summary clearly states what changed and any verification performed.\n\nSummary to review:\n{outputs.summarize}\n\nReport the decision through anvil_verdict using this check id.",
 				},
 			],
 		},

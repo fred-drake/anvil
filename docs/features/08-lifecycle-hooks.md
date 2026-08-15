@@ -38,9 +38,9 @@ commit results, clean scratch files, or ping the user on completion or failure.
 ### Schema (`src/types.ts`)
 
 Add a top-level `hooks` key to `WorkflowDefinition` — *not* under `defaults`. Every
-existing `defaults` field (`delegation`, `subagentTimeoutMs`, `onFail`, `maxLoops`) is a
-per-step-overridable setting; lifecycle hooks are run-scoped and never overridden by a
-step, so nesting them under `defaults` would misstate their semantics. A distinct
+existing `defaults` field (`onFail`, `maxLoops`) is a per-step-overridable setting;
+lifecycle hooks are run-scoped and never overridden by a step, so nesting them under
+`defaults` would misstate their semantics. A distinct
 top-level key also avoids any confusion with `defaults.onFail`, which already exists as
 an `OnFailPolicy` for *checks* (`src/types.ts:116`).
 

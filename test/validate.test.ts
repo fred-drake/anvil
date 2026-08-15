@@ -59,46 +59,35 @@ describe("validateWorkflow", () => {
 		expect(validateWorkflow(workflow)).toEqual({ ok: true, workflow });
 	});
 
-	it("accepts an independently reviewed agent check and its explicit fallback", () => {
+	it.each([
+		["workflow.defaults.delegation", { defaults: { delegation: "auto" } }],
+		["workflow.defaults.agent", { defaults: { agent: "implementer" } }],
+		["workflow.defaults.subagentTimeoutMs", { defaults: { subagentTimeoutMs: 1_000 } }],
+		["workflow.steps[0].delegation", { steps: [{ id: "one", prompt: "a", delegation: { subagent: "cmux" } }] }],
+		["workflow.steps[0].agent", { steps: [{ id: "one", prompt: "a", agent: "reviewer" }] }],
+		["workflow.steps[0].runInMain", { steps: [{ id: "one", prompt: "a", runInMain: true }] }],
+		["workflow.steps[0].subagentTimeoutMs", { steps: [{ id: "one", prompt: "a", subagentTimeoutMs: 1_000 }] }],
+		["workflow.steps[0].checks[0].agent", {
+			steps: [{ id: "one", prompt: "a", checks: [{ type: "agent", prompt: "review", agent: "reviewer" }] }],
+		}],
+		["workflow.steps[0].checks[0].review", {
+			steps: [{ id: "one", prompt: "a", checks: [{ type: "agent", prompt: "review", review: { subagent: "auto" } }] }],
+		}],
+		["workflow.steps[0].checks[0].reviewFallback", {
+			steps: [{ id: "one", prompt: "a", checks: [{ type: "agent", prompt: "review", reviewFallback: "fail" }] }],
+		}],
+	])("rejects removed field %s with prompt migration guidance", (path, patch) => {
 		const workflow = {
-			name: "independent-review",
-			steps: [
-				{
-					id: "review",
-					prompt: "review",
-					checks: [{ type: "agent", prompt: "criteria", review: { subagent: "cmux" }, reviewFallback: "main" }],
-				},
-			],
+			name: "removed-subagent-field",
+			steps: [{ id: "one", prompt: "a" }],
+			...patch,
 		};
-
-		expect(validateWorkflow(workflow)).toEqual({ ok: true, workflow });
-	});
-
-	it("rejects unknown, malformed, and unsupported independent-review settings", () => {
-		const result = validateWorkflow({
-			name: "bad-independent-review",
-			steps: [
-				{
-					id: "review",
-					prompt: "review",
-					checks: [
-						{ type: "agent", prompt: "criteria", review: { subagent: "unknown", extra: true }, reviewFallback: "silent" },
-						{ type: "agent", prompt: "criteria", review: "cmux" },
-						{ type: "agent", prompt: "criteria", unexpectedReviewOption: true },
-						{ type: "agent", prompt: "criteria", reviewFallback: "main" },
-					],
-				},
-			],
-		});
-
+		const result = validateWorkflow(workflow);
 		expect(result.ok).toBe(false);
 		if (!result.ok) {
-			expect(result.errors).toContain('workflow.steps[0].checks[0].review.subagent must be "cmux", "herdr", or "auto"');
-			expect(result.errors).toContain('workflow.steps[0].checks[0].review.extra is not recognized');
-			expect(result.errors).toContain('workflow.steps[0].checks[0].reviewFallback must be "main" or "fail" when provided');
-			expect(result.errors).toContain("workflow.steps[0].checks[1].review must be an object when provided");
-			expect(result.errors).toContain("workflow.steps[0].checks[2].unexpectedReviewOption is not recognized");
-			expect(result.errors).toContain("workflow.steps[0].checks[3].reviewFallback requires review to be configured");
+			expect(result.errors).toContain(
+				`${path} was removed; describe desired subagent behavior directly in the step or agent-check prompt`,
+			);
 		}
 	});
 
@@ -192,35 +181,6 @@ describe("validateWorkflow", () => {
 		if (!result.ok) expect(result.errors).toContain("workflow.name must match /^[a-z0-9-]+$/");
 	});
 
-	it("accepts workflow and step delegation settings", () => {
-		const workflow = {
-			name: "delegation",
-			defaults: { delegation: { skill: "implementer" } },
-			steps: [{ id: "one", prompt: "a", delegation: "auto" }],
-		};
-		expect(validateWorkflow(workflow)).toEqual({ ok: true, workflow });
-	});
-
-	it("accepts supported subagent delegation settings", () => {
-		for (const backend of ["cmux", "herdr"] as const) {
-			const workflow = {
-				name: `${backend}-subagent-delegation`,
-				defaults: { delegation: { subagent: backend } },
-				steps: [{ id: "one", prompt: "a", delegation: { subagent: backend } }],
-			};
-			expect(validateWorkflow(workflow)).toEqual({ ok: true, workflow });
-		}
-	});
-
-	it("rejects unsupported subagent backends", () => {
-		const result = validateWorkflow({
-			name: "bad-subagent",
-			steps: [{ id: "one", prompt: "a", delegation: { subagent: "tmux" } }],
-		});
-		expect(result.ok).toBe(false);
-		if (!result.ok) expect(result.errors).toContain('workflow.steps[0].delegation.subagent must be "cmux" or "herdr"');
-	});
-
 	it("accepts per-step model and thinking-level settings", () => {
 		const workflow = {
 			name: "model-selection",
@@ -308,21 +268,6 @@ describe("validateWorkflow", () => {
 		}
 	});
 
-	it("rejects malformed delegation settings", () => {
-		const result = validateWorkflow({
-			name: "bad-delegation",
-			defaults: { delegation: "subagent" },
-			steps: [{ id: "one", prompt: "a", delegation: { skill: "" } }],
-		});
-		expect(result.ok).toBe(false);
-		if (!result.ok) {
-			expect(result.errors).toContain(
-				'workflow.defaults.delegation must be "auto", "none", { skill: string }, or { subagent: "cmux" | "herdr" }',
-			);
-			expect(result.errors).toContain("workflow.steps[0].delegation.skill must be a non-empty string");
-		}
-	});
-
 	it("rejects malformed defaults", () => {
 		expect(validateWorkflow({ name: "bad-defaults", defaults: "nope", steps: [{ id: "one", prompt: "a" }] })).toEqual({
 			ok: false,
@@ -331,12 +276,11 @@ describe("validateWorkflow", () => {
 
 		const result = validateWorkflow({
 			name: "bad-default-fields",
-			defaults: { agent: 1, maxLoops: -1, onFail: { goto: "", maxLoops: 1.2, onExhausted: "later", feedback: "yes" } },
+			defaults: { maxLoops: -1, onFail: { goto: "", maxLoops: 1.2, onExhausted: "later", feedback: "yes" } },
 			steps: [{ id: "one", prompt: "a" }],
 		});
 		expect(result.ok).toBe(false);
 		if (!result.ok) {
-			expect(result.errors).toContain("workflow.defaults.agent must be a string when provided");
 			expect(result.errors).toContain("workflow.defaults.maxLoops must be a non-negative integer when provided");
 			expect(result.errors).toContain("workflow.defaults.onFail.goto must be a non-empty string");
 			expect(result.errors).toContain("workflow.defaults.onFail.maxLoops must be a non-negative integer when provided");
@@ -387,7 +331,7 @@ describe("validateWorkflow", () => {
 			name: "bad-step-fields",
 			steps: [
 				"not-step",
-				{ id: "", title: 1, prompt: 3, agent: 4, runInMain: "yes", skipIf: "no", checks: "nope", onFail: [] },
+				{ id: "", title: 1, prompt: 3, skipIf: "no", checks: "nope", onFail: [] },
 			],
 		});
 		expect(result.ok).toBe(false);
@@ -396,8 +340,6 @@ describe("validateWorkflow", () => {
 			expect(result.errors).toContain("workflow.steps[1].id must be a non-empty string");
 			expect(result.errors).toContain("workflow.steps[1].title must be a string when provided");
 			expect(result.errors).toContain("workflow.steps[1].prompt must be a string or function");
-			expect(result.errors).toContain("workflow.steps[1].agent must be a string when provided");
-			expect(result.errors).toContain("workflow.steps[1].runInMain must be a boolean when provided");
 			expect(result.errors).toContain("workflow.steps[1].skipIf must be a function when provided");
 			expect(result.errors).toContain('workflow.steps[1].onFail must be "stop", "continue", or a goto object');
 			expect(result.errors).toContain("workflow.steps[1].checks must be an array when provided");
@@ -413,7 +355,7 @@ describe("validateWorkflow", () => {
 					prompt: "a",
 					checks: [
 						"not-check",
-						{ type: "agent", id: "", name: 1, prompt: 2, agent: 3, onFail: { goto: "missing" } },
+						{ type: "agent", id: "", name: 1, prompt: 2, onFail: { goto: "missing" } },
 						{ type: "wat" },
 					],
 				},
@@ -426,7 +368,6 @@ describe("validateWorkflow", () => {
 			expect(result.errors).toContain("workflow.steps[0].checks[1].name must be a string when provided");
 			expect(result.errors).toContain('workflow.steps[0].checks[1].onFail.goto target "missing" does not exist');
 			expect(result.errors).toContain("workflow.steps[0].checks[1].prompt must be a string or function");
-			expect(result.errors).toContain("workflow.steps[0].checks[1].agent must be a string when provided");
 			expect(result.errors).toContain('workflow.steps[0].checks[2].type must be "deterministic" or "agent"');
 		}
 	});
@@ -534,27 +475,10 @@ describe("validateWorkflow", () => {
 			expect(validateWorkflow(workflow)).toEqual({ ok: true, workflow });
 		});
 
-		it("rejects concurrency > 1 when delegation resolves to non-subagent, including workflow defaults", () => {
-			const stepLevel = validateWorkflow({
-				name: "conc-step",
-				steps: [{ id: "a", prompt: "work", delegation: "none", forEach: { items: () => ["x"], concurrency: 2 } }],
-			});
-			expect(stepLevel.ok).toBe(false);
-			if (!stepLevel.ok) expect(stepLevel.errors).toContain("workflow.steps[0].forEach.concurrency > 1 requires subagent delegation");
-
-			const defaultLevel = validateWorkflow({
-				name: "conc-default",
-				defaults: { delegation: { skill: "builder" } },
-				steps: [{ id: "a", prompt: "work", forEach: { items: () => ["x"], concurrency: 2 } }],
-			});
-			expect(defaultLevel.ok).toBe(false);
-			if (!defaultLevel.ok) expect(defaultLevel.errors).toContain("workflow.steps[0].forEach.concurrency > 1 requires subagent delegation");
-		});
-
-		it("accepts concurrency > 1 with subagent delegation", () => {
+		it("accepts concurrency greater than one without inspecting delegation", () => {
 			const workflow = {
-				name: "conc-ok",
-				steps: [{ id: "a", prompt: "work", delegation: { subagent: "cmux" }, forEach: { items: () => ["x"], concurrency: 4 } }],
+				name: "parallel-request",
+				steps: [{ id: "items", prompt: "Use subagents for {item}", forEach: { items: () => ["a"], concurrency: 4 } }],
 			};
 			expect(validateWorkflow(workflow)).toEqual({ ok: true, workflow });
 		});

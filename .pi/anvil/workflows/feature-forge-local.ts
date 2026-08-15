@@ -6,7 +6,6 @@ export default defineWorkflow({
 	name: "feature-forge-local",
 	description: "Research-backed, test-first feature implementation with verification, coverage, review, and issue capture.",
 	defaults: {
-		delegation: "auto",
 		onFail: "stop",
 		maxLoops: 10,
 	},
@@ -71,9 +70,7 @@ Requirements:
 			id: "review-code",
 			title: "Review code and record non-blockers",
 			model,
-			// Run review independently from the implementation context when a subagent backend is available.
-			delegation: "auto",
-			prompt: `Review the changes made for this feature request:
+			prompt: `Use a fresh review subagent to review the changes made for this feature request:
 {input}
 
 Requirements:

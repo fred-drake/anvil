@@ -78,8 +78,8 @@ Validation must enforce exactly one of `prompt` / `uses`.
   (`postSummary`, `src/engine.ts:196`) and sets terminal status/widget state
   (`setStatus`/`setWidget`), which would interleave a "done/failed" summary mid-parent-run
   and clobber the parent's step widget. The sub-run wrapper should:
-  - pass `exec`, `sendInstruction`, `waitForTurnComplete`, `awaitVerdict`, `runSubagent`,
-    and `notify` through unchanged,
+  - pass `exec`, `sendInstruction`, `waitForTurnComplete`, `awaitVerdict`, and `notify`
+    through unchanged,
   - pass `checkpoint` through with `parentRunId` stamped (see below),
   - suppress or prefix `setStatus`/`setWidget` (the parent's step UI already shows the
     `uses` step as running),
@@ -88,8 +88,7 @@ Validation must enforce exactly one of `prompt` / `uses`.
 - The sub-run's `RunSummary` (`src/engine.ts:107`) becomes the step's captured output
   (the shipped step outputs): use `summary.failureReason` or a rendered digest. A failed
   sub-run fails the
-  parent step (then normal `onFail` policy applies), matching how a failed subagent step is
-  handled (`src/engine.ts:272`).
+  parent step, then its normal `onFail` policy applies.
 
 ### Checkpoint nesting
 

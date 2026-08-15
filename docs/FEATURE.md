@@ -21,21 +21,18 @@ at the bottom.
 📄 **Detailed plan:** [`features/05-dry-run-plan.md`](features/05-dry-run-plan.md)
 
 **Why:** `validate` confirms a workflow is structurally sound but does not show how it
-will actually behave. Delegation `auto` resolves differently depending on environment
-(`HERDR_ENV`, `CMUX_SHELL_INTEGRATION`), and per-step and retry model selections are
-easy to get wrong. A dry-run that prints the resolved plan catches "this won't delegate
-the way I think" before a real run burns time and tokens.
+will actually behave. Per-step and retry model selections, check types, and failure
+policies are easy to get wrong. A dry-run that prints the effective plan catches these
+mistakes before a real run burns time and tokens.
 
-**Current state:** `resolveStepDelegation` (`src/prompts.ts`) and
-`resolveStepModelSelection` (`src/engine.ts`) already compute these; nothing surfaces
-the resolved values.
+**Current state:** `resolveStepModelSelection` (`src/engine.ts`) already computes model
+selection; nothing surfaces the effective values alongside checks and failure policies.
 
 **Design sketch:**
 - Add `/anvil plan <name>` (or a `--plan` flag on `validate`) that prints, per step:
-  effective model/thinking, resolved delegation (and which backend `auto` lands on in
-  the current environment), check types and their `onFail` policies, and any
+  effective model/thinking, check types and their `onFail` policies, and any
   `retryModelSelections` that would apply.
-- No side effects; never spawns subagents or runs commands.
+- No side effects; never sends harness instructions or runs commands.
 
 **Files:** `src/index.ts`, `src/validate.ts`, `src/ui.ts`, `test/validate.test.ts`,
 `test/anvil-command.test.ts`, `README.md`.
@@ -107,8 +104,8 @@ user-defined hook surface.
 **Why:** Individual steps and checks have timeouts, but a whole run can loop within its
 `maxLoops` budgets for a long time. A global ceiling gives unattended runs a hard stop.
 
-**Current state:** `timeoutMs` exists per deterministic check and per agent check, and
-`subagentTimeoutMs` per step, but there is no workflow-wide limit.
+**Current state:** `timeoutMs` exists per deterministic check and per agent check, but
+there is no workflow-wide limit.
 
 **Design sketch:**
 - Add a top-level `limits` block (`maxDurationMs` and/or a total-retry budget) to
@@ -183,8 +180,9 @@ records.
   templating, and `outputFrom` deterministic capture. Plan:
   [`features/shipped-step-outputs.md`](features/shipped-step-outputs.md).
 - **Per-item fan-out (`forEach` steps)** — shipped in `3fe8f83`.
-  Runs one subagent attempt per deterministic item with per-item retries, templating,
-  checks, and progress. Plan: [`features/07-per-item-fanout.md`](features/07-per-item-fanout.md).
+  Runs one deterministic harness turn per item with per-item retries, templating, checks,
+  and progress; each prompt may ask the harness to use subagents. Plan:
+  [`features/07-per-item-fanout.md`](features/07-per-item-fanout.md).
 - **`/anvil history` and per-run reports** — shipped in `40379ca`.
   Provides bounded checkpoint-backed run history and detailed markdown reports. Plan:
   [`features/02-history-and-run-reports.md`](features/02-history-and-run-reports.md).

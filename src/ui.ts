@@ -88,7 +88,7 @@ export function formatStepWidget(
 }
 
 export function renderSummaryMarkdown(summary: RunSummary): string {
-	const evidence = summary.evidence ?? { subagentSessions: [] };
+	const evidence = summary.evidence ?? {};
 	const stateIcon = summary.state === "succeeded" ? "✅" : summary.state === "failed" ? "❌" : "⏹";
 	const lines = [
 		`${stateIcon} **Anvil workflow \`${summary.workflowName}\` ${summary.state}**`,
@@ -116,9 +116,6 @@ export function renderSummaryMarkdown(summary: RunSummary): string {
 	lines.push(formatWorkspaceState(evidence.workspaceEnd));
 	if (evidence.workspaceEnd?.changedFiles.length) {
 		lines.push("Workspace files changed (may include pre-existing changes):", ...evidence.workspaceEnd.changedFiles.map((file) => `- \`${file}\``));
-	}
-	if (evidence.subagentSessions.length > 0) {
-		lines.push("Subagent sessions:", ...evidence.subagentSessions.map((file) => `- \`${file}\``));
 	}
 	lines.push(`Detailed report: \`/anvil report ${summary.runId}\``);
 	return lines.join("\n");
@@ -183,9 +180,6 @@ export function renderRunReport(report: RunReport): string {
 	lines.push("", "## Workspace", formatWorkspaceState(report.workspaceState));
 	if (report.workspaceState?.changedFiles.length) {
 		lines.push("Workspace files changed (may include pre-existing changes):", ...report.workspaceState.changedFiles.slice(0, HISTORY_LIMITS.pathCount).map((file) => `- \`${escapePipes(file)}\``));
-	}
-	if (report.subagentSessions.length > 0) {
-		lines.push("", "## Subagent sessions", ...report.subagentSessions.slice(0, HISTORY_LIMITS.pathCount).map((file) => `- \`${escapePipes(file)}\``));
 	}
 	if (report.failureReason) lines.push("", `Failure: ${escapePipes(report.failureReason)}`);
 	if (report.truncation.length > 0) lines.push("", "## Truncated report data", ...report.truncation.map((notice) => `- ${escapePipes(notice)}`));

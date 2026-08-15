@@ -1,103 +1,14 @@
 import { mkdir, mkdtemp, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import piAnvil, { __testing__ } from "../src/index.ts";
-import { INDEPENDENT_REVIEW_MODE, INDEPENDENT_REVIEW_PASS_REASON, INDEPENDENT_REVIEW_TOOL_NAMES } from "../src/subagent/child.ts";
-import { readIndependentReviewVerdict } from "../src/subagent/runner.ts";
-
-const ORIGINAL_HERDR_ENV = process.env.HERDR_ENV;
-const ORIGINAL_CMUX_SHELL_INTEGRATION = process.env.CMUX_SHELL_INTEGRATION;
-const ORIGINAL_CMUX_SOCKET_PATH = process.env.CMUX_SOCKET_PATH;
-const ORIGINAL_SUBAGENT_SESSION = process.env.PI_ANVIL_SUBAGENT_SESSION;
-const ORIGINAL_SUBAGENT_MODE = process.env.PI_ANVIL_SUBAGENT_MODE;
-const ORIGINAL_REVIEW_ROOT = process.env.PI_ANVIL_REVIEW_ROOT;
-const CHILD_REGISTRATION_KEY = Symbol.for("@fred-drake/anvil/subagent-child-registered");
 
 let root: string | undefined;
-
-beforeEach(() => {
-	delete process.env.HERDR_ENV;
-	delete process.env.CMUX_SHELL_INTEGRATION;
-	delete process.env.CMUX_SOCKET_PATH;
-	delete process.env.PI_ANVIL_SUBAGENT_SESSION;
-	delete process.env.PI_ANVIL_SUBAGENT_MODE;
-	delete process.env.PI_ANVIL_REVIEW_ROOT;
-	delete (globalThis as Record<symbol, unknown>)[CHILD_REGISTRATION_KEY];
-});
 
 afterEach(async () => {
 	if (root) await rm(root, { recursive: true, force: true });
 	root = undefined;
-	restoreEnv("HERDR_ENV", ORIGINAL_HERDR_ENV);
-	restoreEnv("CMUX_SHELL_INTEGRATION", ORIGINAL_CMUX_SHELL_INTEGRATION);
-	restoreEnv("CMUX_SOCKET_PATH", ORIGINAL_CMUX_SOCKET_PATH);
-	restoreEnv("PI_ANVIL_SUBAGENT_SESSION", ORIGINAL_SUBAGENT_SESSION);
-	restoreEnv("PI_ANVIL_SUBAGENT_MODE", ORIGINAL_SUBAGENT_MODE);
-	restoreEnv("PI_ANVIL_REVIEW_ROOT", ORIGINAL_REVIEW_ROOT);
-	delete (globalThis as Record<symbol, unknown>)[CHILD_REGISTRATION_KEY];
-});
-
-describe("Anvil subagent mode", () => {
-	it("does not replace normal delegated-child workspace tools with review tools", async () => {
-		root = await mkdtemp(join(tmpdir(), "anvil-step-child-"));
-		process.env.PI_ANVIL_SUBAGENT_SESSION = join(root, "session.jsonl");
-		const pi = {
-			registerTool: vi.fn(),
-			registerMessageRenderer: vi.fn(),
-			on: vi.fn(),
-			registerCommand: vi.fn(),
-		} as any;
-
-		piAnvil(pi);
-
-		expect(pi.registerTool).not.toHaveBeenCalled();
-		expect(pi.on).toHaveBeenCalledOnce();
-		expect(pi.on).toHaveBeenCalledWith("agent_end", expect.any(Function));
-	});
-
-	it("registers review child behavior once and wires its verdict tool to the sidecar writer", async () => {
-		root = await mkdtemp(join(tmpdir(), "anvil-child-"));
-		const sessionFile = join(root, "session.jsonl");
-		process.env.PI_ANVIL_SUBAGENT_SESSION = sessionFile;
-		process.env.PI_ANVIL_SUBAGENT_MODE = INDEPENDENT_REVIEW_MODE;
-		process.env.PI_ANVIL_REVIEW_ROOT = root;
-		type RegisteredTool = { name: string; execute: (toolCallId: string, params: any) => Promise<unknown> };
-		const registeredTools: RegisteredTool[] = [];
-		let verdictTool: RegisteredTool | undefined;
-		const pi = {
-			registerTool: vi.fn((tool: RegisteredTool) => {
-				registeredTools.push(tool);
-				if (tool.name === "anvil_verdict") verdictTool = tool;
-			}),
-			registerMessageRenderer: vi.fn(),
-			on: vi.fn(),
-			registerCommand: vi.fn(),
-		} as any;
-
-		// Pi may discover the package extension in addition to the launcher's
-		// explicit `-e index.ts`; together they must still register only once.
-		piAnvil(pi);
-		piAnvil(pi);
-
-		expect(pi.registerTool).toHaveBeenCalledTimes(INDEPENDENT_REVIEW_TOOL_NAMES.length);
-		expect(registeredTools.map((tool) => tool.name).sort()).toEqual([...INDEPENDENT_REVIEW_TOOL_NAMES].sort());
-		expect(verdictTool).toEqual(expect.objectContaining({ name: "anvil_verdict" }));
-		await verdictTool!.execute("tool-call", {
-			check_id: "workflow:step:quality",
-			pass: true,
-			reason: "Artifacts satisfy the criteria.",
-		});
-		await expect(readIndependentReviewVerdict(sessionFile, "workflow:step:quality")).resolves.toEqual({
-			checkId: "workflow:step:quality",
-			pass: true,
-			reason: INDEPENDENT_REVIEW_PASS_REASON,
-		});
-		expect(pi.on).toHaveBeenCalledOnce();
-		expect(pi.on).toHaveBeenCalledWith("agent_end", expect.any(Function));
-		expect(pi.registerMessageRenderer).not.toHaveBeenCalled();
-		expect(pi.registerCommand).not.toHaveBeenCalled();
-	});
 });
 
 describe("/anvil validate command", () => {
@@ -404,106 +315,6 @@ describe("/anvil status command", () => {
 
 		await command!.handler("abort", ctx);
 		for (const callback of events.get("agent_end") ?? []) callback();
-	});
-});
-
-describe("/anvil independent-review preflight", () => {
-	it("ignores an unavailable backend for a check with main fallback when another review is required", () => {
-		process.env.CMUX_SOCKET_PATH = "/tmp/cmux.sock";
-		const notify = vi.fn();
-		const workflow = {
-			name: "mixed-review",
-			steps: [{
-				id: "implement",
-				prompt: "Implement",
-				checks: [
-					{ type: "agent", prompt: "Required", review: { subagent: "cmux" } },
-					{ type: "agent", prompt: "Optional", review: { subagent: "herdr" }, reviewFallback: "main" },
-				],
-			}],
-		} as any;
-
-		expect(__testing__.preflightSubagentBackends(workflow, { ui: { notify } } as any)).toBe(true);
-		expect(notify).not.toHaveBeenCalled();
-	});
-
-	it("defers unavailable required reviews to gate handling", () => {
-		const notify = vi.fn();
-		const workflow = {
-			name: "required-review",
-			steps: [{
-				id: "implement",
-				prompt: "Implement",
-				checks: [{ type: "agent", prompt: "Review", review: { subagent: "cmux" } }],
-			}],
-		} as any;
-
-		expect(__testing__.preflightSubagentBackends(workflow, { ui: { notify } } as any)).toBe(true);
-		expect(notify).not.toHaveBeenCalled();
-	});
-
-	it("allows an unavailable review backend only with explicit main fallback", async () => {
-		root = await mkdtemp(join(tmpdir(), "anvil-review-fallback-"));
-		const project = join(root, "project");
-		const workflowsDir = join(project, ".pi", "anvil", "workflows");
-		await mkdir(workflowsDir, { recursive: true });
-		await writeFile(
-			join(workflowsDir, "review-fallback.ts"),
-			`export default {
-				name: "review-fallback",
-				steps: [{
-					id: "implement",
-					prompt: "Implement",
-					runInMain: true,
-					checks: [{
-						type: "agent",
-						prompt: "Review",
-						review: { subagent: "herdr" },
-						reviewFallback: "main",
-					}],
-				}],
-			};`,
-			"utf8",
-		);
-
-		const events = new Map<string, Array<(...args: any[]) => void>>();
-		let commandHandler: ((args: string, ctx: any) => Promise<void>) | undefined;
-		const notify = vi.fn();
-		const pi = {
-			registerTool: vi.fn(),
-			registerMessageRenderer: vi.fn(),
-			on: vi.fn((event: string, callback: (...args: any[]) => void) => {
-				events.set(event, [...(events.get(event) ?? []), callback]);
-			}),
-			registerCommand: vi.fn((_name: string, command: { handler: typeof commandHandler }) => {
-				commandHandler = command.handler;
-			}),
-			sendUserMessage: vi.fn(() => {
-				for (const callback of events.get("agent_start") ?? []) callback();
-				for (const callback of events.get("agent_end") ?? []) callback();
-			}),
-			sendMessage: vi.fn(),
-			exec: vi.fn(async () => ({ stdout: "", stderr: "", code: 0 })),
-			appendEntry: vi.fn(),
-			getThinkingLevel: vi.fn(() => "medium"),
-			setThinkingLevel: vi.fn(),
-			setModel: vi.fn(async () => true),
-		} as any;
-		piAnvil(pi);
-
-		await commandHandler!("run review-fallback task", {
-			cwd: project,
-			model: { provider: "openai", id: "default" },
-			modelRegistry: { getAll: () => [{ provider: "openai", id: "default" }] },
-			ui: { notify, setStatus: vi.fn(), setWidget: vi.fn() },
-			isIdle: vi.fn(() => true),
-			hasPendingMessages: vi.fn(() => false),
-		});
-		await waitUntil(() => pi.sendMessage.mock.calls.some(([message]) => message.customType === "anvil-summary"));
-
-		expect(notify).toHaveBeenCalledWith(expect.stringMatching(/^Started Anvil workflow/), "info");
-		expect(notify).not.toHaveBeenCalledWith(expect.stringMatching(/herdr independent review backend/i), "error");
-		expect(pi.sendUserMessage).toHaveBeenCalledWith(expect.stringContaining("Implement"));
 	});
 });
 
@@ -837,12 +648,6 @@ describe("Feature 3 Phase 1 resume-across-edits", () => {
 		const summaries = pi.sendMessage.mock.calls.filter(([message]) => message.customType === "anvil-summary").map(([message]) => String(message.content)).join("\n");
 		expect(summaries).not.toContain("resume-secret");
 	});
-
-	it("does not alter independent-review isolation boundaries during resume recovery", () => {
-		expect(INDEPENDENT_REVIEW_TOOL_NAMES).toContain("anvil_verdict");
-		expect(INDEPENDENT_REVIEW_TOOL_NAMES).not.toContain("bash");
-		expect(INDEPENDENT_REVIEW_MODE).toBe("review");
-	});
 });
 
 async function writeDemoWorkflow(project: string): Promise<void> {
@@ -921,14 +726,6 @@ describe("/anvil run --watch (Phase 2)", () => {
 		expect(source).toContain("[redacted]");
 	});
 
-	it("does not weaken independent-review minimal environment, shell startup hardening, mutation-tool allowlist, or realpath-confined cwd after reload", async () => {
-		const runner = await readFile(join(process.cwd(), "src", "subagent", "runner.ts"), "utf8");
-		expect(runner).toContain('"/usr/bin/env"');
-		expect(runner).toContain("/bin/bash --noprofile --norc");
-		expect(INDEPENDENT_REVIEW_TOOL_NAMES).not.toContain("edit");
-		expect(INDEPENDENT_REVIEW_TOOL_NAMES).not.toContain("write");
-	});
-
 	it("does not persist inherited provider or cloud secrets into watch UI messages, checkpoints, or history", async () => {
 		const discovery = await readFile(join(process.cwd(), "src", "discovery.ts"), "utf8");
 		const engine = await readFile(join(process.cwd(), "src", "engine.ts"), "utf8");
@@ -1000,9 +797,4 @@ async function waitUntil(predicate: () => boolean): Promise<void> {
 		await new Promise((resolve) => setTimeout(resolve, 5));
 	}
 	throw new Error("condition was not met before timeout");
-}
-
-function restoreEnv(name: "HERDR_ENV" | "CMUX_SHELL_INTEGRATION", value: string | undefined): void {
-	if (value === undefined) delete process.env[name];
-	else process.env[name] = value;
 }

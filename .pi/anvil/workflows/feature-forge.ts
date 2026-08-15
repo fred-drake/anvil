@@ -22,7 +22,6 @@ export default defineWorkflow({
 	name: "feature-forge",
 	description: "Research-backed, security-reviewed, test-first feature implementation with focused verification, coverage, review, and issue capture.",
 	defaults: {
-		delegation: "auto",
 		onFail: "stop",
 		maxLoops: implementationLoopLimit,
 	},
@@ -49,8 +48,7 @@ Requirements:
 			id: "review-security-design",
 			title: "Review security design before implementation",
 			model,
-			delegation: "auto",
-			prompt: `For this feature request:
+			prompt: `Use a fresh review subagent to review the proposed security design for this feature request:
 {input}
 
 Review the proposed plan before tests or implementation begin.
@@ -93,8 +91,7 @@ Requirements:
 		{
 			id: "review-round-context",
 			title: "Record review round context",
-			runInMain: true,
-			prompt: `Create the persistent context for the next implementation and specialist-review round. Do not modify files or evaluate the feature.
+			prompt: `Do this directly in the main agent; do not delegate it. Create the persistent context for the next implementation and specialist-review round. Do not modify files or evaluate the feature.
 
 The zero-based remediation-loop count is {loop}:
 - 0: output "ROUND 1" and "Blocker ledger: none yet."
@@ -191,9 +188,7 @@ Requirements:
 				{ retry: 1, model: "openai-codex/gpt-5.6-sol:medium" },
 				{ retry: 2, model: "openai-codex/gpt-5.6-sol:high" },
 			],
-			// Run each specialist review independently before the aggregate gate decides whether to remediate.
-			delegation: "auto",
-			prompt: `Review the changes made for this feature request:
+			prompt: `Use a fresh review subagent to review the changes made for this feature request:
 {input}
 
 Focus only on correctness and contracts.
@@ -217,8 +212,7 @@ Requirements:
 				{ retry: 1, model: "openai-codex/gpt-5.6-sol:medium" },
 				{ retry: 2, model: "openai-codex/gpt-5.6-sol:high" },
 			],
-			delegation: "auto",
-			prompt: `Review the changes made for this feature request:
+			prompt: `Use a fresh review subagent to review the changes made for this feature request:
 {input}
 
 Focus only on security and privacy.
@@ -242,8 +236,7 @@ Requirements:
 				{ retry: 1, model: "openai-codex/gpt-5.6-sol:medium" },
 				{ retry: 2, model: "openai-codex/gpt-5.6-sol:high" },
 			],
-			delegation: "auto",
-			prompt: `Review the changes made for this feature request:
+			prompt: `Use a fresh review subagent to review the changes made for this feature request:
 {input}
 
 Focus only on performance and reliability.
@@ -267,8 +260,7 @@ Requirements:
 				{ retry: 1, model: "openai-codex/gpt-5.6-sol:medium" },
 				{ retry: 2, model: "openai-codex/gpt-5.6-sol:high" },
 			],
-			delegation: "auto",
-			prompt: `Review the changes made for this feature request:
+			prompt: `Use a fresh review subagent to review the changes made for this feature request:
 {input}
 
 Focus only on tests, maintainability, and documentation.
@@ -292,8 +284,7 @@ Requirements:
 				{ retry: 1, model: "openai-codex/gpt-5.6-sol:medium" },
 				{ retry: 2, model: "openai-codex/gpt-5.6-sol:high" },
 			],
-			delegation: "auto",
-			prompt: `Aggregate the specialist reviews for this feature request:
+			prompt: `Use a fresh review subagent to aggregate the specialist reviews for this feature request:
 {input}
 
 Authoritative review round:

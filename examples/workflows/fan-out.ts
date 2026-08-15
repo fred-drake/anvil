@@ -5,15 +5,14 @@ import { defineWorkflow } from "anvil";
  *
  * The plan step enumerates the files to touch and writes them, one per line, to a scratch
  * file that a deterministic check verifies is non-empty. The fan-out step then reads that
- * file mechanically and runs its prompt once per line in a fresh subagent session, so each
- * subagent gets one small, self-contained task ("write test stubs for {item}") instead of one
- * monolithic task. Retries, feedback, and model escalation all apply per item.
+ * file mechanically and asks the harness to manage delegation once per line, so each item is
+ * one small, self-contained task ("write test stubs for {item}") instead of one monolithic
+ * task. Retries, feedback, and model escalation all apply per item.
  */
 export default defineWorkflow({
 	name: "fan-out",
-	description: "Enumerate files deterministically, then write test stubs for each file in its own subagent.",
+	description: "Enumerate files deterministically, then use harness-managed delegation to write test stubs for each file.",
 	defaults: {
-		delegation: "auto",
 		maxLoops: 2,
 	},
 	steps: [
@@ -37,10 +36,9 @@ export default defineWorkflow({
 		{
 			id: "stubs",
 			title: "Write unit test stubs",
-			// One fresh subagent session per file — context never accumulates across items.
-			delegation: { subagent: "cmux" },
+			// The harness decides how to delegate each self-contained item.
 			// {item} is the current line; {itemIndex} is zero-based; {itemCount} is the total.
-			prompt: "Write unit test stubs for {item} (file {itemIndex} of {itemCount}). Do not implement the tests, only the stubs.",
+			prompt: "Use subagents to write unit test stubs for {item} (file {itemIndex} of {itemCount}). Do not implement the tests, only the stubs.",
 			forEach: {
 				// Enumerate mechanically from the gated plan output — no model judgment in the loop.
 				items: { command: "cat /tmp/anvil-fanout-files.txt", parse: "lines" },

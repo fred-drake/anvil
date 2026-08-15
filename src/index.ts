@@ -21,17 +21,7 @@ import {
 	toAnvilCheckpoint,
 } from "./history.ts";
 import { VerdictBus } from "./gates.ts";
-import { buildSubagentResultMessage, workflowSubagentBackends } from "./prompts.ts";
-import { cmuxUnavailableMessage, isCmuxAvailable } from "./subagent/cmux.ts";
-import anvilSubagentChild from "./subagent/child.ts";
-import { herdrUnavailableMessage, isHerdrAvailable } from "./subagent/herdr.ts";
-import {
-	createCmuxReviewSubagentRunner,
-	createCmuxSubagentRunner,
-	runHerdrReviewSubagent,
-	runHerdrSubagent,
-} from "./subagent/runner.ts";
-import type { WorkflowDefinition, WorkflowSubagentBackend } from "./types.ts";
+import type { WorkflowDefinition } from "./types.ts";
 import { renderRunHistoryTable, renderRunReport, renderRunStatus, renderSummaryMarkdown } from "./ui.ts";
 
 const baseDir = dirname(fileURLToPath(import.meta.url));
@@ -101,20 +91,10 @@ type TurnWaiter = {
 /* c8 ignore start -- Pi extension registration and command/UI wiring are exercised through integration-style tests; pure internals remain covered directly. */
 /* v8 ignore start -- Pi extension registration and command/UI wiring are exercised through integration-style tests; pure internals remain covered directly. */
 export default function piAnvil(pi: ExtensionAPI) {
-	// The launcher explicitly loads this entrypoint for source/dev reliability.
-	// A global registration guard inside child.ts makes simultaneous discovery
-	// idempotent while leaving every other user extension available.
-	if (process.env.PI_ANVIL_SUBAGENT_SESSION) {
-		anvilSubagentChild(pi);
-		return;
-	}
-
 	let activeRun: ActiveRun | undefined;
 	const verdictBus = new VerdictBus();
 	const outputBus = new OutputBus();
 	const turnWaiters = new Set<TurnWaiter>();
-	const runCmuxSubagent = createCmuxSubagentRunner();
-	const runCmuxReviewSubagent = createCmuxReviewSubagentRunner();
 
 	pi.registerTool(createAnvilVerdictTool(verdictBus));
 	pi.registerTool(createAnvilOutputTool(outputBus));
@@ -238,8 +218,6 @@ export default function piAnvil(pi: ExtensionAPI) {
 			});
 			const pinnedSource = watch ? await pinWorkflowSource(workflow) : undefined;
 
-			if (!preflightSubagentBackends(workflow.workflow, ctx)) return;
-
 			if (!ctx.isIdle()) await ctx.waitForIdle();
 			if (controller.signal.aborted) return;
 
@@ -250,8 +228,6 @@ export default function piAnvil(pi: ExtensionAPI) {
 				verdictBus,
 				outputBus,
 				turnWaiters,
-				runCmuxSubagent,
-				runCmuxReviewSubagent,
 				(snapshot) => updateActiveRunProgress(getActiveRun, setActiveRun, runId, snapshot),
 			);
 			launched = true;
@@ -340,8 +316,6 @@ export default function piAnvil(pi: ExtensionAPI) {
 				progress: initialRunProgress(workflow.workflow),
 			});
 
-			if (!preflightSubagentBackends(workflow.workflow, ctx)) return;
-
 			if (!ctx.isIdle()) await ctx.waitForIdle();
 			if (controller.signal.aborted) return;
 
@@ -352,8 +326,6 @@ export default function piAnvil(pi: ExtensionAPI) {
 				verdictBus,
 				outputBus,
 				turnWaiters,
-				runCmuxSubagent,
-				runCmuxReviewSubagent,
 				(snapshot) => updateActiveRunProgress(getActiveRun, setActiveRun, runId, snapshot),
 			);
 			launched = true;
@@ -477,8 +449,6 @@ function createEngineHost(
 	verdictBus: VerdictBus,
 	outputBus: OutputBus,
 	turnWaiters: Set<TurnWaiter>,
-	runCmuxSubagent: typeof runHerdrSubagent,
-	runCmuxReviewSubagent: typeof runHerdrReviewSubagent,
 	setRunProgress: (snapshot: RunProgressSnapshot) => void,
 ): EngineHost {
 	let pendingTurn: Promise<void> | undefined;
@@ -509,63 +479,6 @@ function createEngineHost(
 				model,
 				(selection.thinkingLevel ?? defaultThinkingLevel) as ReturnType<ExtensionAPI["getThinkingLevel"]>,
 			);
-		},
-		isReviewSubagentAvailable(backend) {
-			return isSubagentBackendAvailable(backend);
-		},
-		async runReviewSubagent(request, signal) {
-			const selectedModel = request.model
-				? resolveModelReference(request.model, ctx.modelRegistry.getAll())
-				: ctx.model;
-			if (!selectedModel) throw new Error("Independent review requires a selected model.");
-			const launch = {
-				name: `Anvil review: ${request.stepId}`,
-				task: request.task,
-				cwd: request.cwd,
-				runId: request.runId,
-				stepId: request.stepId,
-				checkId: request.checkId,
-				model: `${selectedModel.provider}/${selectedModel.id}`,
-				thinkingLevel: request.thinkingLevel ?? defaultThinkingLevel,
-				timeoutMs: request.timeoutMs,
-			};
-			return request.backend === "herdr"
-				? runHerdrReviewSubagent(launch, signal)
-				: runCmuxReviewSubagent(launch, signal);
-		},
-		async runSubagent(request, signal) {
-			const launch = {
-				name: `Anvil: ${request.stepTitle}`,
-				task: request.task,
-				cwd: request.cwd,
-				runId: request.runId,
-				stepId: request.stepId,
-				model: request.model,
-				thinkingLevel: request.thinkingLevel,
-				timeoutMs: request.timeoutMs,
-			};
-			const result =
-				request.backend === "herdr" ? await runHerdrSubagent(launch, signal) : await runCmuxSubagent(launch, signal);
-			// Inject the outcome into the main session's context (no extra turn)
-			// so agent checks and later steps know what the subagent did.
-			pi.sendMessage(
-				{
-					customType: "anvil-subagent-result",
-					content: buildSubagentResultMessage({
-						workflowName: request.workflowName,
-						stepTitle: request.stepTitle,
-						stepIndex: request.stepIndex,
-						stepCount: request.stepCount,
-						backend: request.backend,
-						summary: result.summary,
-						sessionFile: result.sessionFile,
-					}),
-					display: true,
-					details: { ...result, stepId: request.stepId, runId: request.runId },
-				},
-				{ triggerTurn: false },
-			);
-			return result;
 		},
 		sendInstruction(instruction) {
 			pendingTurn = waitForTurnCompletion(ctx, controller.signal, turnWaiters);
@@ -653,27 +566,6 @@ async function captureGitWorkspaceState(
 		changedFiles: changedFiles.slice(0, 100),
 		changedFileCount: changedFiles.length,
 	};
-}
-
-function preflightSubagentBackends(workflow: WorkflowDefinition, ctx: ExtensionCommandContext): boolean {
-	const unavailableDelegation = workflowSubagentBackends(workflow).find((backend) => !isSubagentBackendAvailable(backend));
-	if (unavailableDelegation) {
-		ctx.ui.notify(
-			`Workflow "${workflow.name}" declares ${unavailableDelegation} subagent delegation. ${subagentUnavailableMessage(unavailableDelegation)}`,
-			"error",
-		);
-		return false;
-	}
-
-	return true;
-}
-
-function isSubagentBackendAvailable(backend: WorkflowSubagentBackend): boolean {
-	return backend === "herdr" ? isHerdrAvailable() : isCmuxAvailable();
-}
-
-function subagentUnavailableMessage(backend: WorkflowSubagentBackend): string {
-	return backend === "herdr" ? herdrUnavailableMessage() : cmuxUnavailableMessage();
 }
 
 async function handleList(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise<void> {
@@ -1034,4 +926,4 @@ function cleanupTurnWaiter(waiter: TurnWaiter): void {
 }
 
 
-export const __testing__ = { resolveModelReference, parseAnvilArgs, parseRunArgs, preflightSubagentBackends };
+export const __testing__ = { resolveModelReference, parseAnvilArgs, parseRunArgs };

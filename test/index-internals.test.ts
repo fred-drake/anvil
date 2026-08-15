@@ -47,14 +47,6 @@ describe("index internals", () => {
 		expect(config).not.toMatch(/exclude:\s*\[[^\]]*["']src\/index\.ts["']/s);
 	});
 
-	it("routes declarative subagent backends through backend-specific launchers", () => {
-		const source = readFileSync(new URL("../src/index.ts", import.meta.url), "utf8");
-
-		expect(source).toMatch(/isHerdrAvailable/);
-		expect(source).toMatch(/runHerdrSubagent/);
-		expect(source).toMatch(/herdr[\s\S]{0,160}runHerdrSubagent|runHerdrSubagent[\s\S]{0,160}herdr/);
-	});
-
 	it("keeps verdict and turn-waiter state scoped to each extension instance", () => {
 		const source = readFileSync(new URL("../src/index.ts", import.meta.url), "utf8");
 		const beforeEntrypoint = source.slice(0, source.indexOf("export default function piAnvil"));

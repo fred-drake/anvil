@@ -2,27 +2,29 @@
 
 > **Status: shipped** in `3fe8f83`. This plan is retained as a design record; see
 > [Shipped](../FEATURE.md#shipped) in the backlog.
+>
+> **Current runtime:** Anvil starts one harness turn per item. A per-item prompt may ask
+> the harness to use subagents, but Anvil does not launch children or guarantee fresh
+> sessions. `concurrency > 1` currently degrades to sequential execution with a warning.
 
 Back to [Feature backlog](../FEATURE.md#shipped).
 
 ## Summary
 
-Let a step declare a list of items and have the **engine** run the step's prompt once
-per item, each in a fresh subagent session, with `{item}` available to the prompt and
-checks. This moves work decomposition out of the model and into a deterministic loop,
-which is the key unlock for small-context local models: each subagent gets one small,
-self-contained task ("write test stubs for `{item}`") instead of one monolithic task
-("write test stubs for the feature").
+Let a step declare a list of items and have the **engine** start one harness turn per
+item, with `{item}` available to the prompt and checks. This moves work decomposition
+out of the model and into a deterministic loop, which is the key unlock for small-context
+local models: each turn gets one small, self-contained task ("write test stubs for
+`{item}`") instead of one monolithic task ("write test stubs for the feature").
 
 ## Motivation
 
 A step today is one prompt executed by one agent session. For a feature-sized task on a
 frontier model that is fine; on a small local model (e.g. qwen3.6-27B) a step like
 "write unit test stubs for this feature" exceeds what the model can hold and plan at
-once. Prompting the model itself to "spawn subagents per file" hands orchestration to
-the least reliable component in the system — a 27B model will do that dance correctly
-sometimes and choke other times, while a loop in `src/engine.ts` does it correctly every
-time.
+once. Asking one model turn to discover and track the entire file list makes decomposition
+unreliable, while a loop in `src/engine.ts` enumerates the items consistently every
+time. Individual item prompts may still request subagents from the active harness.
 
 Per-item fan-out also makes retries dramatically more effective: `onFail` feedback
 becomes "this one file failed for this reason" instead of "somewhere in the feature,
@@ -40,10 +42,8 @@ stubborn file can escalate to a stronger model while the rest stay cheap.
 
 ## Current state (grounding)
 
-- The run loop executes exactly one prompt per step: delegation resolves at
-  `src/engine.ts:225`, a subagent step runs once via `host.runSubagent`
-  (`src/engine.ts:249`), a main-session step sends one instruction
-  (`src/engine.ts:302`), then checks run in a loop (`src/engine.ts:319`).
+- The run loop sends each step or item prompt through `host.sendInstruction`, waits for
+  the harness turn to complete, then runs checks.
 - Retry state is keyed per step, not per item: loop counts use
   `"<checkId>-><stepId>"` keys (`src/engine.ts:447`), feedback is stored in
   `feedbackByStep` keyed by step id (`src/engine.ts:461`, consumed at
@@ -53,11 +53,6 @@ stubborn file can escalate to a stronger model while the rest stay cheap.
   `src/prompts.ts:35`/`:60` for shell-safe command templating).
 - The engine already has `host.exec` (`src/engine.ts:64`) — a deterministic command
   item source needs no new host capability.
-- The cmux runner already supports multiple concurrent surfaces via
-  `createCmuxSubagentRunner` / `createSurfaceManager` (`src/subagent/runner.ts:120`),
-  so bounded parallel fan-out has infrastructure to build on. Each subagent run is
-  already a fresh session with its own session/task files
-  (`runSubagentWithBackend`, `src/subagent/runner.ts:151`).
 - `AnvilCheckpoint` (`src/engine.ts:121`) has no item fields; `formatStatus` /
   `formatStepWidget` (`src/ui.ts`) render step/check progress only.
 
@@ -145,20 +140,18 @@ position in the run loop, `src/engine.ts:214`).
 ### Execution semantics (`src/engine.ts`)
 
 Refactor first: extract the body of the run loop that executes one unit of work —
-build instruction → delegate (subagent or main) → run checks → resolve failure —
-into a helper (`executeStepAttempt`) that takes a `WorkflowContext`. The existing
-single-prompt path calls it once; the `forEach` path calls it per item. This refactor
-is the bulk of the change and should be a pure-move commit before behavior changes.
+build instruction → run a harness turn → run checks → resolve failure — into a helper
+(`executeStepAttempt`) that takes a `WorkflowContext`. The existing single-prompt path
+calls it once; the `forEach` path calls it per item. This refactor is the bulk of the
+change and should be a pure-move commit before behavior changes.
 
 Per item, the engine:
 
 1. Builds the context via `makeWorkflowContext` (`src/engine.ts:577`) with
    `item`/`itemIndex`/`itemCount` set.
-2. Executes the prompt through the step's resolved delegation. Subagent delegation is
-   the intended mode (fresh session per item — context never accumulates across
-   items). Main-session and skill delegation still work but run items as sequential
-   instructions in the main session; document that this defeats the context-isolation
-   purpose for local models.
+2. Sends the prompt as one harness turn. If the prompt requests subagents, harness
+   skills or plugins decide whether and how to honor it; Anvil does not guarantee child
+   isolation or a fresh session.
 3. Runs the step's checks with the same item context, so
    `command: "npx vitest run {item}"` gates just that item's work.
 
@@ -196,23 +189,18 @@ settle.
 
 ### Concurrency
 
-- Default `1`. Local single-GPU inference serializes anyway; sequential is also the
-  only mode where main-session delegation is coherent.
-- `concurrency > 1` requires subagent delegation: enforce at validation when the
-  step's delegation is statically `{ subagent }` or `"none"`/skill (error for the
-  latter two), and at runtime when `"auto"` resolves to a non-subagent mode —
-  degrade to sequential with a `host.notify` warning rather than failing.
-- Implementation is a small worker pool over the item list. The cmux surface manager
-  (`src/subagent/runner.ts:120`) already handles multiple live surfaces; verify herdr
-  equivalently or cap it to 1 with a documented note.
-- Model-selection host calls (`applyStepModelSelection`) are main-session-only state
-  and must not be touched from concurrent item workers; subagent model selection
-  already travels per-request (`src/engine.ts:260`), which is safe.
+- Default `1`. Local single-GPU inference serializes anyway.
+- `concurrency > 1` is accepted but currently degrades to sequential execution with a
+  `host.notify` warning. It does not require any declarative agent mode.
+- A future parallel implementation would need a harness-level concurrency contract;
+  Anvil must not infer child lifecycle from prompt wording.
+- Model-selection host calls (`applyStepModelSelection`) affect the main harness turn
+  and must not be mutated concurrently.
 
 ### Output capture (step-outputs interaction)
 
-The step's captured output is a per-item digest, built from each item's subagent
-summary (or check outcome for main-session items):
+The step's captured output is a per-item digest built from each item's harness-reported
+`anvil_output` value or check outcome:
 
 ```
 [1/12] src/foo.ts — ok: <first line of summary>
@@ -243,7 +231,6 @@ overwrite per item; re-running the whole step rebuilds the digest.
   `validateKnownKeys` like every other block.
 - Inside a `forEach` step, every check `onFail.goto` (including step- and
   workflow-level defaults that would apply) must equal the step's own id.
-- `concurrency > 1` with statically non-subagent delegation is an error (see above).
 - Steps elsewhere in the workflow may not `goto` **into** a `forEach` step from
   outside? — No: allow it; re-entering re-runs the whole fan-out, which is coherent.
   Only jumps *out from within* are restricted.
@@ -268,7 +255,7 @@ overwrite per item; re-running the whole step rebuilds the digest.
 
 ## Testing
 
-All deterministic per `AGENTS.md`: fake host, no real subagents, no real shell.
+All deterministic per `AGENTS.md`: fake host, no real harness children, no real shell.
 
 - `test/engine.test.ts`: function and command item sources (fake `host.exec`); items
   run in order; per-item context values; empty list passes with notify; `maxItems`
@@ -282,9 +269,9 @@ All deterministic per `AGENTS.md`: fake host, no real subagents, no real shell.
   newlines); `{loop}` reflects the item's count; placeholders outside `forEach`
   expand empty.
 - `test/validate.test.ts`: schema rules, goto-out-of-forEach rejection,
-  concurrency/delegation conflicts, unknown keys.
+  concurrency fallback behavior, unknown keys.
 - Concurrency (when landed): pool never exceeds the cap; failure under `"stop"`
-  stops new launches but awaits in-flight items; main-session degrade path notifies.
+  stops new turns but awaits in-flight items; sequential fallback notifies.
 
 ## Docs to update
 
@@ -310,8 +297,8 @@ backlog cross-links (Features 3, 8).
   injection is prevented by reusing `renderCommandPlaceholders`, but prompts
   containing adversarial file names are still model-visible. Same trust posture as
   `{input}` today; document it.
-- **Concurrency vs. mux backends.** Multiple simultaneous surfaces are proven for
-  cmux, unverified for herdr; ship sequential first, gate parallel per backend.
+- **Concurrency ownership.** Parallel turns require an explicit harness-level contract;
+  keep execution sequential until that boundary exists.
 - **Partial-failure semantics** (`onItemExhausted: "continue"`) put failure
   information in the output digest rather than the run state. If real usage wants
   structured per-item results, that is step-outputs follow-up territory (structured

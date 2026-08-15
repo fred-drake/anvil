@@ -1,10 +1,19 @@
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
+import { join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { loadWorkflowFile } from "../src/discovery.ts";
 import { resolveStepModelSelection, type StepModelSelection } from "../src/engine.ts";
-import { workflowSubagentBackends } from "../src/prompts.ts";
 import { defineWorkflow, type WorkflowDefinition } from "../src/types.ts";
+
+const repositoryRoot = fileURLToPath(new URL("..", import.meta.url));
+
+function filesUnder(directory: string): string[] {
+	return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
+		const path = join(directory, entry.name);
+		return entry.isDirectory() ? filesUnder(path) : [path];
+	});
+}
 
 describe("workflow public contract", () => {
 	it("documents the status command as a read-only current-run query", () => {
@@ -50,16 +59,21 @@ describe("workflow public contract", () => {
 		expect(source).toMatch(/retryModelSelections\??\s*:\s*WorkflowRetryModelSelection\[\]/);
 	});
 
-	it("exposes herdr as a supported declarative subagent backend", () => {
-		const workflow = defineWorkflow({
-			name: "herdr-contract",
-			defaults: { delegation: { subagent: "herdr" } },
-			steps: [{ id: "one", prompt: "Use herdr" }],
-		});
-		const source = readFileSync(new URL("../src/types.ts", import.meta.url), "utf8");
-
-		expect(workflow.defaults?.delegation).toEqual({ subagent: "herdr" });
-		expect(source).toMatch(/WorkflowSubagentBackend\s*=\s*["']cmux["']\s*\|\s*["']herdr["']/);
+	it("keeps subagent orchestration out of the public workflow contract", () => {
+		const types = readFileSync(new URL("../src/types.ts", import.meta.url), "utf8");
+		for (const removed of [
+			"WorkflowSubagentBackend",
+			"WorkflowDelegation",
+			"AgentReviewMode",
+			"delegation?: WorkflowDelegation",
+			"agent?: string",
+			"review?: AgentReviewMode",
+			"subagentTimeoutMs",
+			"reviewFallback",
+			"runInMain",
+		]) {
+			expect(types).not.toContain(removed);
+		}
 	});
 
 	it("exposes step outputs and deterministic output capture in the public contract", () => {
@@ -69,6 +83,46 @@ describe("workflow public contract", () => {
 		expect(source).toMatch(/interface\s+WorkflowStep[\s\S]*outputFrom\??\s*:\s*string/);
 	});
 
+	it("captures the demo summary before its agent check reviews it", async () => {
+		const file = fileURLToPath(new URL("../examples/workflows/demo.ts", import.meta.url));
+		const result = await loadWorkflowFile(file, "project");
+		const summarize = result.workflow?.steps.find((step) => step.id === "summarize");
+		const review = summarize?.checks?.find((check) => check.id === "summary-quality");
+
+		expect(result.errors).toBeUndefined();
+		expect(summarize?.prompt).toEqual(expect.any(String));
+		expect(summarize?.prompt).toEqual(
+			expect.stringContaining('Call the anvil_output tool exactly once with step_id "summarize" and output set to the summary.'),
+		);
+		expect(review?.type).toBe("agent");
+		expect(review?.prompt).toEqual(expect.stringContaining("{outputs.summarize}"));
+	});
+
+	it("keeps live docs and examples free of obsolete isolated observable-result claims", () => {
+		const docsRoot = join(repositoryRoot, "docs");
+		const historicalRoot = `${join(docsRoot, "superpowers")}${sep}`;
+		const files = [
+			join(repositoryRoot, "README.md"),
+			...filesUnder(docsRoot),
+			...filesUnder(join(repositoryRoot, "examples")),
+			...filesUnder(join(repositoryRoot, "skills")),
+		]
+			.filter((file) => !file.startsWith(historicalRoot))
+			.filter((file) => /\.(?:md|ts)$/.test(file));
+		const obsoleteClaims = [
+			/observable[- ]result/i,
+			/(?:bounded[,\s-]+isolated|isolated[,\s-]+bounded)[^\n]{0,80}(?:review|prompt|payload)|(?:review|prompt|payload)[^\n]{0,80}(?:bounded[,\s-]+isolated|isolated[,\s-]+bounded)/i,
+			/review-only[^\n]{0,80}filesystem|filesystem[^\n]{0,80}review-only/i,
+		];
+
+		for (const file of files) {
+			const source = readFileSync(file, "utf8");
+			for (const claim of obsoleteClaims) {
+				expect(source, `${relative(repositoryRoot, file)} contains ${claim}`).not.toMatch(claim);
+			}
+		}
+	});
+
 	it("exposes agent check timeout settings in the public contract", () => {
 		const source = readFileSync(new URL("../src/types.ts", import.meta.url), "utf8");
 
@@ -76,67 +130,15 @@ describe("workflow public contract", () => {
 		expect(source).toMatch(/interface\s+AgentCheck[\s\S]*Defaults to 300_000/);
 	});
 
-	it("exposes and documents independent agent-review checks", () => {
-		const types = readFileSync(new URL("../src/types.ts", import.meta.url), "utf8");
+	it("documents prompt-owned subagent intent", () => {
 		const readme = readFileSync(new URL("../README.md", import.meta.url), "utf8");
 		const skill = readFileSync(new URL("../skills/anvil-workflow-builder/SKILL.md", import.meta.url), "utf8");
-		const demo = readFileSync(new URL("../examples/workflows/demo.ts", import.meta.url), "utf8");
-
-		expect(types).toMatch(
-			/export\s+type\s+AgentReviewMode\s*=\s*\|?\s*\{\s*subagent\s*:\s*WorkflowSubagentBackend\s*\}\s*\|\s*\{\s*subagent\s*:\s*["']auto["']\s*\}/,
-		);
-		expect(types).toMatch(/interface\s+AgentCheck[\s\S]*review\??\s*:\s*AgentReviewMode/);
-		expect(types).toMatch(/interface\s+AgentCheck[\s\S]*reviewFallback\??\s*:\s*["']main["']\s*\|\s*["']fail["']/);
-		expect(readme).toMatch(/reviewFallback[\s\S]{0,240}fail/i);
-		expect(readme).toMatch(/independent review[\s\S]{0,240}(main|fallback)/i);
-		expect(readme).toMatch(/read-only[^\n]+(artifact|workspace)|(?:artifact|workspace)[^\n]+read-only/i);
-		expect(readme).toMatch(/realpath-resolved workflow cwd/i);
-		expect(readme).toMatch(/deny symlink escapes/i);
-		expect(readme).toMatch(/block secret-like paths/i);
-		expect(skill).toContain("reviewFallback");
-		expect(skill).toMatch(/read-only[^\n]+(artifact|workspace)|(?:artifact|workspace)[^\n]+read-only/i);
-		expect(skill).toMatch(/realpath-confined[^\n]+symlink escapes[^\n]+secret-like paths/i);
-		expect(demo).toMatch(/summary-quality[\s\S]{0,240}review\s*:\s*\{\s*subagent/);
-	});
-
-	it("documents the independent-review grading and sidecar trust boundary", () => {
-		const readme = readFileSync(new URL("../README.md", import.meta.url), "utf8");
-
-		expect(readme).toMatch(/main-session grading[\s\S]{0,300}(?:in-process|VerdictBus)/i);
-		expect(readme).toMatch(/independent(?:-review)? grading[\s\S]{0,300}(?:child|reviewer)[^\n]*sidecar[^\n]*parent/i);
-		expect(readme).toContain("{ check_id, pass, reason }");
-		expect(readme).toMatch(/parent accepts exactly `?\{ check_id, pass, reason \}`?/i);
-		expect(readme).toMatch(/rejects payloads with extra\s+fields or invalid\s+(?:fields|field types)/i);
-		expect(readme).toMatch(/missing[^\n]+malformed[^\n]+duplicate[^\n]+wrong[^\n]+check_id[^\n]+transport errors/i);
-	});
-
-	it("documents the Phase 6 infrastructure-failure matrix for independent reviews", () => {
-		const readme = readFileSync(new URL("../README.md", import.meta.url), "utf8");
-		const skill = readFileSync(new URL("../skills/anvil-workflow-builder/SKILL.md", import.meta.url), "utf8");
-
 		for (const document of [readme, skill]) {
-			expect(document).toMatch(/(?:backend (?:is )?unavailable|no backend (?:is )?available)[\s\S]{0,280}(?:failed gate|onFail|fallback)/i);
-			expect(document).toMatch(/(?:launch|timeout|transport)[\s\S]{0,280}infrastructure error/i);
-			expect(document).toMatch(/reviewFallback[\s\S]{0,280}main/i);
+			expect(document).toMatch(/prompt[^\n]+use subagents|use subagents[^\n]+prompt/i);
+			expect(document).toMatch(/harness[^\n]+skills|skills[^\n]+harness/i);
+			expect(document).not.toContain('delegation: { subagent: "cmux" }');
+			expect(document).not.toContain('review: { subagent: "auto" }');
 		}
-	});
-
-	it("documents the bounded, sanitized observable-result boundary for independent reviews", () => {
-		const readme = readFileSync(new URL("../README.md", import.meta.url), "utf8");
-		const skill = readFileSync(new URL("../skills/anvil-workflow-builder/SKILL.md", import.meta.url), "utf8");
-		const demo = readFileSync(new URL("../examples/workflows/demo.ts", import.meta.url), "utf8");
-
-		for (const document of [readme, skill]) {
-			expect(document).toMatch(/observable (?:step )?result/i);
-			expect(document).toMatch(/8\s*(?:KiB|KB|\*\s*1024)/i);
-			expect(document).toMatch(/UTF-?8.*byte/i);
-			expect(document).toMatch(/deterministic.*tail|tail.*deterministic/i);
-			expect(document).toMatch(/not.*(?:transcript|reasoning|terminal|provider|prior)/i);
-			expect(document).toMatch(/(?:redact|secret)/i);
-			expect(document).toMatch(/256[^\n]+launcher[^\n]+(?:path|session)/i);
-			expect(document).toMatch(/(?:basename|task\/session)[^\n]+255\s*bytes/i);
-		}
-		expect(demo).toMatch(/summary-quality[\s\S]{0,360}(?:observable|independent review)/i);
 	});
 
 	it("parses pi's colon thinking shorthand without treating slash as a thinking separator", () => {
@@ -171,22 +173,6 @@ describe("workflow public contract", () => {
 		expect(resolve(step, 1)).toEqual({ model: "strong/model", thinkingLevel: "high" });
 		expect(resolve(step, 2)).toEqual({ model: "strong/model", thinkingLevel: "high" });
 		expect(resolve(step, 3)).toEqual({ model: "strongest/model", thinkingLevel: "medium" });
-	});
-
-	it("reports auto-detected default subagent backends for workflow preflight", () => {
-		withSubagentEnv({ CMUX_SHELL_INTEGRATION: "1" }, () => {
-			expect(workflowSubagentBackends(defineWorkflow({ name: "default-auto", steps: [{ id: "one", prompt: "a" }] }))).toEqual([
-				"cmux",
-			]);
-		});
-
-		withSubagentEnv({ HERDR_ENV: "1", CMUX_SHELL_INTEGRATION: "1" }, () => {
-			expect(
-				workflowSubagentBackends(
-					defineWorkflow({ name: "explicit-auto", defaults: { delegation: "auto" }, steps: [{ id: "one", prompt: "a" }] }),
-				),
-			).toEqual(["herdr"]);
-		});
 	});
 
 	it("loads the dogfood feature-forge workflow", async () => {
@@ -256,41 +242,13 @@ describe("workflow public contract", () => {
 		expect(implementation?.prompt).toEqual(expect.stringContaining("focused security remediation pass"));
 	});
 
-	it("documents herdr alongside cmux in the README", () => {
-		const readme = readFileSync(new URL("../README.md", import.meta.url), "utf8");
-
-		expect(readme).toContain('delegation: { subagent: "cmux" }');
-		expect(readme).toContain('delegation: { subagent: "herdr" }');
-		expect(readme).toMatch(/herdr/i);
-	});
-
-	it("documents auto-detected subagent defaults in the README", () => {
-		const readme = readFileSync(new URL("../README.md", import.meta.url), "utf8");
-
-		expect(readme).toContain('delegation: "auto"');
-		expect(readme).toMatch(/default[^\n]+auto|auto[^\n]+default/i);
-		expect(readme).toContain("HERDR_ENV=1");
-		expect(readme).toContain("CMUX_SHELL_INTEGRATION=1");
-	});
-
-	it("documents retry-based subagent model selection in the README", () => {
+	it("documents retry-based main-harness model selection in the README", () => {
 		const readme = readFileSync(new URL("../README.md", import.meta.url), "utf8");
 
 		expect(readme).toContain("retryModelSelections");
 		expect(readme).toMatch(/retry\s*:\s*0[^\n]+first attempt|first attempt[^\n]+retry\s*:\s*0/i);
 		expect(readme).toMatch(/highest[^\n]+retry[^\n]+less than or equal|less than or equal[^\n]+retry[^\n]+wins/i);
-		expect(readme).toMatch(/subagent[\s\S]{0,240}model|model[\s\S]{0,240}subagent/i);
-	});
-
-	it("keeps the workflow builder skill aligned with supported subagent backends", () => {
-		const source = readFileSync(new URL("../skills/anvil-workflow-builder/SKILL.md", import.meta.url), "utf8");
-
-		expect(source).toContain('delegation: { subagent: "cmux" }');
-		expect(source).toContain('delegation: { subagent: "herdr" }');
-		expect(source).toContain('delegation: "auto"');
-		expect(source).toContain("HERDR_ENV=1");
-		expect(source).toContain("CMUX_SHELL_INTEGRATION=1");
-		expect(source).toMatch(/default[^\n]+delegation:\s*"auto"|delegation:\s*"auto"[^\n]+default/i);
+		expect(readme).toMatch(/main harness turn[^\n]+model|model[^\n]+main harness turn/i);
 	});
 
 	it("keeps the workflow builder skill aligned with retry-based model selection", () => {
@@ -299,14 +257,28 @@ describe("workflow public contract", () => {
 		expect(source).toContain("retryModelSelections");
 		expect(source).toMatch(/retry\s*:\s*0[^\n]+first attempt|first attempt[^\n]+retry\s*:\s*0/i);
 		expect(source).toMatch(/retry[\s\S]{0,240}model|model[\s\S]{0,240}retry/i);
+		expect(source).toMatch(/main harness turn[^\n]+model|model[^\n]+main harness turn/i);
 	});
 
-	it("keeps workflow examples aligned with auto-detected subagent defaults", () => {
+	it("keeps executable workflows aligned with harness-managed delegation", () => {
 		const demo = readFileSync(new URL("../examples/workflows/demo.ts", import.meta.url), "utf8");
+		const fanOut = readFileSync(new URL("../examples/workflows/fan-out.ts", import.meta.url), "utf8");
 		const featureForge = readFileSync(new URL("../.pi/anvil/workflows/feature-forge.ts", import.meta.url), "utf8");
+		const featureForgeLocal = readFileSync(new URL("../.pi/anvil/workflows/feature-forge-local.ts", import.meta.url), "utf8");
 
-		expect(demo).toContain('delegation: "auto"');
-		expect(featureForge).toContain('delegation: "auto"');
+		expect(demo).toContain("Do this directly in the main agent; do not delegate it.");
+		expect(demo).toContain("Use a fresh review subagent");
+		expect(demo).toContain("anvil_verdict");
+		expect(fanOut).toContain("Use subagents to write unit test stubs for {item}");
+		expect(fanOut).toMatch(/harness-managed delegation/i);
+		expect(featureForge).toContain("Do this directly in the main agent; do not delegate it.");
+		expect(featureForge).toContain("Use a fresh review subagent");
+		expect(featureForgeLocal).toContain("Use a fresh review subagent");
+		for (const source of [demo, fanOut, featureForge, featureForgeLocal]) {
+			expect(source).not.toMatch(
+				/^\s*(?:delegation|agent|runInMain|subagentTimeoutMs|review|reviewFallback)\s*:/m,
+			);
+		}
 	});
 
 	it("keeps feature-forge prompts aligned with this TypeScript/Vitest repository", () => {
@@ -420,28 +392,3 @@ describe("workflow public contract", () => {
 		});
 	});
 });
-
-type AutoSubagentEnv = Partial<Record<"HERDR_ENV" | "CMUX_SHELL_INTEGRATION", string>>;
-
-function withSubagentEnv(env: AutoSubagentEnv, fn: () => void): void {
-	const previous: AutoSubagentEnv = {
-		HERDR_ENV: process.env.HERDR_ENV,
-		CMUX_SHELL_INTEGRATION: process.env.CMUX_SHELL_INTEGRATION,
-	};
-	delete process.env.HERDR_ENV;
-	delete process.env.CMUX_SHELL_INTEGRATION;
-	if (env.HERDR_ENV !== undefined) process.env.HERDR_ENV = env.HERDR_ENV;
-	if (env.CMUX_SHELL_INTEGRATION !== undefined) process.env.CMUX_SHELL_INTEGRATION = env.CMUX_SHELL_INTEGRATION;
-
-	try {
-		fn();
-	} finally {
-		restoreEnv("HERDR_ENV", previous.HERDR_ENV);
-		restoreEnv("CMUX_SHELL_INTEGRATION", previous.CMUX_SHELL_INTEGRATION);
-	}
-}
-
-function restoreEnv(name: keyof AutoSubagentEnv, value: string | undefined): void {
-	if (value === undefined) delete process.env[name];
-	else process.env[name] = value;
-}

@@ -12,8 +12,7 @@ unattended runs a guaranteed stop.
 ## Motivation
 
 Timeouts today are local: `DeterministicCheck.timeoutMs` and `AgentCheck.timeoutMs`
-(default 300_000, `src/gates.ts:21`/`:22`) and `subagentTimeoutMs` per step
-(`src/types.ts:93`, default 1_800_000). Retry loops are bounded per check by `maxLoops`
+(default 300_000). Retry loops are bounded per check by `maxLoops`
 (`resolveFailure`, `src/engine.ts:451`), but a workflow with several looping checks can
 still run far longer than intended. There is no single knob that says "never run longer
 than N minutes / M total retries."
@@ -57,9 +56,9 @@ per-step-overridable setting, while these are run-scoped ceilings nothing can ov
 - **Duration.** Compute `deadline = Date.parse(startedAt) + maxDurationMs`. Two layers:
   1. A cooperative check at the top of the run loop (`src/engine.ts:208`) and before each
      check (near `src/engine.ts:320`): if `Date.now() > deadline`, stop the run.
-  2. A timer that aborts the run's `AbortController` at the deadline, so a step blocked
-     inside `waitForTurnComplete` / a long `exec` / a subagent poll is interrupted too. The
-     engine does not own the controller (the host does, `src/index.ts:168`), so add an
+  2. A timer that aborts the run's `AbortController` at the deadline, so an ordinary
+     harness turn blocked inside `waitForTurnComplete` or a long `exec` is interrupted too.
+     The engine does not own the controller (the host does, `src/index.ts:168`), so add an
      internal `AbortController` in `runWorkflow` combined with `options.signal` (mirror the
      `combineAbortSignals` pattern already used in `src/gates.ts:191`), and abort it on the
      timer. This guarantees the ceiling even mid-step.
@@ -73,9 +72,9 @@ per-step-overridable setting, while these are run-scoped ceilings nothing can ov
     `src/errors.ts`, alongside `AnvilAbortError`) which the catch maps to
     `finish("failed", reason)`.
   - **A `timedOut` flag**, set just before the deadline timer aborts the internal
-    controller. This is not optional: a step blocked in `waitForTurnComplete` / `exec` /
-    a subagent poll rejects with `AnvilAbortError` when the combined signal fires (the
-    abort listeners throw it, e.g. `src/index.ts:728`), and the existing catch
+    controller. This is not optional: a step blocked in `waitForTurnComplete` or `exec`
+    rejects with `AnvilAbortError` when the combined signal fires (the abort listeners
+    throw it, e.g. `src/index.ts:728`), and the existing catch
     (`src/engine.ts:395`) would classify that as `"aborted"` via `isAnvilAbortError`.
     The catch must branch on the flag *before* the abort classification.
 
@@ -118,9 +117,9 @@ per-step-overridable setting, while these are run-scoped ceilings nothing can ov
 
 ## Risks & open questions
 
-- **Interrupting mid-step.** The cooperative check alone cannot stop a step already blocked
-  in a turn/exec/subagent poll; the internal-controller timer is what makes the ceiling
-  real. Ensure the timer is always cleared in `finish` to avoid leaks.
+- **Interrupting mid-step.** The cooperative check alone cannot stop a step already
+  blocked in a harness turn or command; the internal-controller timer is what makes the
+  ceiling real. Ensure the timer is always cleared in `finish` to avoid leaks.
 - **Abort vs. timeout semantics.** Do not let a timeout be misclassified as a user abort
   (which reports `"aborted"` and produces no status, `src/ui.ts:17`). The dedicated error
   covers cooperative checks, but only the `timedOut` flag covers deadline aborts that
@@ -128,6 +127,6 @@ per-step-overridable setting, while these are run-scoped ceilings nothing can ov
 - **Injected time source.** For testability, thread a `now()` function (or accept it on
   `RunWorkflowOptions`) instead of calling `Date.now()` inline; the engine already avoids
   hidden nondeterminism elsewhere.
-- **Open question:** should `maxTotalRetries` count only `goto` loops or also subagent
-  step retries? Start with `goto` loop counts (what `loopCounts` tracks) and document the
+- **Open question:** should `maxTotalRetries` count only `goto` loops or other retry
+  sources? Start with `goto` loop counts (what `loopCounts` tracks) and document the
   scope.

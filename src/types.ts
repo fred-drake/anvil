@@ -27,7 +27,7 @@ export type ForEachItemSource =
 export interface WorkflowForEach {
 	items: ForEachItemSource;
 	/**
-	 * Intended max concurrent item sessions. Defaults to 1 (sequential). Parallel fan-out is not
+	 * Intended max concurrent item turns. Defaults to 1 (sequential). Parallel fan-out is not
 	 * yet implemented: values > 1 are accepted but currently degrade to sequential with a warning.
 	 */
 	concurrency?: number;
@@ -55,26 +55,6 @@ export type OnFailPolicy =
 			feedback?: boolean;
 	  };
 
-/** Terminal-multiplexer backend Anvil can spawn subagent sessions in. */
-export type WorkflowSubagentBackend = "cmux" | "herdr";
-
-/** Configuration for a fresh, independent agent-check reviewer. */
-export type AgentReviewMode =
-	| { subagent: WorkflowSubagentBackend }
-	| { subagent: "auto" };
-
-export type WorkflowDelegation =
-	| "auto"
-	| "none"
-	| {
-			/** Pi skill name to prefer when delegating this workflow/step. */
-			skill: string;
-	  }
-	| {
-			/** Anvil spawns the step itself in a dedicated subagent session on this backend. */
-			subagent: WorkflowSubagentBackend;
-	  };
-
 export interface DeterministicCheck {
 	type: "deterministic";
 	id?: string;
@@ -93,16 +73,7 @@ export interface AgentCheck {
 	name?: string;
 	/** Evaluation criteria; anvil wraps this with verdict instructions. */
 	prompt: Templatable;
-	/** Subagent to delegate evaluation to; omit for main-agent evaluation. */
-	agent?: string;
-	/**
-	 * Run this check in a fresh review-only subagent. The reviewer receives only
-	 * bounded current-attempt observable output, never general workflow outputs.
-	 */
-	review?: AgentReviewMode;
-	/** Behavior when no requested review backend is available. Defaults to "fail". */
-	reviewFallback?: "main" | "fail";
-	/** Defaults to 300_000 for main-session grading and 1_800_000 for independent review. */
+	/** Defaults to 300_000. */
 	timeoutMs?: number;
 	onFail?: OnFailPolicy;
 }
@@ -110,9 +81,9 @@ export interface AgentCheck {
 export type Check = DeterministicCheck | AgentCheck;
 
 export interface WorkflowModelSelection {
-	/** Model reference. Supports pi's provider/id and optional :<thinking> shorthand. */
+	/** Model reference for the main harness turn. Supports pi's provider/id and optional :<thinking> shorthand. */
 	model?: string;
-	/** Thinking level. Omitted values keep the workflow-start or base step default. */
+	/** Main-harness thinking level. Omitted values keep the workflow-start or base step default. */
 	thinkingLevel?: WorkflowThinkingLevel;
 }
 
@@ -125,20 +96,12 @@ export interface WorkflowStep {
 	id: string;
 	title?: string;
 	prompt: Templatable;
-	/** Model reference for this step. Supports pi's provider/id and optional :<thinking> shorthand. */
+	/** Model reference for this main harness turn. Supports pi's provider/id and optional :<thinking> shorthand. */
 	model?: string;
-	/** Thinking level for this step. Omitted steps use the workflow-start default. */
+	/** Thinking level for this main harness turn. Omitted steps use the workflow-start default. */
 	thinkingLevel?: WorkflowThinkingLevel;
-	/** Retry-based model/thinking overrides. Highest retry <= current retry count wins. */
+	/** Retry-based main-harness model/thinking overrides. Highest retry <= current retry count wins. */
 	retryModelSelections?: WorkflowRetryModelSelection[];
-	/** Preferred per-step delegation mode; overrides workflow.defaults.delegation. */
-	delegation?: WorkflowDelegation;
-	/** Timeout for declarative subagent execution. Defaults to 1_800_000ms. */
-	subagentTimeoutMs?: number;
-	/** Legacy delegation hint. Prefer delegation: { skill: "..." } or delegation: "auto". */
-	agent?: string;
-	/** Main agent does the work itself. */
-	runInMain?: boolean;
 	skipIf?: (ctx: WorkflowContext) => boolean | Promise<boolean>;
 	/** Run this step's prompt once per item. */
 	forEach?: WorkflowForEach;
@@ -154,12 +117,6 @@ export interface WorkflowDefinition {
 	name: string;
 	description?: string;
 	defaults?: {
-		/** Preferred workflow-wide delegation mode; defaults to auto-detected delegation. */
-		delegation?: WorkflowDelegation;
-		/** Default timeout for declarative subagent execution. Defaults to 1_800_000ms. */
-		subagentTimeoutMs?: number;
-		/** Legacy delegation hint. Prefer delegation: { skill: "..." } or delegation: "auto". */
-		agent?: string;
 		onFail?: OnFailPolicy;
 		maxLoops?: number;
 	};

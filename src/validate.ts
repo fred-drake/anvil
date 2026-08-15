@@ -14,7 +14,7 @@ const WORKFLOW_NAME_RE = /^[a-z0-9-]+$/;
 const THINKING_LEVELS = new Set<WorkflowThinkingLevel>(["off", "minimal", "low", "medium", "high", "xhigh"]);
 
 const WORKFLOW_KEYS = new Set(["name", "description", "defaults", "steps"]);
-const DEFAULTS_KEYS = new Set(["delegation", "subagentTimeoutMs", "agent", "onFail", "maxLoops"]);
+const DEFAULTS_KEYS = new Set(["onFail", "maxLoops"]);
 const STEP_KEYS = new Set([
 	"id",
 	"title",
@@ -22,10 +22,6 @@ const STEP_KEYS = new Set([
 	"model",
 	"thinkingLevel",
 	"retryModelSelections",
-	"delegation",
-	"subagentTimeoutMs",
-	"agent",
-	"runInMain",
 	"skipIf",
 	"forEach",
 	"checks",
@@ -33,13 +29,20 @@ const STEP_KEYS = new Set([
 	"onFail",
 ]);
 const DETERMINISTIC_CHECK_KEYS = new Set(["type", "id", "name", "command", "cwd", "timeoutMs", "onFail"]);
-const AGENT_CHECK_KEYS = new Set(["type", "id", "name", "prompt", "agent", "review", "reviewFallback", "timeoutMs", "onFail"]);
-const AGENT_REVIEW_KEYS = new Set(["subagent"]);
+const AGENT_CHECK_KEYS = new Set(["type", "id", "name", "prompt", "timeoutMs", "onFail"]);
 const CHECK_KEYS = new Set([...DETERMINISTIC_CHECK_KEYS, ...AGENT_CHECK_KEYS]);
 const ON_FAIL_KEYS = new Set(["goto", "maxLoops", "onExhausted", "feedback"]);
 const RETRY_MODEL_SELECTION_KEYS = new Set(["retry", "model", "thinkingLevel"]);
 const FOR_EACH_KEYS = new Set(["items", "concurrency", "maxItems", "onItemExhausted"]);
 const FOR_EACH_ITEM_SOURCE_KEYS = new Set(["command", "parse"]);
+const REMOVED_SUBAGENT_FIELDS = new Set([
+	"delegation",
+	"agent",
+	"runInMain",
+	"subagentTimeoutMs",
+	"review",
+	"reviewFallback",
+]);
 
 export function validateWorkflow(value: unknown): ValidationResult {
 	const errors: string[] = [];
@@ -89,8 +92,12 @@ export function validateWorkflow(value: unknown): ValidationResult {
 	for (const id of duplicateCheckIds) errors.push(`duplicate check id "${id}"`);
 
 	if (value.defaults !== undefined) validateDefaults(value.defaults, errors, stepIds);
-	const workflowDefaults = isRecord(value.defaults) ? value.defaults : undefined;
-	rawSteps.forEach((step, index) => validateStep(step, index, stepIds, errors, workflowDefaults));
+	rawSteps.forEach((step, index) => {
+		validateStep(step, index, stepIds, errors);
+		if (isRecord(value.defaults) && isRecord(step) && isRecord(step.forEach)) {
+			validateForEachOnFailTarget(value.defaults, "workflow.defaults", step.id, errors);
+		}
+	});
 
 	return errors.length === 0
 		? { ok: true, workflow: value as unknown as WorkflowDefinition }
@@ -103,30 +110,15 @@ function validateDefaults(defaults: unknown, errors: string[], stepIds?: Set<str
 		return;
 	}
 	validateKnownKeys(defaults, "workflow.defaults", DEFAULTS_KEYS, errors);
-	if (defaults.delegation !== undefined) {
-		validateDelegation(defaults.delegation, "workflow.defaults.delegation", errors);
-	}
-	if (defaults.agent !== undefined && typeof defaults.agent !== "string") {
-		errors.push("workflow.defaults.agent must be a string when provided");
-	}
 	if (defaults.maxLoops !== undefined && !isNonNegativeInteger(defaults.maxLoops)) {
 		errors.push("workflow.defaults.maxLoops must be a non-negative integer when provided");
-	}
-	if (defaults.subagentTimeoutMs !== undefined && !isPositiveInteger(defaults.subagentTimeoutMs)) {
-		errors.push("workflow.defaults.subagentTimeoutMs must be a positive integer when provided");
 	}
 	if (defaults.onFail !== undefined) {
 		validateOnFailPolicy(defaults.onFail, "workflow.defaults.onFail", stepIds, errors);
 	}
 }
 
-function validateStep(
-	step: unknown,
-	index: number,
-	stepIds: Set<string>,
-	errors: string[],
-	workflowDefaults?: Record<string, unknown>,
-): void {
+function validateStep(step: unknown, index: number, stepIds: Set<string>, errors: string[]): void {
 	const path = `workflow.steps[${index}]`;
 	if (!isRecord(step)) {
 		errors.push(`${path} must be an object`);
@@ -155,36 +147,17 @@ function validateStep(
 	if (step.retryModelSelections !== undefined) {
 		validateRetryModelSelections(step.retryModelSelections, `${path}.retryModelSelections`, errors);
 	}
-	if (step.delegation !== undefined) {
-		validateDelegation(step.delegation, `${path}.delegation`, errors);
-	}
-	if (step.subagentTimeoutMs !== undefined && !isPositiveInteger(step.subagentTimeoutMs)) {
-		errors.push(`${path}.subagentTimeoutMs must be a positive integer when provided`);
-	}
-	if (step.agent !== undefined && typeof step.agent !== "string") {
-		errors.push(`${path}.agent must be a string when provided`);
-	}
-	if (step.runInMain !== undefined && typeof step.runInMain !== "boolean") {
-		errors.push(`${path}.runInMain must be a boolean when provided`);
-	}
 	if (step.skipIf !== undefined && typeof step.skipIf !== "function") {
 		errors.push(`${path}.skipIf must be a function when provided`);
 	}
 	if (step.forEach !== undefined) validateForEach(step.forEach, `${path}.forEach`, errors);
 	if (isRecord(step.forEach)) {
-		if (step.forEach.concurrency !== undefined && (step.forEach.concurrency as number) > 1) {
-			const delegation = step.delegation ?? workflowDefaults?.delegation;
-			if (step.runInMain || delegation === "none" || (isRecord(delegation) && "skill" in delegation)) {
-				errors.push(`${path}.forEach.concurrency > 1 requires subagent delegation`);
-			}
-		}
 		if (step.outputFrom !== undefined) {
 			errors.push(`${path}.outputFrom is not supported on a forEach step (its output is a per-item digest)`);
 		}
 		// A goto out of a half-finished fan-out cannot be represented; step- and workflow-level
 		// defaults that would apply to an item's checks must target the forEach step itself.
 		validateForEachOnFailTarget(step, path, step.id, errors);
-		if (workflowDefaults) validateForEachOnFailTarget(workflowDefaults, "workflow.defaults", step.id, errors);
 	}
 	if (step.onFail !== undefined) {
 		validateOnFailPolicy(step.onFail, `${path}.onFail`, stepIds, errors);
@@ -335,48 +308,8 @@ function validateAgentCheck(check: Record<string, unknown>, path: string, errors
 	if (!isTemplatable(typed.prompt)) {
 		errors.push(`${path}.prompt must be a string or function`);
 	}
-	if (check.agent !== undefined && typeof check.agent !== "string") {
-		errors.push(`${path}.agent must be a string when provided`);
-	}
-	if (check.review !== undefined) validateAgentReview(check.review, `${path}.review`, errors);
-	if (check.reviewFallback !== undefined) {
-		if (check.review === undefined) {
-			errors.push(`${path}.reviewFallback requires review to be configured`);
-		}
-		if (check.reviewFallback !== "main" && check.reviewFallback !== "fail") {
-			errors.push(`${path}.reviewFallback must be "main" or "fail" when provided`);
-		}
-	}
 	if (check.timeoutMs !== undefined && !isPositiveInteger(check.timeoutMs)) {
 		errors.push(`${path}.timeoutMs must be a positive integer when provided`);
-	}
-}
-
-function validateAgentReview(review: unknown, path: string, errors: string[]): void {
-	if (!isRecord(review)) {
-		errors.push(`${path} must be an object when provided`);
-		return;
-	}
-	validateKnownKeys(review, path, AGENT_REVIEW_KEYS, errors);
-	if (review.subagent !== "cmux" && review.subagent !== "herdr" && review.subagent !== "auto") {
-		errors.push(`${path}.subagent must be "cmux", "herdr", or "auto"`);
-	}
-}
-
-function validateDelegation(delegation: unknown, path: string, errors: string[]): void {
-	if (delegation === "auto" || delegation === "none") return;
-	if (!isRecord(delegation)) {
-		errors.push(`${path} must be "auto", "none", { skill: string }, or { subagent: "cmux" | "herdr" }`);
-		return;
-	}
-	if ("subagent" in delegation) {
-		if (delegation.subagent !== "cmux" && delegation.subagent !== "herdr") {
-			errors.push(`${path}.subagent must be "cmux" or "herdr"`);
-		}
-		return;
-	}
-	if (typeof delegation.skill !== "string" || delegation.skill.length === 0) {
-		errors.push(`${path}.skill must be a non-empty string`);
 	}
 }
 
@@ -416,7 +349,13 @@ function validateOnFailPolicy(
 
 function validateKnownKeys(record: Record<string, unknown>, path: string, allowed: Set<string>, errors: string[]): void {
 	for (const key of Object.keys(record)) {
-		if (!allowed.has(key)) errors.push(`${path}.${key} is not recognized`);
+		if (allowed.has(key)) continue;
+		const fieldPath = `${path}.${key}`;
+		errors.push(
+			REMOVED_SUBAGENT_FIELDS.has(key)
+				? `${fieldPath} was removed; describe desired subagent behavior directly in the step or agent-check prompt`
+				: `${fieldPath} is not recognized`,
+		);
 	}
 }
 

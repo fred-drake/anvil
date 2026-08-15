@@ -56,7 +56,6 @@ export interface RunReport extends RunHistoryEntry {
 	/** Bounded, validated, display-safe checkpoints retained for compatibility and evidence rendering. */
 	checkpoints: AnvilCheckpoint[];
 	steps: RunStepReport[];
-	subagentSessions: string[];
 	workspaceState?: WorkspaceState;
 }
 
@@ -109,8 +108,6 @@ export function toAnvilCheckpoint(entry: unknown): AnvilCheckpoint | undefined {
 	if (data.checkType === "deterministic" || data.checkType === "agent") checkpoint.checkType = data.checkType;
 	copyString(data, checkpoint, "command");
 	copyInteger(data, checkpoint, "timeoutMs");
-	if (isString(data.sessionFile)) checkpoint.sessionFile = sanitizePath(data.sessionFile);
-	if (Array.isArray(data.sessionFiles)) checkpoint.sessionFiles = sanitizePaths(data.sessionFiles);
 	const workspace = sanitizeWorkspace(data.workspaceState);
 	if (workspace) checkpoint.workspaceState = workspace;
 	const loops = sanitizeLoopCounts(data.loopCounts);
@@ -197,7 +194,7 @@ export function buildRunReports(entries: unknown[]): RunReport[] {
 
 /** Produce bounded lightweight history rows in chronological first-seen order. */
 export function buildRunHistory(entries: unknown[]): RunHistoryEntry[] {
-	return buildRunReports(entries).map(({ checkpoints: _checkpoints, steps: _steps, subagentSessions: _sessions, workspaceState: _workspace, ...entry }) => entry);
+	return buildRunReports(entries).map(({ checkpoints: _checkpoints, steps: _steps, workspaceState: _workspace, ...entry }) => entry);
 }
 
 function newRunReport(checkpoint: AnvilCheckpoint): RunReport {
@@ -212,7 +209,6 @@ function newRunReport(checkpoint: AnvilCheckpoint): RunReport {
 		truncation: [],
 		checkpoints: [],
 		steps: [],
-		subagentSessions: [],
 	};
 }
 
@@ -256,9 +252,6 @@ function applyCheckpoint(report: RunReport, checkpoint: AnvilCheckpoint): void {
 		step.durationMs = durationMs(step.startedAt, step.endedAt);
 	}
 	if (checkpoint.loopCounts) report.loopTotals = { ...checkpoint.loopCounts };
-	addSession(report, checkpoint.sessionFile);
-	for (const sessionFile of checkpoint.sessionFiles ?? []) addSession(report, sessionFile);
-	if ((checkpoint.sessionFiles?.length ?? 0) >= HISTORY_LIMITS.pathCount) addTruncation(report, "Subagent session paths were truncated.");
 	if (checkpoint.workspaceState) {
 		report.workspaceState = checkpoint.workspaceState;
 		if (checkpoint.workspaceState.changedFiles.length >= HISTORY_LIMITS.pathCount && checkpoint.workspaceState.changedFileCount > checkpoint.workspaceState.changedFiles.length) {
@@ -363,12 +356,6 @@ function copyReason(source: Record<string, unknown>, target: AnvilCheckpoint, ke
 function copyInteger(source: Record<string, unknown>, target: AnvilCheckpoint, key: "stepIndex" | "itemIndex" | "itemCount" | "timeoutMs"): void {
 	const value = source[key];
 	if (Number.isInteger(value) && (value as number) >= 0) target[key] = value as number;
-}
-
-function addSession(report: RunReport, sessionFile: string | undefined): void {
-	if (!sessionFile || report.subagentSessions.includes(sessionFile)) return;
-	if (report.subagentSessions.length < HISTORY_LIMITS.pathCount) report.subagentSessions.push(sessionFile);
-	else addTruncation(report, "Subagent session paths were truncated.");
 }
 
 function addTruncation(report: RunReport, message: string): void {

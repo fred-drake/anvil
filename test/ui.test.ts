@@ -179,7 +179,7 @@ describe("renderRunStatus", () => {
 
 describe("renderSummaryMarkdown", () => {
 	it("renders successful, failed, and aborted summaries with escaped check details", () => {
-		const base: RunSummary = {
+		const base = {
 			runId: "run",
 			workflowName: "wf",
 			input: "task",
@@ -203,7 +203,7 @@ describe("renderSummaryMarkdown", () => {
 					],
 				},
 			],
-		};
+		} as unknown as RunSummary;
 
 		const failed = renderSummaryMarkdown(base);
 		expect(failed).toContain("❌ **Anvil workflow `wf` failed**");
@@ -211,6 +211,8 @@ describe("renderSummaryMarkdown", () => {
 		expect(failed).toContain("✔ ok\\|check<br>✖ bad — line1 line2");
 		expect(failed).toContain("Failure: bad | reason");
 		expect(failed).toContain("Workspace files changed (may include pre-existing changes):\n- `src/ui.ts`");
+		expect(failed).not.toContain("Subagent sessions");
+		expect(failed).not.toContain("/tmp/review.jsonl");
 		expect(failed).toContain("Detailed report: `/anvil report run`");
 		expect(renderSummaryMarkdown({ ...base, state: "succeeded", failureReason: undefined })).toContain("✅");
 		expect(renderSummaryMarkdown({ ...base, state: "aborted", failureReason: undefined })).toContain("⏹");
@@ -219,7 +221,7 @@ describe("renderSummaryMarkdown", () => {
 
 describe("run report renderers", () => {
 	it("renders a concise history and detailed evidence report", () => {
-		const report: RunReport = {
+		const report = {
 			runId: "run-1",
 			workflowName: "forge",
 			input: "feature",
@@ -246,13 +248,14 @@ describe("run report renderers", () => {
 					workspaceState: { head: "abc", fingerprint: "123456789012345", changedFiles: ["src/report.ts"], changedFileCount: 1 },
 				},
 			],
-		};
+		} as unknown as RunReport;
 
 		expect(renderRunHistoryTable([report])).toContain("`run-1`");
 		const rendered = renderRunReport(report);
 		expect(rendered).toContain("`npm test`");
 		expect(rendered).toContain("- `src/report.ts`");
-		expect(rendered).toContain("- `/tmp/review.jsonl`");
+		expect(rendered).not.toContain("Subagent sessions");
+		expect(rendered).not.toContain("/tmp/review.jsonl");
 	});
 
 	it("renders a per-step report table with reconstructed status, retries, timings, and deterministic and agent verdicts", () => {
@@ -296,23 +299,24 @@ describe("run report renderers", () => {
 		expect(rendered).toContain("x'¦");
 	});
 
-	it("redacts secret-like inputs, commands, reasons, workspace paths, session paths, and raw provider or child diagnostics", () => {
+	it("redacts secret-like inputs, commands, reasons, workspace paths, and raw provider or child diagnostics", () => {
 		const [report] = buildRunReports([{ customType: "anvil-run", data: {
 			runId: "run", workflowName: "forge", input: "TOKEN=input-secret", phase: "run_end", timestamp: "2026-01-01T00:00:00Z", finalState: "failed",
-			reason: "provider error raw child diagnostic TOKEN=reason-secret", sessionFiles: ["/home/me/.ssh/id_rsa"],
+			reason: "provider error raw child diagnostic TOKEN=reason-secret",
 			workspaceState: { head: "abc", fingerprint: "hash", changedFiles: [".env"], changedFileCount: 1 },
 		} }]);
 		const rendered = renderRunReport(report!);
 
-		expect(rendered).not.toMatch(/input-secret|reason-secret|id_rsa|\.env/);
+		expect(rendered).not.toMatch(/input-secret|reason-secret|\.env/);
 		expect(rendered).toContain("[external diagnostic redacted]");
 		expect(rendered).toContain("[sensitive path redacted]");
 	});
 
-	it("caps rendered strings, check rows, changed files, and session paths while showing a truncation notice", () => {
+	it("caps rendered strings, check rows, and changed files while showing a truncation notice", () => {
 		const report = buildRunReports(Array.from({ length: 2_010 }, (_, index) => ({ customType: "anvil-run", data: {
 			runId: "run", workflowName: "forge", input: "task", phase: "check_result", timestamp: "2026-01-01T00:00:00Z", stepId: "verify",
-			checkId: `check-${index}`, checkType: "deterministic", pass: true, sessionFiles: Array.from({ length: 30 }, (__, path) => `/tmp/${path}`),
+			checkId: `check-${index}`, checkType: "deterministic", pass: true,
+			workspaceState: { head: "abc", fingerprint: "hash", changedFiles: Array.from({ length: 30 }, (__, path) => `src/${path}.ts`), changedFileCount: 30 },
 		} })))[0]!;
 		const rendered = renderRunReport(report);
 

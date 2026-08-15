@@ -1,14 +1,9 @@
 import type { EngineHost } from "./engine.ts";
-import { abortError, isReviewSubagentUnavailableError } from "./errors.ts";
-import { captureObservableStepResult, type ObservableStepResult } from "./observable-result.ts";
-import { independentReviewReason } from "./subagent/child.ts";
+import { abortError } from "./errors.ts";
 import {
 	buildAgentCheckInstruction,
-	buildIndependentReviewTask,
 	buildVerdictReprompt,
-	normalizeIndependentReviewIdentity,
 	renderCommandTemplatable,
-	resolveReviewSubagentBackend,
 } from "./prompts.ts";
 import type {
 	AgentCheck,
@@ -17,7 +12,6 @@ import type {
 	WorkflowContext,
 	WorkflowDefinition,
 	WorkflowStep,
-	WorkflowThinkingLevel,
 } from "./types.ts";
 
 export interface Verdict {
@@ -36,13 +30,10 @@ export interface GateResult {
 	command?: string;
 	timeoutMs?: number;
 	output?: string;
-	/** Review child session used as evidence for independently reviewed checks. */
-	sessionFile?: string;
 }
 
 export const DEFAULT_DETERMINISTIC_TIMEOUT_MS = 300_000;
 export const DEFAULT_AGENT_VERDICT_TIMEOUT_MS = 300_000;
-export const DEFAULT_INDEPENDENT_REVIEW_TIMEOUT_MS = 1_800_000;
 
 export class VerdictBus {
 	private waiters = new Map<
@@ -149,62 +140,7 @@ export async function executeAgentCheck(args: {
 	checkId: string;
 	signal?: AbortSignal;
 	timeoutMs?: number;
-	runId?: string;
-	model?: string;
-	thinkingLevel?: WorkflowThinkingLevel;
-	/** Prompt-only output explicitly captured from the current step attempt. */
-	observableResult?: ObservableStepResult;
 }): Promise<GateResult> {
-	if (args.check.review) {
-		const backend = resolveReviewSubagentBackend(args.check.review);
-		const available = backend !== undefined &&
-			args.host.runReviewSubagent !== undefined &&
-			(args.host.isReviewSubagentAvailable?.(backend) ?? true);
-		if (!available) {
-			if (args.check.reviewFallback !== "main") return unavailableReviewGateResult(args.check, args.checkId);
-		} else {
-			const reviewCheckId = normalizeIndependentReviewIdentity(args.checkId);
-			const task = await buildIndependentReviewTask({
-				workflow: args.workflow,
-				step: args.step,
-				check: args.check,
-				ctx: args.ctx,
-				checkId: reviewCheckId,
-				observableResult: args.observableResult ?? captureObservableStepResult(undefined),
-			});
-			try {
-				const result = await args.host.runReviewSubagent!({
-					runId: normalizeIndependentReviewIdentity(args.runId ?? args.checkId.split(":", 1)[0]!),
-					workflowName: normalizeIndependentReviewIdentity(args.workflow.name),
-					stepId: normalizeIndependentReviewIdentity(args.step.id),
-					checkId: reviewCheckId,
-					backend,
-					task,
-					cwd: args.ctx.cwd,
-					model: args.model,
-					thinkingLevel: args.thinkingLevel,
-					timeoutMs: args.check.timeoutMs ?? DEFAULT_INDEPENDENT_REVIEW_TIMEOUT_MS,
-				}, args.signal);
-				return {
-					...verdictToGateResult(
-						args.check,
-						args.checkId,
-						{
-							checkId: args.checkId,
-							pass: result.pass,
-							reason: independentReviewReason(result.pass),
-						},
-						args.check.timeoutMs ?? DEFAULT_INDEPENDENT_REVIEW_TIMEOUT_MS,
-					),
-					sessionFile: result.sessionFile,
-				};
-			} catch (error) {
-				if (!isReviewSubagentUnavailableError(error)) throw error;
-				if (args.check.reviewFallback !== "main") return unavailableReviewGateResult(args.check, args.checkId);
-			}
-		}
-	}
-
 	const firstWait = startVerdictWait(args);
 	const instruction = await buildAgentCheckInstruction({
 		workflow: args.workflow,
@@ -272,17 +208,6 @@ function combineAbortSignals(external: AbortSignal | undefined, internal: AbortS
 	if (!external) return internal;
 	if (external.aborted) return external;
 	return AbortSignal.any([external, internal]);
-}
-
-function unavailableReviewGateResult(check: AgentCheck, checkId: string): GateResult {
-	return {
-		check,
-		checkId,
-		name: checkDisplayName(check, checkId),
-		pass: false,
-		reason: `Independent review backend "${check.review!.subagent}" is unavailable.`,
-		timeoutMs: check.timeoutMs ?? DEFAULT_INDEPENDENT_REVIEW_TIMEOUT_MS,
-	};
 }
 
 function verdictToGateResult(
